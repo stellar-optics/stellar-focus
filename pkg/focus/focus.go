@@ -166,3 +166,25 @@ func guard(t TB, assertion string, fn func()) (ok bool) {
 	fn()
 	return true
 }
+
+// Encode resolves a value into its canonical base64 XDR form and its decoded
+// form, for callers building fixtures or serialising a value.
+//
+// typeName may be empty to detect the type, though naming it is better
+// wherever the caller knows it.
+func Encode(v Value, typeName string) (string, *lens.Value, error) {
+	decoded, err := coerce(v, typeName)
+	if err != nil {
+		return "", nil, err
+	}
+
+	m, ok := decoded.Raw.(encoding.BinaryMarshaler)
+	if !ok {
+		return "", nil, fmt.Errorf("a %s value cannot be re-encoded to XDR", decoded.Type)
+	}
+	raw, err := m.MarshalBinary()
+	if err != nil {
+		return "", nil, fmt.Errorf("encoding %s: %w", decoded.Type, err)
+	}
+	return base64Encode(raw), decoded, nil
+}
