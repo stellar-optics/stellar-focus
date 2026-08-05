@@ -123,3 +123,43 @@ func paymentResult(code xdr.PaymentResultCode) xdr.OperationResult {
 		},
 	}
 }
+
+// contractEvent builds a contract event with a symbol topic and an i128-free
+// u32 payload, which is enough to exercise matching without noise.
+func contractEvent(t *testing.T, topic string, data uint32) xdr.ContractEvent {
+	t.Helper()
+
+	sym := xdr.ScSymbol(topic)
+	val := xdr.Uint32(data)
+	var contractID xdr.ContractId
+	copy(contractID[:], []byte("focus-test-contract-id-32bytes!!"))
+
+	return xdr.ContractEvent{
+		Type:       xdr.ContractEventTypeContract,
+		ContractId: &contractID,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{{Type: xdr.ScValTypeScvSymbol, Sym: &sym}},
+				Data:   xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &val},
+			},
+		},
+	}
+}
+
+// buildSorobanMeta wraps events in a V3 transaction meta with a u32 return
+// value of 7.
+func buildSorobanMeta(t *testing.T, events ...xdr.ContractEvent) string {
+	t.Helper()
+
+	ret := xdr.Uint32(7)
+	return mustMarshal(t, xdr.TransactionMeta{
+		V: 3,
+		V3: &xdr.TransactionMetaV3{
+			SorobanMeta: &xdr.SorobanTransactionMeta{
+				Events:      events,
+				ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &ret},
+			},
+		},
+	})
+}
