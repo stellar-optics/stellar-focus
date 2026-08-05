@@ -1,0 +1,63 @@
+name: Feature request
+description: Suggest an assertion, a fixture source, or another capability
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        The most useful requests describe **the test you were trying to write**
+        and where focus got in the way. A concrete case is far more actionable
+        than an abstract feature.
+
+        Before opening: [docs/roadmap.md](../blob/main/docs/roadmap.md) lists
+        what is planned and what is deliberately out of scope — including
+        things that belong in the sibling
+        [stellar-xdr-lens](https://github.com/stellar-optics/stellar-xdr-lens)
+        repository instead.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request is this?
+      options:
+        - A new assertion
+        - A new ignore or normalize option
+        - A new fixture source for focus capture
+        - Better failure output for an existing assertion
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What test were you trying to write?
+      description: The actual testing task, and where focus fell short.
+      placeholder: |
+        I wanted to assert that my transaction created a specific trustline,
+        but there is no way to assert on ledger entry changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like it to look like?
+      description: Sketch the call, and what you would want it to print on failure.
+      render: go
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Would you like to implement this?
+      description: >
+        Adding an assertion is designed to be a one-file change — see
+        docs/architecture.md.
+      options:
+        - label: I would be willing to open a pull request for this
+          required: false

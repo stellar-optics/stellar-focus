@@ -1,0 +1,92 @@
+name: Bug report
+description: An assertion behaved wrongly, or its failure message was unhelpful
+title: "fix: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        **A confusing or unhelpful failure message is a bug here**, not a
+        nitpick — the output is what this library is for. If an assertion
+        failed and you could not tell why, that is worth reporting on its own.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What went wrong?
+      options:
+        - An assertion passed when it should have failed
+        - An assertion failed when it should have passed
+        - The failure message was unhelpful or misleading
+        - An assertion panicked
+        - Golden files behaved unexpectedly
+        - focus capture or focus verify misbehaved
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: test-code
+    attributes:
+      label: The test you wrote
+      description: The smallest test that shows the problem.
+      render: go
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: What it printed
+      description: The actual go test output, pasted as-is.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: >
+        For a message problem, what would have told you what you needed to
+        know?
+    validations:
+      required: true
+
+  - type: textarea
+    id: xdr
+    attributes:
+      label: XDR that reproduces it
+      description: >
+        The base64 payloads involved, if you can share them. Everything here
+        runs offline, so a payload plus the test above is usually a complete
+        reproduction.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: stellar-focus version
+      placeholder: v0.1.0
+    validations:
+      required: true
+
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: go version go1.25.0 linux/amd64
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this bug
+          required: true

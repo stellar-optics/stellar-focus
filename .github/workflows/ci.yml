@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref; the latest push is the one that matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  build:
+    name: Build and vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum \
+            || { echo "::error::go.mod/go.sum are not tidy; run 'go mod tidy'"; exit 1; }
+
+      - name: Verify formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # v7+ is required: .golangci.yml uses the golangci-lint v2 config schema,
+      # which older versions of the action cannot parse. The linter version is
+      # pinned so a lint release cannot turn CI red without a commit here.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Test with race detector and coverage
+        run: |
+          go test -race -covermode=atomic \
+            -coverprofile=coverage.out \
+            -coverpkg=./pkg/...,./internal/cli \
+            ./...
+
+      - name: Coverage summary
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          {
+            echo "### Coverage"
+            echo '```'
+            go tool cover -func=coverage.out | tail -1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  library:
+    name: Library smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Everything here is offline: no network endpoint is contacted, so an
+      # RPC outage cannot turn the build red.
+      - name: Build the focus command
+        run: go build -o focus ./cmd/focus
+
+      - name: help and version
+        run: |
+          ./focus --help > /dev/null
+          ./focus version > /dev/null
+          ./focus capture --help > /dev/null
+          ./focus verify --help > /dev/null
+
+      - name: an unknown network is rejected without a request
+        run: |
+          code=0
+          ./focus capture tx deadbeef --network wonderland --out /tmp/out > /dev/null 2>&1 || code=$?
+          if [ "$code" -eq 0 ]; then
+            echo "::error::an unknown network was accepted"
+            exit 1
+          fi
+
+      - name: the library carries no CLI framework
+        run: |
+          if go list -deps ./pkg/focus | grep -q 'spf13'; then
+            echo "::error::pkg/focus pulls in a CLI framework"
+            go list -deps ./pkg/focus | grep 'spf13'
+            exit 1
+          fi
+
+      - name: golden -focus.update round-trips
+        run: |
+          # A throwaway module proves the documented workflow works from the
+          # outside, not merely from inside this repository's own tests.
+          tmp="$(mktemp -d)"
+          mkdir -p "$tmp/testdata"
+          cat > "$tmp/go.mod" <<'GOMOD'
+          module goldencheck
+
+          go 1.25
+          GOMOD
+          cat > "$tmp/golden_test.go" <<'GOTEST'
+          package goldencheck
+
+          import (
+          	"os"
+          	"strings"
+          	"testing"
+
+          	"github.com/stellar-optics/stellar-focus/pkg/golden"
+          )
+
+          func TestGolden(t *testing.T) {
+          	b, err := os.ReadFile("envelope.txt")
+          	if err != nil {
+          		t.Fatal(err)
+          	}
+          	g := golden.New(t, golden.WithDir("testdata"), golden.WithType("TransactionEnvelope"))
+          	g.Assert("envelope", strings.TrimSpace(string(b)))
+          }
+          GOTEST
+          cp testdata/tx_failed.env.txt "$tmp/envelope.txt"
+          cd "$tmp"
+          go mod edit -require github.com/stellar-optics/stellar-focus@v0.0.0
+          go mod edit -replace github.com/stellar-optics/stellar-focus="$GITHUB_WORKSPACE"
+          go mod tidy > /dev/null 2>&1
+
+          # First run must fail, naming the command that fixes it.
+          code=0
+          go test ./... > out.txt 2>&1 || code=$?
+          if [ "$code" -eq 0 ]; then
+            echo "::error::a missing golden file did not fail the test"
+            exit 1
+          fi
+          grep -q -- '-focus.update' out.txt \
+            || { echo "::error::the failure did not say how to record the fixture"; cat out.txt; exit 1; }
+
+          # Recording, then re-running, must pass.
+          go test ./... -focus.update > /dev/null 2>&1 \
+            || { echo "::error::-focus.update failed"; exit 1; }
+          go test ./... > /dev/null 2>&1 \
+            || { echo "::error::the recorded fixture does not match"; exit 1; }
+
+          # The recorded file must be reviewable, not a blob.
+          lines="$(wc -l < testdata/envelope.golden.json)"
+          if [ "$lines" -lt 20 ]; then
+            echo "::error::the golden file is only $lines lines; it is not reviewable"
+            exit 1
+          fi
+          grep -q '"decoded"' testdata/envelope.golden.json \
+            || { echo "::error::the golden file has no decoded section"; exit 1; }
