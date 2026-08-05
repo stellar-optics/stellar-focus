@@ -22,9 +22,12 @@ type fatalTB struct {
 	focus.TB
 }
 
+// Errorf routes to Fatalf on the embedded TB. This is not recursive: only
+// Errorf is overridden here, so Helper and Fatalf resolve to the wrapped
+// implementation.
 func (f fatalTB) Errorf(format string, args ...any) {
-	f.TB.Helper()
-	f.TB.Fatalf(format, args...)
+	f.Helper()
+	f.Fatalf(format, args...)
 }
 
 func fatal(t focus.TB) focus.TB {
