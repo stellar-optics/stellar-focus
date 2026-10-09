@@ -79,7 +79,11 @@ func AssertResultCode(t TB, result Value, want string) bool {
 	if s.Outcome.InnerReason != nil {
 		fmt.Fprintf(&b, "  inner: %s\n", describeReason(*s.Outcome.InnerReason))
 	}
-	fmt.Fprintf(&b, "  want: %s\n", want)
+	if wantReason, ok := lens.ReasonByCode(want); ok {
+		fmt.Fprintf(&b, "  want: %s\n", describeReason(wantReason))
+	} else {
+		fmt.Fprintf(&b, "  want: %q (not a known result code)\n", want)
+	}
 	t.Errorf("%s", b.String())
 	return false
 }
@@ -126,10 +130,16 @@ func AssertOperationFailed(t TB, result Value, index int, want string) bool {
 		return true
 	}
 
-	t.Errorf("AssertOperationFailed: operation %d%s failed with %q, want %q\n\n"+
-		"  got:  %s\n  want: %s",
-		index, opLabel(op.Type), op.Result.Code, want,
-		describeReason(*op.Result), want)
+	var b strings.Builder
+	fmt.Fprintf(&b, "AssertOperationFailed: operation %d%s failed with %q, want %q\n\n",
+		index, opLabel(op.Type), op.Result.Code, want)
+	fmt.Fprintf(&b, "  got:  %s\n", describeReason(*op.Result))
+	if wantReason, ok := lens.ReasonByCode(want); ok {
+		fmt.Fprintf(&b, "  want: %s\n", describeReason(wantReason))
+	} else {
+		fmt.Fprintf(&b, "  want: %q (not a known result code)\n", want)
+	}
+	t.Errorf("%s", b.String())
 	return false
 }
 
