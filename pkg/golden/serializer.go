@@ -183,15 +183,7 @@ func NormalizeWhitespace(data []byte) []byte {
 // file written by a future version, or one that lost its payload, fails loudly
 // instead of comparing equal to nothing.
 func validate(f *Fixture) error {
-	if f.Format != "" && f.Format != FormatVersion {
-		return fmt.Errorf(
-			"fixture was written in format %q, but this version reads %q",
-			f.Format, FormatVersion)
-	}
-	if f.XDR == "" {
-		return fmt.Errorf("fixture has no xdr field")
-	}
-	return nil
+	return Validate(f)
 }
 
 // number renders an unsigned integer as a JSON number, so a value that is
@@ -224,6 +216,9 @@ func (jsonSerializer) Marshal(f *Fixture) ([]byte, error) {
 // Unmarshal implements Serializer. The decoded section is kept as raw JSON
 // rather than being re-encoded, so a fixture round-trips byte for byte.
 func (jsonSerializer) Unmarshal(data []byte) (*Fixture, error) {
+	if err := validateFixtureJSON(data); err != nil {
+		return nil, err
+	}
 	var f Fixture
 	if err := json.Unmarshal(data, &f); err != nil {
 		return nil, fmt.Errorf("invalid JSON: %w", err)

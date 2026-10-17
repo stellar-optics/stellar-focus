@@ -255,6 +255,30 @@ store a bare blob.
 `format` is checked on load, so a file written by a future version is rejected
 rather than silently misread.
 
+Fixtures are also checked against the embedded `pkg/golden/fixture.schema.json`
+when loaded, and callers can use `golden.Validate` before writing generated
+fixtures. This keeps validation offline and adds no schema dependency. The
+schema checks the fixture shape, provenance fields and unexpected properties;
+the format version remains checked by the package for a version-specific
+error.
+
+`golden.WithVariables` renders Go template placeholders in loaded fixture
+strings before comparison. Missing variables fail the assertion rather than
+leaving a placeholder in the expected XDR:
+
+```go
+golden.New(t, golden.WithVariables(map[string]string{
+  "AccountID": accountID,
+})).Assert("payment", actual)
+```
+
+`golden.Discover` returns sorted, nested fixture names for `.golden.json`
+files. `golden.Run` uses those names as subtests and asks a callback for each
+actual value. `golden.ExportFuzzSeeds` writes each fixture's XDR as a standard
+Go fuzz corpus string seed into the directory supplied by the caller, such as
+`testdata/fuzz/FuzzEnvelope`. These helpers only read or write local files;
+they do not contact a network.
+
 ### Fixtures in JSON, YAML or text
 
 That data has three spellings, and `pkg/golden/serializer.go` is the seam

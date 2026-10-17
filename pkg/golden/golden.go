@@ -86,6 +86,7 @@ type Golden struct {
 	opts    []focus.Option
 	desc    string
 	typeHnt string
+	vars    any
 }
 
 // Opt configures a Golden.
@@ -127,6 +128,11 @@ func WithDescription(d string) Opt {
 // for short payloads where detection is ambiguous.
 func WithType(typeName string) Opt {
 	return func(g *Golden) { g.typeHnt = typeName }
+}
+
+// WithVariables supplies data used to interpolate templates in loaded fixtures.
+func WithVariables(variables any) Opt {
+	return func(g *Golden) { g.vars = variables }
 }
 
 // New returns a Golden bound to a test.
@@ -174,6 +180,13 @@ func (g *Golden) Assert(name string, actual focus.Value) bool {
 		}
 		g.t.Errorf("golden: reading %s: %v", path, err)
 		return false
+	}
+	if g.vars != nil {
+		want, err = InterpolateFixture(want, g.vars)
+		if err != nil {
+			g.t.Errorf("golden: interpolating %s: %v", path, err)
+			return false
+		}
 	}
 
 	typeName := g.typeHnt

@@ -39,6 +39,9 @@ Working and tested:
 - Fixtures in JSON, YAML or plain text — chosen by file extension, or with
   `WithFormat` — all three lossless, deterministic and whitespace-normalized,
   with the text form using lens's dotted-path vocabulary
+- Golden fixture schema validation, Go-template interpolation, recursive
+  directory discovery and table-driven assertion running, plus deterministic
+  export to Go fuzz seed corpora
 - `focus capture` and `focus verify` against a live network
 - Dependency-light library, enforced by compiled-graph and AST tests
 - No assertion panics, enforced by test via a panic-safe harness
@@ -83,12 +86,6 @@ worth pushing for.
 
 `capture.Source` is a small interface and Horizon reaches further back than
 RPC's retention window, which matters for fixtures of older transactions.
-
-### Fuzz helpers
-
-A `focus.Fuzz` seed corpus of real captured XDR would make it easy for other
-projects to fuzz their own decoders. The corpus already exists in `testdata`;
-what is missing is a documented way to consume it.
 
 ## Later, and less certain
 
