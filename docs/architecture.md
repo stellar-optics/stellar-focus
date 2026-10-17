@@ -23,7 +23,9 @@ print when it fails*, not *what does this return when it passes*.
 
 ```
 cmd/focus/            main; maps errors to exit codes
-internal/cli/         cobra commands: capture, verify
+internal/cli/
+  cli.go            root command, capture, version
+  verify.go         verify: re-check stored fixtures against the chain
 internal/faketb/      recording focus.TB — lets focus test its own messages
 internal/fakesource/  in-memory capture.Source, so the CLI tests run offline
 pkg/focus/
@@ -49,7 +51,12 @@ pkg/focus/
   require/            Fatalf mirrors of everything above
   require/audit.go    AST parity audit between focus and require
 pkg/golden/           golden files, -focus.update
-pkg/capture/          Source interface, RPC impl, Verify  ← seam: new sources
+pkg/capture/
+  capture.go        Source interface, RPC impl, Verify  ← seam: new sources
+  rpc.go            the Soroban RPC Source
+  cache.go          Scraper: rate-limited fetches, .focus/cache
+  bundle.go         multi-transaction capture with a manifest
+  codegen.go        deterministic replay-test generation from fixtures
 ```
 
 ### Why the CLI is not in pkg/

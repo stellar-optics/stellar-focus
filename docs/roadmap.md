@@ -40,6 +40,15 @@ Working and tested:
   `WithFormat` — all three lossless, deterministic and whitespace-normalized,
   with the text form using lens's dotted-path vocabulary
 - `focus capture` and `focus verify` against a live network
+- Coordinated multi-transaction bundles: one manifest ties a set of related
+  captures together, fetched all-or-nothing and re-verified member by member
+  (`pkg/capture/bundle.go`)
+- Rate-limited live scraping with an on-disk cache under `.focus/cache`, so a
+  repetitive capture run is fast for the caller and gentle on the endpoint
+  (`pkg/capture/cache.go`)
+- Deterministic replay tests generated straight from captured fixtures: same
+  fixture in, byte-identical `_test.go` out, red with a field diff when the
+  fixture or a decoder moves (`pkg/capture/codegen.go`)
 - Dependency-light library, enforced by compiled-graph and AST tests
 - No assertion panics, enforced by test via a panic-safe harness
   (`SafeExec`/`SafeCall` in `pkg/focus/safe_exec.go`)
