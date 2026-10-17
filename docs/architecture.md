@@ -48,8 +48,8 @@ pkg/focus/
   fees.go             consumed and refundable fee assertions
   require/            Fatalf mirrors of everything above
   require/audit.go    AST parity audit between focus and require
-pkg/golden/           golden files, -focus.update
-pkg/capture/          Source interface, RPC impl, Verify  ← seam: new sources
+pkg/golden/           golden files, noise suppression, benchmarks
+pkg/capture/          Source interface, RPC and Horizon, LedgerKey helpers
 ```
 
 ### Why the CLI is not in pkg/
@@ -351,6 +351,11 @@ fixtures are byte-stable and a test can assert on the whole file.
 `Verify` refuses fixtures with no provenance instead of passing them. A
 hand-written fixture is not stale; it is simply not checkable this way, and
 saying so is more useful than a green tick that means nothing.
+
+Golden comparisons normalize sequence numbers and common time fields by
+default. Use `golden.WithNoiseSuppression(false)` when a test needs to assert
+those values directly. `focus ledger-key account <G...>` prints a base64
+account key that can be passed to `focus capture ledger-entry`.
 
 ## Adding an assertion
 

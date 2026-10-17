@@ -242,6 +242,26 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestLedgerKeyAccountCommand(t *testing.T) {
+	const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+	wantKey, err := capture.NewAccountLedgerKey(address)
+	if err != nil {
+		t.Fatalf("NewAccountLedgerKey() error = %v", err)
+	}
+	want, err := capture.EncodeLedgerKey(wantKey)
+	if err != nil {
+		t.Fatalf("EncodeLedgerKey() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "ledger-key", "account", address)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("ledger-key output = %q, want %q", strings.TrimSpace(stdout), want)
+	}
+}
+
 func TestBareInvocationPrintsHelp(t *testing.T) {
 	stdout, _, err := run(t)
 	if err != nil {

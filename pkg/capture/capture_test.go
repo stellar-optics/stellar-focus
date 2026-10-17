@@ -14,6 +14,33 @@ import (
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
+func TestNewAccountLedgerKey(t *testing.T) {
+	t.Parallel()
+
+	const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+	key, err := capture.NewAccountLedgerKey(address)
+	if err != nil {
+		t.Fatalf("NewAccountLedgerKey() error = %v", err)
+	}
+	if key.Type != 0 {
+		t.Fatalf("key type = %v, want account", key.Type)
+	}
+	encoded, err := capture.EncodeLedgerKey(key)
+	if err != nil {
+		t.Fatalf("EncodeLedgerKey() error = %v", err)
+	}
+	if encoded == "" {
+		t.Fatal("EncodeLedgerKey() returned an empty string")
+	}
+}
+
+func TestNewAccountLedgerKeyRejectsInvalidAddress(t *testing.T) {
+	t.Parallel()
+	if _, err := capture.NewAccountLedgerKey("not-an-account"); err == nil {
+		t.Fatal("NewAccountLedgerKey() accepted an invalid StrKey")
+	}
+}
+
 // capturedAt is fixed so fixtures produced by these tests are byte-stable.
 var capturedAt = time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
 

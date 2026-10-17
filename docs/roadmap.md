@@ -36,10 +36,14 @@ Working and tested:
 - `require` mirrors with `Fatalf` semantics, with 100% parity enforced by an
   AST audit (`pkg/focus/require/audit.go`)
 - Golden files in reviewable JSON, with `-focus.update`
+- Golden comparisons that normalize volatile sequence and time fields by
+  default, with an opt-out, plus a benchmark of the structural comparison path
 - Fixtures in JSON, YAML or plain text — chosen by file extension, or with
   `WithFormat` — all three lossless, deterministic and whitespace-normalized,
   with the text form using lens's dotted-path vocabulary
 - `focus capture` and `focus verify` against a live network
+- Horizon as an alternative capture source for older transaction history
+- `focus ledger-key account` for constructing a capture-ready account key
 - Dependency-light library, enforced by compiled-graph and AST tests
 - No assertion panics, enforced by test via a panic-safe harness
   (`SafeExec`/`SafeCall` in `pkg/focus/safe_exec.go`)
@@ -57,9 +61,6 @@ Known limits, stated plainly:
   anchors, aliases, tags, block scalars and multi-document streams are rejected
   with a message naming the line. JSON remains the default and the format every
   existing fixture is written in.
-- **Ledger entry capture is thin.** `focus capture ledger-entry` records the
-  entry data but has no convenience for constructing the `LedgerKey` you need
-  to pass it.
 - **Diagnostic events carry no per-event timestamp.** The protocol records no
   wall clock on a diagnostic event, so a stream is placed in time by the ledger
   it was applied in and that ledger's close time, which a test supplies from

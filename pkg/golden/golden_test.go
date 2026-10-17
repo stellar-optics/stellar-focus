@@ -194,9 +194,30 @@ func TestAssertHonoursIgnoreOptions(t *testing.T) {
 	}
 
 	tb := faketb.New()
-	g := golden.New(tb, golden.WithDir(dir), golden.WithOptions(focus.IgnoreSequence()))
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false),
+		golden.WithOptions(focus.IgnoreSequence()))
 	if !g.Assert("env", actual) {
 		t.Errorf("ignore option was not applied:\n%s", tb.Output())
+	}
+}
+
+func TestAssertSuppressesSequenceNoiseByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stored := buildEnvelopeSeq(t, 111, 100)
+	actual := buildEnvelopeSeq(t, 222, 100)
+	fixture, err := golden.Build(stored, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	tb := faketb.New()
+	if !golden.New(tb, golden.WithDir(dir)).Assert("env", actual) {
+		t.Errorf("default noise suppression did not normalize sequence number:\n%s", tb.Output())
 	}
 }
 

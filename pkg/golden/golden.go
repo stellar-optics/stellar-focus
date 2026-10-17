@@ -79,13 +79,14 @@ type Provenance struct {
 
 // Golden compares values against golden files on disk.
 type Golden struct {
-	t       focus.TB
-	dir     string
-	suffix  string
-	format  Format
-	opts    []focus.Option
-	desc    string
-	typeHnt string
+	t                focus.TB
+	dir              string
+	suffix           string
+	format           Format
+	opts             []focus.Option
+	noiseSuppression bool
+	desc             string
+	typeHnt          string
 }
 
 // Opt configures a Golden.
@@ -118,6 +119,12 @@ func WithOptions(opts ...focus.Option) Opt {
 	return func(g *Golden) { g.opts = append(g.opts, opts...) }
 }
 
+// WithNoiseSuppression controls automatic normalization of volatile XDR fields.
+// It is enabled by default; disable it when a test intentionally checks them.
+func WithNoiseSuppression(enabled bool) Opt {
+	return func(g *Golden) { g.noiseSuppression = enabled }
+}
+
 // WithDescription sets the description written into new golden files.
 func WithDescription(d string) Opt {
 	return func(g *Golden) { g.desc = d }
@@ -131,7 +138,10 @@ func WithType(typeName string) Opt {
 
 // New returns a Golden bound to a test.
 func New(t focus.TB, opts ...Opt) *Golden {
-	g := &Golden{t: t, dir: "testdata", suffix: JSON.DefaultSuffix(), format: JSON}
+	g := &Golden{
+		t: t, dir: "testdata", suffix: JSON.DefaultSuffix(), format: JSON,
+		noiseSuppression: true,
+	}
 	for _, o := range opts {
 		o(g)
 	}
@@ -184,7 +194,11 @@ func (g *Golden) Assert(name string, actual focus.Value) bool {
 	// The comparison is against the stored XDR, never the decoded rendering:
 	// the decoded form exists for humans reading diffs, and treating it as
 	// authoritative would make the assertion depend on lens's formatting.
-	ok := focus.AssertEqualAs(g.t, typeName, want.XDR, actual, g.opts...)
+	opts := g.opts
+	if g.noiseSuppression {
+		opts = append(noiseSuppressionOptions(), opts...)
+	}
+	ok := focus.AssertEqualAs(g.t, typeName, want.XDR, actual, opts...)
 	if !ok {
 		g.t.Errorf("golden: %s is out of date.\n"+
 			"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n", path)
