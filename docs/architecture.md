@@ -46,6 +46,11 @@ pkg/focus/
   diagnostic_order.go diagnostic stream order and timelines
   simulation.go       simulated resource budget assertions
   fees.go             consumed and refundable fee assertions
+  ledger_entries.go   flattened ledger changes; created/modified/deleted
+  claimable.go        claimable balance creation and claiming
+  managedata.go       account data key-value assertions
+  liquidity_pool.go   pool reserve movements and LP share mint/burn
+  dex_offers.go       offer creation and DEX trade matches
   require/            Fatalf mirrors of everything above
   require/audit.go    AST parity audit between focus and require
 pkg/golden/           golden files, -focus.update
@@ -237,6 +242,121 @@ was found (`instance storage`, or the durability that holds it), then lists the
 whole state the constructor wrote. The listing is the point: it is what turns
 "owner is wrong" into "owner is wrong, and here is what else it wrote".
 
+## Ledger entry assertions, by entry kind
+
+Five files sit on top of `ledger_entries.go`, which flattens a meta's
+`LedgerEntryChange` list once and sanitises it: each change is reduced to a
+canonical key id, the account it belongs to, a pre-rendered label, and the
+entry value, so the assertions above it match on strings and integers and never
+call a generated accessor on a value that could panic. `balance.go`,
+`trustline.go`, `claimable.go`, `managedata.go`, `liquidity_pool.go` and
+`dex_offers.go` all read that one form, which is why a failure from any of them
+can list the same ledger changes underneath it.
+
+What they have in common is the reason they read the meta at all: for each of
+these entry kinds, the thing a test wants to assert on does not exist in the
+envelope.
+
+### Claimable balances
+
+A balance id is derived by the protocol from the operation, the source account
+and the sequence number, so the transaction that creates a claimable balance
+cannot name it — the meta is the first place the id exists.
+`AssertClaimableBalanceCreated` therefore matches on what the test does know:
+the claimant and the amount. The claimant has to be *among* the balance's
+claimants rather than its only one, because a balance claimable by either of
+two accounts is claimable by each.
+
+The predicate guarding a claim is deliberately **not** checked. Whether it is
+satisfiable depends on a clock, and reading one would make the assertion
+neither deterministic nor offline. It is rendered in the failure listing
+instead — compactly, including the composite `and`/`or`/`not` forms — because a
+balance with the right claimant and an unexpected predicate is the usual reason
+a test is looking here.
+
+`AssertClaimableBalanceClaimed` asserts the other end of the life: the entry is
+gone. A clawback removes it too, and the protocol distinguishes the two only by
+the operation that caused it, so the assertion is about the removal and a test
+that cares which operation did it pairs this with an operation-result
+assertion.
+
+### Account data entries
+
+Manage-data is last-write-wins, and assignment and deletion share one
+operation. A transaction can set a name twice, or set and then delete it, and
+only the meta says which value survived — so `managedata.go` reduces a meta's
+changes to the state of each entry *after* the transaction and asserts against
+that. An entry written and then deleted does not satisfy
+`AssertAccountDataEqual`; `AssertAccountDataDeleted` is the assertion for it.
+
+A data value is opaque bytes, so it is compared as bytes. There is no XDR
+coercion on the value argument: a string is the value, never base64 to decode,
+which is the only reading that does not surprise someone storing `"v2"`.
+Rendering is the other half of that decision — quoted text where the bytes are
+text, hex where they are not, always with the length, and the **first byte that
+differs** named on its own line. A trailing newline, a padded field or the
+wrong one of two similar values is invisible in a side-by-side of two quoted
+strings, and that is precisely the class of bug a data assertion catches.
+
+`AssertAccountDataEqual` takes no account, matching the manage-data vocabulary
+where a test usually knows there is one account writing data; where more than
+one account has an entry with that name, any of them holding the value
+satisfies it and `AssertAccountDataEqualFor` pins down which is meant.
+
+### Liquidity pools
+
+A deposit operation names the maximum amounts it will put in and the price
+range it will accept; the protocol then decides the actual amounts from the
+pool's reserves at execution. A withdrawal names the shares to burn and gets
+back whatever share of the reserves they represent. So the amounts a test wants
+to pin down exist only as the difference between the pool entry before the
+transaction and after it, which is what `liquidity_pool.go` measures — across
+the whole transaction, so a meta that deposits twice is checked against the
+total.
+
+`PoolChange` holds magnitudes rather than signed deltas, and the direction
+comes from the assertion name. That makes the call site read as what happened,
+and it lets a direction mistake be reported as one: a negative field is an
+input error, and a movement the other way names the other assertion.
+
+**Shares are the direction signal.** Reserves move for a trade as well, so what
+separates a deposit from a swap is that a deposit mints pool shares and a swap
+does not. A reserve movement with no share movement is therefore reported as a
+trade against the pool rather than as a wrong amount, which is the difference
+between a useful failure and a confusing one.
+
+### Offers and trades
+
+An offer that crosses the spread is filled on submission, and what reaches the
+ledger is the remainder — or nothing at all. So "the offer was created" and
+"the trade happened" are different claims about the same operation, and
+`dex_offers.go` keeps them as separate assertions: `AssertOfferCreated` reads
+the `OfferEntry` the transaction left behind, and says so when there is none,
+naming `AssertTradeExecuted` as the assertion a completely filled offer needs.
+The offer id is the other reason this reads the ledger: a new offer is
+submitted with id 0 and the protocol assigns the real one.
+
+`AssertTradeExecuted` accepts either a result or a meta, and the difference is
+stated in the failure rather than papered over:
+
+- A **result** carries the protocol's own record of each match — a `ClaimAtom`
+  per fill, with both assets and both amounts — across the four operations that
+  can match (the two manage-offer forms, the passive variant, and the two path
+  payments). It can answer every field of `Trade`, including trades against a
+  liquidity pool, which exist nowhere else. Prefer it.
+- A **meta** carries the offer entries that changed. The amount an offer gave up
+  is exact, being the difference between its state and its last recorded value,
+  but what it received is recorded nowhere in the meta. Deriving it from the
+  price would mean reimplementing the protocol's rounding, so `AmountBought` is
+  reported as a question a meta cannot answer, naming the result instead. A
+  meta also cannot say *why* an offer shrank: an owner reducing their own offer
+  looks exactly like one that was matched.
+
+A `Trade`'s amounts and assets are from the matched side's point of view, the
+way the protocol records them: `Sold` is what the offer or pool gave up. For
+the submitting account the two are the other way round, which is documented
+loudly because getting it backwards is the easiest mistake to make here.
+
 ## Golden format
 
 ```json
@@ -420,6 +540,21 @@ violated:
 - a diagnostic stream is pinned to the ledger its meta pins, and a stream that
   cannot be placed is reported rather than passed
   (`TestAssertDiagnosticEventTimelineMessages`);
+- a claimable balance is matched by claimant and amount, with a wrong claimant,
+  a wrong amount and a balance nobody can claim each named differently, and the
+  claim predicates listed underneath (`TestAssertClaimableBalanceCreated*`,
+  `TestClaimPredicateRendering`);
+- account data is compared as bytes, with the first differing byte named and a
+  trailing or missing byte reported rather than hidden
+  (`TestAssertAccountDataEqualFailureMessages`,
+  `TestAccountDataValueRendering`);
+- a pool movement is measured across the whole transaction, and a withdrawal
+  asserted as a deposit, or a swap asserted as either, names what it actually
+  was (`TestAssertLiquidityPoolFailureMessages`);
+- an offer that was filled completely is reported as a trade rather than as a
+  missing entry, and a meta is reported as unable to establish what a matched
+  offer was paid (`TestAssertOfferCreatedFailureMessages`,
+  `TestAssertTradeExecutedFromMeta`);
 - constructor state is read from instance, persistent and temporary storage,
   with a missing entry, a wrong value and a wrong owner each named, and the
   state written listed underneath (`TestAssertConstructorStatePasses`,

@@ -345,3 +345,64 @@ func OperationType(t focus.TB, envelope focus.Value, index int, want string) {
 	t.Helper()
 	focus.AssertOperationType(fatal(t), envelope, index, want)
 }
+
+// ClaimableBalanceCreated is focus.AssertClaimableBalanceCreated, stopping the
+// test on failure.
+func ClaimableBalanceCreated(t focus.TB, meta, claimant focus.Value, amount int64) {
+	t.Helper()
+	focus.AssertClaimableBalanceCreated(fatal(t), meta, claimant, amount)
+}
+
+// ClaimableBalanceClaimed is focus.AssertClaimableBalanceClaimed, stopping the
+// test on failure.
+func ClaimableBalanceClaimed(t focus.TB, meta, balanceID focus.Value) {
+	t.Helper()
+	focus.AssertClaimableBalanceClaimed(fatal(t), meta, balanceID)
+}
+
+// AccountDataEqual is focus.AssertAccountDataEqual, stopping the test on
+// failure.
+func AccountDataEqual(t focus.TB, meta focus.Value, key string, value focus.Value) {
+	t.Helper()
+	focus.AssertAccountDataEqual(fatal(t), meta, key, value)
+}
+
+// AccountDataEqualFor is focus.AssertAccountDataEqualFor, stopping the test on
+// failure.
+func AccountDataEqualFor(t focus.TB, meta, account focus.Value, key string, value focus.Value) {
+	t.Helper()
+	focus.AssertAccountDataEqualFor(fatal(t), meta, account, key, value)
+}
+
+// AccountDataDeleted is focus.AssertAccountDataDeleted, stopping the test on
+// failure.
+func AccountDataDeleted(t focus.TB, meta focus.Value, key string) {
+	t.Helper()
+	focus.AssertAccountDataDeleted(fatal(t), meta, key)
+}
+
+// LiquidityPoolDeposit is focus.AssertLiquidityPoolDeposit, stopping the test
+// on failure.
+func LiquidityPoolDeposit(t focus.TB, meta, pool focus.Value, want focus.PoolChange) {
+	t.Helper()
+	focus.AssertLiquidityPoolDeposit(fatal(t), meta, pool, want)
+}
+
+// LiquidityPoolWithdrawal is focus.AssertLiquidityPoolWithdrawal, stopping the
+// test on failure.
+func LiquidityPoolWithdrawal(t focus.TB, meta, pool focus.Value, want focus.PoolChange) {
+	t.Helper()
+	focus.AssertLiquidityPoolWithdrawal(fatal(t), meta, pool, want)
+}
+
+// OfferCreated is focus.AssertOfferCreated, stopping the test on failure.
+func OfferCreated(t focus.TB, meta focus.Value, want focus.Offer) {
+	t.Helper()
+	focus.AssertOfferCreated(fatal(t), meta, want)
+}
+
+// TradeExecuted is focus.AssertTradeExecuted, stopping the test on failure.
+func TradeExecuted(t focus.TB, value focus.Value, want focus.Trade) {
+	t.Helper()
+	focus.AssertTradeExecuted(fatal(t), value, want)
+}
