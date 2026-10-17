@@ -108,9 +108,10 @@ func newVersionCmd(stdout io.Writer) *cobra.Command {
 
 func newCaptureCmd(g *globalFlags, stdout, stderr io.Writer) *cobra.Command {
 	var (
-		outDir string
-		prefix string
-		force  bool
+		outDir       string
+		prefix       string
+		force        bool
+		maskAddresses bool
 	)
 
 	cmd := &cobra.Command{
@@ -138,7 +139,7 @@ can be re-checked later with focus verify.`,
 			if err != nil {
 				return err
 			}
-			return writeFixtures(cmd.Context(), src, records, outDir, prefix, force, stdout)
+			return writeFixtures(cmd.Context(), src, records, outDir, prefix, force, maskAddresses, stdout)
 		},
 	}
 
@@ -157,7 +158,7 @@ can be re-checked later with focus verify.`,
 			if err != nil {
 				return err
 			}
-			return writeFixtures(cmd.Context(), src, records, outDir, prefix, force, stdout)
+			return writeFixtures(cmd.Context(), src, records, outDir, prefix, force, maskAddresses, stdout)
 		},
 	}
 
@@ -168,6 +169,8 @@ can be re-checked later with focus verify.`,
 			"filename prefix; defaults to the record name")
 		c.Flags().BoolVar(&force, "force", false,
 			"overwrite fixture files that already exist")
+		c.Flags().BoolVar(&maskAddresses, "mask-addresses", false,
+			"replace public account addresses with deterministic mock accounts")
 	}
 
 	cmd.AddCommand(txCmd, entryCmd)
@@ -181,9 +184,19 @@ func writeFixtures(
 	src capture.Source,
 	records []capture.Record,
 	outDir, prefix string,
-	force bool,
+	force, maskAddresses bool,
 	stdout io.Writer,
 ) error {
+	if maskAddresses {
+		masked, err := capture.Anonymize(records)
+		if err != nil {
+			return err
+		}
+		for i := range masked {
+			masked[i].Anonymized = true
+		}
+		records = masked
+	}
 	fixtures, err := capture.Capture(ctx, src, records, now())
 	if err != nil {
 		return err

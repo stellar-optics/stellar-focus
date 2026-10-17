@@ -21,6 +21,9 @@ type Source struct {
 	// Err, when set, is returned by every call, simulating an endpoint that
 	// is unreachable.
 	Err error
+	// Passphrase and PassphraseErr configure optional network metadata.
+	Passphrase    string
+	PassphraseErr error
 	// Calls counts fetches, so tests can assert nothing was fetched when
 	// nothing should have been.
 	Calls int
@@ -47,6 +50,17 @@ func (s *Source) Network() string { return s.network }
 
 // Endpoint implements capture.Source.
 func (s *Source) Endpoint() string { return s.endpoint }
+
+// NetworkPassphrase implements capture.NetworkPassphraseSource.
+func (s *Source) NetworkPassphrase(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s.PassphraseErr != nil {
+		return "", s.PassphraseErr
+	}
+	return s.Passphrase, nil
+}
 
 // Transaction implements capture.Source.
 func (s *Source) Transaction(ctx context.Context, hash string) ([]capture.Record, error) {

@@ -49,6 +49,8 @@ type Record struct {
 	TxHash string
 	// Description is a human note recorded in the fixture.
 	Description string
+	// Anonymized marks XDR whose public account addresses were replaced.
+	Anonymized bool
 }
 
 // Source fetches data from a network.
@@ -70,6 +72,13 @@ type Source interface {
 	LedgerEntry(ctx context.Context, key string) ([]Record, error)
 }
 
+// NetworkPassphraseSource optionally exposes the passphrase reported by the
+// network. It is separate from Source to preserve compatibility with existing
+// capture sources.
+type NetworkPassphraseSource interface {
+	NetworkPassphrase(ctx context.Context) (string, error)
+}
+
 // Capture fetches items and turns them into fixtures, stamping each with the
 // provenance needed to verify or refresh it later.
 //
@@ -77,8 +86,20 @@ type Source interface {
 // tests — control the timestamp written into the fixture.
 func Capture(ctx context.Context, src Source, records []Record, now time.Time) ([]*golden.Fixture, error) {
 	out := make([]*golden.Fixture, 0, len(records))
+	passphrase := ""
+	if len(records) > 0 {
+		if source, ok := src.(NetworkPassphraseSource); ok {
+			var err error
+			passphrase, err = source.NetworkPassphrase(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("detecting network passphrase: %w", err)
+			}
+		}
+	}
 	for _, r := range records {
 		provenance := golden.NewProvenance(src.Network(), src.Endpoint(), r.Ledger, r.TxHash, now)
+		provenance.NetworkPassphrase = passphrase
+		provenance.Anonymized = r.Anonymized
 
 		fixture, err := golden.Build(r.XDR, r.Type, r.Description, provenance)
 		if err != nil {
@@ -111,11 +132,32 @@ type VerifyResult struct {
 // simply not checkable this way.
 func Verify(ctx context.Context, src Source, path string, f *golden.Fixture) VerifyResult {
 	result := VerifyResult{Path: path}
+	if f.Captured != nil && f.Captured.Anonymized {
+		result.Err = fmt.Errorf("fixture addresses were anonymized, so it cannot be verified against the live network")
+		return result
+	}
 
 	if f.Captured == nil || f.Captured.TxHash == "" {
 		result.Err = fmt.Errorf(
 			"no capture provenance, so there is nothing to re-fetch (was this fixture written by hand?)")
 		return result
+	}
+	if f.Captured.NetworkPassphrase != "" {
+		passphraseSource, ok := src.(NetworkPassphraseSource)
+		if !ok {
+			result.Err = fmt.Errorf("capture source cannot verify the fixture network passphrase")
+			return result
+		}
+		passphrase, err := passphraseSource.NetworkPassphrase(ctx)
+		if err != nil {
+			result.Err = fmt.Errorf("detecting network passphrase: %w", err)
+			return result
+		}
+		if passphrase != f.Captured.NetworkPassphrase {
+			result.Err = fmt.Errorf("network passphrase mismatch: fixture is bound to %q, source reports %q",
+				f.Captured.NetworkPassphrase, passphrase)
+			return result
+		}
 	}
 
 	records, err := src.Transaction(ctx, f.Captured.TxHash)

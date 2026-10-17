@@ -93,6 +93,24 @@ func TestCaptureRespectsPrefix(t *testing.T) {
 	}
 }
 
+func TestCaptureMasksAddressesWhenRequested(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+	dir := t.TempDir()
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir, "--mask-addresses"); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	fixture, err := golden.Load(filepath.Join(dir, "envelope.golden.json"))
+	if err != nil {
+		t.Fatalf("loading masked fixture: %v", err)
+	}
+	if fixture.Captured == nil || !fixture.Captured.Anonymized {
+		t.Fatal("masked fixture provenance does not record anonymization")
+	}
+	if fixture.XDR == fixtureXDR(t, "tx_failed.env.txt") {
+		t.Fatal("--mask-addresses did not change the captured XDR")
+	}
+}
+
 // TestCaptureRefusesToClobber protects a hand-curated fixture from being
 // silently replaced.
 func TestCaptureRefusesToClobber(t *testing.T) {

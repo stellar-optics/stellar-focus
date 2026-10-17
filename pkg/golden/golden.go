@@ -70,11 +70,13 @@ type Fixture struct {
 // Provenance records where a captured fixture came from, so a stale fixture
 // can be traced and re-verified.
 type Provenance struct {
-	Network  string `json:"network"`
-	Ledger   uint32 `json:"ledger,omitempty"`
-	TxHash   string `json:"txHash,omitempty"`
-	At       string `json:"at"`
-	Endpoint string `json:"endpoint,omitempty"`
+	Network          string `json:"network"`
+	NetworkPassphrase string `json:"networkPassphrase,omitempty"`
+	Ledger           uint32 `json:"ledger,omitempty"`
+	TxHash           string `json:"txHash,omitempty"`
+	At               string `json:"at"`
+	Endpoint         string `json:"endpoint,omitempty"`
+	Anonymized       bool   `json:"anonymized,omitempty"`
 }
 
 // Golden compares values against golden files on disk.
