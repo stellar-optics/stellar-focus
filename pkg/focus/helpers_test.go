@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
 // Real mainnet addresses, so the strkey enrichers in lens actually fire and
@@ -380,4 +382,245 @@ func metaV3WithTx(t *testing.T, before, after []xdr.LedgerEntryChange, ops ...[]
 			TxChangesAfter:  after,
 		},
 	})
+}
+
+// claimableBalanceIDValue builds a deterministic claimable balance id, so a
+// test can name the balance it expects without a real transaction hash.
+func claimableBalanceIDValue(seed byte) xdr.ClaimableBalanceId {
+	var hash xdr.Hash
+	for i := range hash {
+		hash[i] = seed
+	}
+	return xdr.ClaimableBalanceId{
+		Type: xdr.ClaimableBalanceIdTypeClaimableBalanceIdTypeV0,
+		V0:   &hash,
+	}
+}
+
+// unconditionalClaimant builds a claimant that can claim at any time.
+func unconditionalClaimant(t *testing.T, addr string) xdr.Claimant {
+	t.Helper()
+	return xdr.Claimant{
+		Type: xdr.ClaimantTypeClaimantTypeV0,
+		V0: &xdr.ClaimantV0{
+			Destination: mustAccountID(t, addr),
+			Predicate: xdr.ClaimPredicate{
+				Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional,
+			},
+		},
+	}
+}
+
+// beforeTimeClaimant builds a claimant whose claim expires at an absolute
+// time, the predicate a timed escrow uses.
+func beforeTimeClaimant(t *testing.T, addr string, absBefore int64) xdr.Claimant {
+	t.Helper()
+	before := xdr.Int64(absBefore)
+	return xdr.Claimant{
+		Type: xdr.ClaimantTypeClaimantTypeV0,
+		V0: &xdr.ClaimantV0{
+			Destination: mustAccountID(t, addr),
+			Predicate: xdr.ClaimPredicate{
+				Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
+				AbsBefore: &before,
+			},
+		},
+	}
+}
+
+// claimableBalanceEntryValue builds a ledger entry holding a claimable
+// balance.
+func claimableBalanceEntryValue(
+	id xdr.ClaimableBalanceId, asset xdr.Asset, amount int64, claimants ...xdr.Claimant,
+) xdr.LedgerEntry {
+	return xdr.LedgerEntry{
+		LastModifiedLedgerSeq: 42,
+		Data: xdr.LedgerEntryData{
+			Type: xdr.LedgerEntryTypeClaimableBalance,
+			ClaimableBalance: &xdr.ClaimableBalanceEntry{
+				BalanceId: id,
+				Claimants: claimants,
+				Asset:     asset,
+				Amount:    xdr.Int64(amount),
+			},
+		},
+	}
+}
+
+// dataLedgerEntryValue builds a ledger entry holding an account data entry.
+func dataLedgerEntryValue(t *testing.T, addr, name string, value []byte) xdr.LedgerEntry {
+	t.Helper()
+	return xdr.LedgerEntry{
+		LastModifiedLedgerSeq: 42,
+		Data: xdr.LedgerEntryData{
+			Type: xdr.LedgerEntryTypeData,
+			Data: &xdr.DataEntry{
+				AccountId: mustAccountID(t, addr),
+				DataName:  xdr.String64(name),
+				DataValue: xdr.DataValue(value),
+			},
+		},
+	}
+}
+
+// poolIDValue builds a deterministic liquidity pool id.
+func poolIDValue(seed byte) xdr.PoolId {
+	var id xdr.PoolId
+	for i := range id {
+		id[i] = seed
+	}
+	return id
+}
+
+// poolEntryValue builds a ledger entry holding a constant-product liquidity
+// pool with the given reserves and shares.
+func poolEntryValue(
+	id xdr.PoolId, assetA, assetB xdr.Asset, reserveA, reserveB, shares int64,
+) xdr.LedgerEntry {
+	return xdr.LedgerEntry{
+		LastModifiedLedgerSeq: 42,
+		Data: xdr.LedgerEntryData{
+			Type: xdr.LedgerEntryTypeLiquidityPool,
+			LiquidityPool: &xdr.LiquidityPoolEntry{
+				LiquidityPoolId: id,
+				Body: xdr.LiquidityPoolEntryBody{
+					Type: xdr.LiquidityPoolTypeLiquidityPoolConstantProduct,
+					ConstantProduct: &xdr.LiquidityPoolEntryConstantProduct{
+						Params: xdr.LiquidityPoolConstantProductParameters{
+							AssetA: assetA,
+							AssetB: assetB,
+							Fee:    30,
+						},
+						ReserveA:                 xdr.Int64(reserveA),
+						ReserveB:                 xdr.Int64(reserveB),
+						TotalPoolShares:          xdr.Int64(shares),
+						PoolSharesTrustLineCount: 1,
+					},
+				},
+			},
+		},
+	}
+}
+
+// offerEntryValue builds a ledger entry holding an order book offer.
+func offerEntryValue(
+	t *testing.T, addr string, offerID int64, selling, buying xdr.Asset, amount int64, price xdr.Price,
+) xdr.LedgerEntry {
+	t.Helper()
+	return xdr.LedgerEntry{
+		LastModifiedLedgerSeq: 42,
+		Data: xdr.LedgerEntryData{
+			Type: xdr.LedgerEntryTypeOffer,
+			Offer: &xdr.OfferEntry{
+				SellerId: mustAccountID(t, addr),
+				OfferId:  xdr.Int64(offerID),
+				Selling:  selling,
+				Buying:   buying,
+				Amount:   xdr.Int64(amount),
+				Price:    price,
+			},
+		},
+	}
+}
+
+// nativeAsset is the native asset, which several of the new assertions need
+// as an xdr.Asset rather than as a label.
+func nativeAsset() xdr.Asset {
+	return xdr.Asset{Type: xdr.AssetTypeAssetTypeNative}
+}
+
+// orderBookClaim builds a claim atom for a matched order book offer.
+func orderBookClaim(
+	t *testing.T, seller string, offerID int64,
+	sold xdr.Asset, amountSold int64, bought xdr.Asset, amountBought int64,
+) xdr.ClaimAtom {
+	t.Helper()
+	return xdr.ClaimAtom{
+		Type: xdr.ClaimAtomTypeClaimAtomTypeOrderBook,
+		OrderBook: &xdr.ClaimOfferAtom{
+			SellerId:     mustAccountID(t, seller),
+			OfferId:      xdr.Int64(offerID),
+			AssetSold:    sold,
+			AmountSold:   xdr.Int64(amountSold),
+			AssetBought:  bought,
+			AmountBought: xdr.Int64(amountBought),
+		},
+	}
+}
+
+// poolClaim builds a claim atom for a trade against a liquidity pool.
+func poolClaim(
+	id xdr.PoolId, sold xdr.Asset, amountSold int64, bought xdr.Asset, amountBought int64,
+) xdr.ClaimAtom {
+	return xdr.ClaimAtom{
+		Type: xdr.ClaimAtomTypeClaimAtomTypeLiquidityPool,
+		LiquidityPool: &xdr.ClaimLiquidityAtom{
+			LiquidityPoolId: id,
+			AssetSold:       sold,
+			AmountSold:      xdr.Int64(amountSold),
+			AssetBought:     bought,
+			AmountBought:    xdr.Int64(amountBought),
+		},
+	}
+}
+
+// manageSellOfferResult builds one operation result for a manage-sell-offer
+// that claimed the given offers.
+func manageSellOfferResult(atoms ...xdr.ClaimAtom) xdr.OperationResult {
+	return xdr.OperationResult{
+		Code: xdr.OperationResultCodeOpInner,
+		Tr: &xdr.OperationResultTr{
+			Type: xdr.OperationTypeManageSellOffer,
+			ManageSellOfferResult: &xdr.ManageSellOfferResult{
+				Code: xdr.ManageSellOfferResultCodeManageSellOfferSuccess,
+				Success: &xdr.ManageOfferSuccessResult{
+					OffersClaimed: atoms,
+					Offer: xdr.ManageOfferSuccessResultOffer{
+						Effect: xdr.ManageOfferEffectManageOfferDeleted,
+					},
+				},
+			},
+		},
+	}
+}
+
+// priceValue builds an offer price as the ratio the protocol stores.
+func priceValue(n, d int32) xdr.Price {
+	return xdr.Price{N: xdr.Int32(n), D: xdr.Int32(d)}
+}
+
+// decodedMeta wraps a meta as an already-decoded lens value.
+//
+// This is the one accepted input form that does not go through the XDR
+// encoder, so it is how a test can hand an assertion a union arm the encoder
+// would reject — which is exactly what the guards against malformed values
+// are there for.
+func decodedMeta(ops ...[]xdr.LedgerEntryChange) *lens.Value {
+	operations := make([]xdr.OperationMeta, 0, len(ops))
+	for _, changes := range ops {
+		operations = append(operations, xdr.OperationMeta{Changes: changes})
+	}
+	return &lens.Value{
+		Type: "TransactionMeta",
+		Raw: &xdr.TransactionMeta{
+			V:  2,
+			V2: &xdr.TransactionMetaV2{Operations: operations},
+		},
+	}
+}
+
+// decodedResult wraps a transaction result as an already-decoded lens value,
+// for the same reason as decodedMeta.
+func decodedResult(ops ...xdr.OperationResult) *lens.Value {
+	results := ops
+	return &lens.Value{
+		Type: "TransactionResult",
+		Raw: &xdr.TransactionResult{
+			FeeCharged: 100,
+			Result: xdr.TransactionResultResult{
+				Code:    xdr.TransactionResultCodeTxSuccess,
+				Results: &results,
+			},
+		},
+	}
 }

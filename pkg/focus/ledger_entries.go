@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/stellar/go-stellar-sdk/amount"
@@ -44,6 +45,13 @@ type ledgerChange struct {
 	account string
 	// asset is the canonical trustline asset label for trustline changes.
 	asset string
+	// id is the entry's own identifier, for the entry kinds that have one
+	// besides an account: a claimable balance id or liquidity pool id in hex,
+	// an offer id in decimal, or a data entry's name.
+	//
+	// It is read from the key rather than the entry, so a removed entry —
+	// which carries only a key — is still identifiable.
+	id string
 	// entry is the entry value after (or before, for a state change) the
 	// change. It is nil for a removed entry, which carries only a key.
 	entry *xdr.LedgerEntry
@@ -264,10 +272,20 @@ func sanitiseChange(ch xdr.LedgerEntryChange) (ledgerChange, bool) {
 	case xdr.LedgerEntryTypeOffer:
 		if k, ok := key.GetOffer(); ok {
 			out.account = k.SellerId.Address()
+			out.id = strconv.FormatInt(int64(k.OfferId), 10)
 		}
 	case xdr.LedgerEntryTypeData:
 		if k, ok := key.GetData(); ok {
 			out.account = k.AccountId.Address()
+			out.id = string(k.DataName)
+		}
+	case xdr.LedgerEntryTypeClaimableBalance:
+		if k, ok := key.GetClaimableBalance(); ok {
+			out.id = describeClaimableBalanceID(k.BalanceId)
+		}
+	case xdr.LedgerEntryTypeLiquidityPool:
+		if k, ok := key.GetLiquidityPool(); ok {
+			out.id = describePoolID(k.LiquidityPoolId)
 		}
 	}
 

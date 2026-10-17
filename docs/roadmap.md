@@ -29,6 +29,19 @@ Working and tested:
 - Contract deployment state: the storage a `__constructor` writes — instance,
   persistent and temporary — and the owner it binds, read from the deployment
   transaction's meta with no network call
+- Claimable balances: the balance a transaction created, matched by claimant
+  and amount, and the removal that claiming one is — with each balance's
+  claimants and claim predicates listed in a failure
+- Account data (manage-data): the key-value entries a transaction left on an
+  account, compared as bytes, with the first differing byte named and
+  deletion asserted separately from assignment
+- Liquidity pools: the reserve movement and the LP shares minted or burned by
+  a deposit or a withdrawal, measured across the whole transaction, with a
+  swap against the pool reported as a swap rather than as a wrong amount
+- Offers and DEX trades: the `OfferEntry` a manage-offer left on the book, and
+  the matches a transaction made — read from a result's claim atoms, including
+  trades against a liquidity pool, or reconstructed from the offers a meta
+  shows changing
 - Consumed fee ceilings and the refundable resource fee breakdown
 - Ignore and normalize rules — including globs, index wildcards and
   case-insensitive, tail-anchored patterns — with applied ignores disclosed
@@ -60,6 +73,16 @@ Known limits, stated plainly:
 - **Ledger entry capture is thin.** `focus capture ledger-entry` records the
   entry data but has no convenience for constructing the `LedgerKey` you need
   to pass it.
+- **A meta cannot fully describe a trade.** It records the offers that changed,
+  so the amount a matched offer gave up is exact while what it was paid is not
+  recorded at all, and an owner reducing their own offer is indistinguishable
+  from one that was matched. `AssertTradeExecuted` says so and names the
+  transaction result, whose claim atoms carry both halves of every match;
+  deriving the missing half from the offer price would mean reimplementing the
+  protocol's rounding, which is not a thing a test helper should be doing.
+- **Claim predicates are not evaluated.** Whether a claimable balance is
+  claimable *now* depends on a clock, and assertions do not read one. The
+  predicate is shown in the failure listing instead.
 - **Diagnostic events carry no per-event timestamp.** The protocol records no
   wall clock on a diagnostic event, so a stream is placed in time by the ledger
   it was applied in and that ledger's close time, which a test supplies from
