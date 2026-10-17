@@ -263,6 +263,13 @@ func ContractOwner(t focus.TB, meta focus.Value, contractID, wantOwner string) {
 	focus.AssertContractOwner(fatal(t), meta, contractID, wantOwner)
 }
 
+// ContractAuthValid is focus.AssertContractAuthValid, stopping the test on
+// failure.
+func ContractAuthValid(t focus.TB, envelope focus.Value, expectedInvoker string, expectedCall focus.ContractCall) {
+	t.Helper()
+	focus.AssertContractAuthValid(fatal(t), envelope, expectedInvoker, expectedCall)
+}
+
 // DiagnosticEventOrder is focus.AssertDiagnosticEventOrder, stopping the test
 // on failure.
 func DiagnosticEventOrder(t focus.TB, meta focus.Value, want []focus.DiagnosticEventMatch) {

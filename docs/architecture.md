@@ -42,6 +42,7 @@ pkg/focus/
   results.go          transaction result-code assertions
   result_codes.go     per-operation result-code assertions
   soroban.go          events, return values
+  auth.go             contract invocation authorizations
   constructor.go      deployment state and owner binding (__constructor)
   diagnostic_order.go diagnostic stream order and timelines
   simulation.go       simulated resource budget assertions
@@ -237,6 +238,56 @@ was found (`instance storage`, or the durability that holds it), then lists the
 whole state the constructor wrote. The listing is the point: it is what turns
 "owner is wrong" into "owner is wrong, and here is what else it wrote".
 
+## Contract invocation authorizations
+
+A Soroban transaction states who may act on its behalf through the
+`SorobanAuthorizationEntry` list on each `invoke_host_function` operation:
+one entry per address the contract required authorization from, naming the
+invoker (its credentials) and the invocation tree that invoker authorized
+(its root invocation, with every call beneath it). `auth.go` asserts on that
+list, read from the envelope the test already holds — no RPC call, no
+simulator, no clock — so an invocation test is deterministic and offline for
+the same reason a deployment test is.
+
+The expected invoker is a strkey account or contract address. An entry with
+`SOROBAN_CREDENTIALS_SOURCE_ACCOUNT` authorizes as the transaction's source
+account — the inner transaction's, for a fee bump — so passing the source
+account matches either credential kind; the address credentials (v1, v2 and
+the delegated form) resolve to the address they carry. Credentials whose
+discriminant claims an address the value does not carry never resolve to an
+invoker: they are reported as what they are, not silently skipped.
+
+The expected call is a matcher in the shape the package's events already
+use — contract, function and arguments, with any field left open matching
+anything. Matching walks the entry's whole invocation tree, because an
+authorization covers its root invocation and every call beneath it, and a
+test may assert on any of them. Arguments convert the way
+`AssertConstructorState` converts storage values — a strkey becomes an
+address, a plain string a symbol — and are compared by canonical XDR
+encoding, the same trick constructor state uses so a generated `Equals`
+call can never panic on an unexpected arm.
+
+Two things the assertion deliberately does not do:
+
+- **It does not verify signatures.** What a signature signs is derived from
+  the network passphrase, which an assertion is never handed; verifying it
+  would also make the result depend on a fact outside the envelope. The
+  listing instead shows each entry's nonce and expiration ledger, so a test
+  can pin those.
+- **It does not judge entries the expectation did not mention.** A
+  transaction may authorize more than the call under test; the assertion is
+  about this invoker and this call.
+
+A failure lists every authorization the envelope carries — invoker,
+credential kind, nonce and expiration, and the invocation tree it authorizes
+— and, when a partial match narrows the problem, the single difference that
+failed, with the value wanted and the value found. The listing is rendered
+while the values are known to be well-formed, so printing a failure never
+calls a generated accessor on a value that could panic; the guard runs over
+the expectation as well as the envelope, because an expected argument is
+usually a hand-built `xdr.ScVal` and the generated encoder dereferences
+unset union arms.
+
 ## Golden format
 
 ```json
@@ -428,4 +479,8 @@ violated:
   wrong kind of value (`TestAssertContractOwnerFailureMessages`);
 - a meta that never deployed the contract — a classic meta, a wrong contract id,
   no instance entry — is reported as such rather than as a missing entry
-  (`TestAssertConstructorStateDiagnosesBadInput`).
+  (`TestAssertConstructorStateDiagnosesBadInput`);
+- an authorization mismatch names the invoker and the call, lists the
+  authorizations present — credential kind, nonce and expiration — and
+  distinguishes a transaction that never invoked a contract from one whose
+  call required no authorization (`TestAssertContractAuthValid*`).

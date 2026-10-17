@@ -29,6 +29,10 @@ Working and tested:
 - Contract deployment state: the storage a `__constructor` writes — instance,
   persistent and temporary — and the owner it binds, read from the deployment
   transaction's meta with no network call
+- Contract invocation authorizations: who authorized which call — the invoker
+  behind every credential form (source account, address, address v2,
+  delegated) and the invocation tree covered, read from the envelope with no
+  network call
 - Consumed fee ceilings and the refundable resource fee breakdown
 - Ignore and normalize rules — including globs, index wildcards and
   case-insensitive, tail-anchored patterns — with applied ignores disclosed
@@ -64,6 +68,12 @@ Known limits, stated plainly:
   wall clock on a diagnostic event, so a stream is placed in time by the ledger
   it was applied in and that ledger's close time, which a test supplies from
   capture provenance, rather than by a timestamp on each event.
+- **Authorization signatures are not verified.** `AssertContractAuthValid`
+  checks the structure and identity of an authorization — who authorized
+  which call — from the envelope the test already holds. What a signature
+  signs derives from the network passphrase, which an offline assertion is
+  not given, so the nonce and expiration ledger are shown for a test to pin
+  rather than checked here.
 - **The library API is not frozen.** Expect breaking changes before v1.0.
 
 ## Near term
