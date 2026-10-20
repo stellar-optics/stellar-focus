@@ -271,6 +271,42 @@ A golden test nobody can review is a golden test nobody updates carefully.
 The flag is namespaced `-focus.update` so it never collides with your own
 `-update`.
 
+### Table-driven golden tests
+
+A suite of fixtures is usually a table, and a table needs the failure to say
+which row broke. `AssertAll` runs every case, reports the whole table, and
+attaches the row's index, name and description to the failure:
+
+```go
+g := golden.New(t, golden.WithDir("testdata"))
+
+g.AssertAll([]golden.Case{
+	{Name: "payment_v1", Value: BuildPayment(dest, "100"), Description: "the first payment"},
+	{Name: "payment_v2", Value: BuildPayment(dest, "200"), Description: "a payment that moved"},
+})
+```
+
+```console
+    golden: table summary — 2 case(s), 1 failed:
+      [1/2] payment_v1: ok
+      [2/2] payment_v2: DRIFTED (a payment that moved)
+    golden: [2/2] payment_v2 (a payment that moved) failed:
+    AssertEqualAs: envelopes differ — 1 difference
+      ~ V1.Tx.Operations[0].Body.PaymentOp.Amount
+          - 1000000000 100.0000000 (stroops: 1000000000)
+          + 2000000000 200.0000000 (stroops: 2000000000)
+```
+
+Every case runs even when an earlier one fails, so one broken fixture does
+not hide the state of the rest. A case may carry its own assertion options,
+which are merged over the suite's:
+
+```go
+g.AssertAll([]golden.Case{
+	{Name: "payment", Value: got, Options: []focus.Option{focus.IgnoreSequence()}},
+})
+```
+
 ## Capture
 
 ```sh
@@ -328,6 +364,77 @@ claims, and that a capture timestamp is RFC3339.
 It exits `1` when a fixture has a problem and `0` when everything is clean,
 so it can be a step in CI.
 
+### Finding the fixtures
+
+A directory is searched all the way down, so a suite that keeps its fixtures
+in `testdata/envelopes/`, `testdata/results/` and `testdata/soroban/` is
+checked in full:
+
+```sh
+focus verify testdata/
+```
+
+A path may also be a pattern, where `**` stands for any number of
+directories:
+
+```sh
+focus verify 'testdata/**/*.golden.json'
+focus verify 'testdata/*/envelope.golden.json'
+```
+
+Hidden directories are skipped, and a `.focusignore` file lists the paths to
+leave out — a directory of scratch or benchmark fixtures, say:
+
+```
+# not real chain data
+bench
+scratch/**
+```
+
+### Capturing in bulk
+
+Recording twenty transactions one command at a time means twenty processes
+and twenty connections. `--batch` reads the hashes from a file instead and
+captures them a few at a time:
+
+```sh
+focus capture tx --batch hashes.txt --out testdata/ --concurrency 4
+```
+
+```console
+$ cat hashes.txt
+# the transactions of the fixture suite
+2b2e276a8f99a2927580eca2c8d665c0adaef9526476f5549269798380a66648
+failed_payment 3c3f387b9f0ab3a38690fdb3d9d776d1dbebf063758a66583a6799491b77759
+
+$ focus capture tx --batch hashes.txt --out testdata/
+[1/2] captured tx 2b2e276a -> testdata/2b2e276a_envelope.golden.json
+[2/2] captured tx 3c3f387b -> testdata/failed_payment_3c3f387b_envelope.golden.json
+
+2 transaction(s): 2 captured, 0 not found, 0 failed
+```
+
+A line is a hash, optionally preceded by a prefix for the fixtures it
+produces. Blank lines and `#` comments are ignored, and `-` reads the hashes
+from standard input. A transaction that cannot be captured is reported and
+the batch carries on; `--concurrency` caps how many captures are in flight at
+once, and `--rate` spaces them out for an endpoint that rate-limits.
+
+### Encoding a fixture offline
+
+A payload that is already in hand — in a debug log, a test case, an RPC
+response — becomes a reviewable fixture without a network:
+
+```sh
+focus encode "AAAAAgAAA..." --type TransactionEnvelope --out testdata/payment.golden.json
+cat envelope.xdr | focus encode --type TransactionEnvelope --out testdata/payment.golden.json --description "a payment fixture"
+```
+
+The payload may be base64 or hex. The XDR type is detected when `--type` is
+not given, which is ambiguous for short payloads, so naming it is better
+wherever the type is known. With no `--out` the fixture is printed to
+standard output.
+
 ### Configuration
 
 Flags, `FOCUS_*` environment variables and a config file are three spellings
@@ -352,6 +459,10 @@ force: false
 
 An explicit `--config` must exist; a missing `.focus.yaml` is simply ignored.
 Invalid settings fail before any request is made.
+
+`focus encode` writes one file rather than a directory, so its output
+setting is spelled `out-file` (`FOCUS_OUT_FILE`), while `--out` on the
+command line stays `--out`.
 
 ### Refreshing fixtures
 

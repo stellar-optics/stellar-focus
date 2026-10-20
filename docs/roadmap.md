@@ -77,6 +77,21 @@ Working and tested:
   directory discovery and table-driven assertion running, plus deterministic
   export to Go fuzz seed corpora
 - `focus capture` and `focus verify` against a live network
+- Table-driven golden tests: `golden.AssertAll` runs every case in a table,
+  reports the whole table on failure — `[2/5] payment_v2: DRIFTED` — and
+  repeats each failure with the row's index, name and description attached,
+  so a broken row is found without scanning filenames (`pkg/golden/golden.go`)
+- Recursive fixture discovery for `verify`, `lint` and `refresh`: a directory
+  is searched all the way down, so nested fixtures are no longer skipped; a
+  path may be a pattern, with `**` standing for any number of directories;
+  and a `.focusignore` file lists the paths to leave out
+  (`internal/cli/collect.go`)
+- Bulk capture: `focus capture tx --batch` reads the hashes from a file and
+  captures them with a worker pool, reporting each transaction as it lands
+  and carrying on past one that cannot be captured (`internal/cli/batch.go`)
+- Offline fixture generation: `focus encode` turns a base64 or hex payload
+  into a reviewable fixture, with the XDR type detected when it is not named
+  and no network involved
 - Unified CLI configuration: flags, `FOCUS_*` environment variables and a
   config file, with one documented precedence order and validation before any
   request (`internal/cli/flags.go`)

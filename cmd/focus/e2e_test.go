@@ -115,7 +115,7 @@ func TestE2EHelpListsCommandsAndConfigurationFlags(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
 	}
 	for _, want := range []string{
-		"capture", "verify", "version",
+		"capture", "verify", "encode", "version",
 		"--config", "--network", "--rpc-url", "--timeout", "--color",
 		"FOCUS_",
 	} {
@@ -144,8 +144,8 @@ func TestE2ECaptureRequiresAHash(t *testing.T) {
 	if code == 0 {
 		t.Fatal("capture tx without a hash exited 0")
 	}
-	if !strings.Contains(stderr, "accepts 1 arg") {
-		t.Errorf("stderr does not explain the argument count: %s", stderr)
+	if !strings.Contains(stderr, "--batch") {
+		t.Errorf("stderr does not explain how to name the transactions: %s", stderr)
 	}
 }
 
@@ -276,6 +276,76 @@ func TestE2EExplicitMissingConfigFails(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "reading configuration") {
 		t.Errorf("stderr does not explain the config problem: %s", stderr)
+	}
+}
+
+// TestE2EEncodeWritesAFixture runs the real binary over a payload and checks
+// that a fixture appears, so the command is exercised the way a user runs
+// it rather than through its internals.
+func TestE2EEncodeWritesAFixture(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile(filepath.Join("..", "..", "testdata", "tx_failed.env.txt"))
+	if err != nil {
+		t.Fatalf("reading the envelope fixture: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "payment.golden.json")
+
+	stdout, stderr, code := runFocus(t, dir, nil,
+		"encode", strings.TrimSpace(string(payload)),
+		"--type", "TransactionEnvelope", "--out", path)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "wrote") {
+		t.Errorf("encode printed nothing useful:\n%s", stdout)
+	}
+
+	fixture, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("loading the fixture: %v", err)
+	}
+	if fixture.XDR != strings.TrimSpace(string(payload)) {
+		t.Error("the stored XDR does not match the payload")
+	}
+}
+
+// TestE2EEncodeRejectsAnEmptyPayload checks that the command explains itself
+// rather than writing an empty fixture.
+func TestE2EEncodeRejectsAnEmptyPayload(t *testing.T) {
+	t.Parallel()
+
+	_, stderr, code := runFocus(t, t.TempDir(), nil, "encode", "")
+	if code == 0 {
+		t.Fatal("an empty payload exited 0")
+	}
+	if !strings.Contains(stderr, "no XDR payload") {
+		t.Errorf("stderr does not explain the problem: %s", stderr)
+	}
+}
+
+// TestE2EVerifyFindsNestedFixtures checks that a suite whose fixtures live
+// in subdirectories is checked in full by the real binary.
+func TestE2EVerifyFindsNestedFixtures(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	testdata := filepath.Join(dir, "testdata")
+	nested := filepath.Join(testdata, "soroban")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+	writeHandWrittenFixture(t, testdata)
+	writeHandWrittenFixture(t, nested)
+
+	stdout, stderr, code := runFocus(t, dir, nil, "verify", "testdata")
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stderr: %s)", code, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 0 ok, 0 drifted, 2 skipped") {
+		t.Errorf("the nested fixture was not checked:\n%s", stdout)
 	}
 }
 

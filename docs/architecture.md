@@ -25,10 +25,12 @@ print when it fails*, not *what does this return when it passes*.
 cmd/focus/            main; maps errors to exit codes
   e2e_test.go         builds and runs the real binary, offline
 internal/cli/
-  cli.go            root command, capture, version
+  cli.go            root command, capture, encode, lint, refresh, version
   flags.go          flag, FOCUS_* env and config-file resolution  ← seam: new settings
   exitcodes.go      the exit-code contract and error classification
   verify.go         verify: re-check stored fixtures against the chain
+  collect.go        finding the fixtures to check: recursion, patterns, .focusignore
+  batch.go          capturing many transactions from one batch file
 internal/faketb/      recording focus.TB — lets focus test its own messages
 internal/fakesource/  in-memory capture.Source, so the CLI tests run offline
 pkg/focus/
@@ -65,6 +67,8 @@ pkg/focus/
   require/            Fatalf mirrors of everything above
   require/audit.go    AST parity audit between focus and require
 pkg/golden/           golden files, -focus.update
+  golden.go         the Golden type: Assert, AssertAll, Build, Load, Save
+  lint.go           static checks on a stored fixture
 pkg/capture/
   capture.go        Source interface, RPC impl, Verify  ← seam: new sources
   rpc.go            the Soroban RPC Source
@@ -107,6 +111,12 @@ key `rpc-url`), so help text, environment and config file use the same
 vocabulary. The capture settings (`--out`, `--prefix`, `--force`) live on the
 `capture` parent command so both subcommands share one definition rather than
 each re-declaring them.
+
+One key departs from that rule, because two commands spell a setting the same
+way and mean different things by it: `capture` writes into a directory and
+`encode` writes one file, so `encode`'s `--out` is stored under `out-file`
+(`FOCUS_OUT_FILE`, YAML key `out-file`). The flag name stays `--out`; only
+the key it is stored under differs.
 
 An explicit `--config` must exist; a missing `.focus.yaml` in the working
 directory is not an error, because most projects have no focus config at all.
@@ -589,6 +599,39 @@ Go fuzz corpus string seed into the directory supplied by the caller, such as
 `testdata/fuzz/FuzzEnvelope`. These helpers only read or write local files;
 they do not contact a network.
 
+### Table-driven golden tests
+
+`golden.AssertAll` runs a table of `golden.Case` values — each with a name, a
+value, a description and its own assertion options — against their golden
+files, and reports the whole table when something fails:
+
+```go
+g.AssertAll([]golden.Case{
+  {Name: "payment_v1", Value: got, Description: "the first payment"},
+  {Name: "payment_v2", Value: got, Options: []focus.Option{focus.IgnoreSequence()}},
+})
+```
+
+Two decisions are worth stating, because they are what the table is for:
+
+- **Every case runs.** A table that stopped at the first failure would hide
+  how much of the table is broken, which is the opposite of what a table is
+  for.
+- **The failure names the row.** The summary lists every case with its index
+  and status (`[2/3] payment_v2: DRIFTED`), and each failure is repeated with
+  the row's index, name and description attached, so the diff that follows
+  says which row it belongs to.
+
+The context is attached by intercepting the only channel assertions have:
+`TB.Errorf`. A `recorder` implements `focus.TB`, collects what the assertion
+reported, and the rows are replayed with their context once the table has
+run. Assertions never fail fatally, so nothing is lost by deferring the
+replay.
+
+A case's options are merged over the suite's rather than replacing them:
+focus options accumulate, so a case can add to what the suite already asks
+for without dropping it.
+
 ### Fixtures in JSON, YAML or text
 
 That data has three spellings, and `pkg/golden/serializer.go` is the seam
@@ -720,6 +763,53 @@ rule holds:
   code is addressed by the hash of its bytes, so this is free — and fails
   with `ErrContractCodeHashMismatch` instead of archiving a contract that
   does not match the one the ledger names.
+
+### Finding the fixtures to check
+
+`internal/cli/collect.go` turns a path argument into the list of fixtures to
+check, and the rules are deliberately boring:
+
+- A **directory** is searched all the way down. A suite that keeps its
+  fixtures in `testdata/envelopes/`, `testdata/results/` and
+  `testdata/soroban/` used to have its nested fixtures silently skipped, which
+  is worse than a fixture that is reported.
+- A **pattern** is matched against the file system, with `**` standing for any
+  number of directories. `filepath.Glob` cannot do that — it reads `**` as a
+  single `*` — so `collect.go` compiles the pattern itself and walks the tree
+  below its static prefix.
+- A **file** is checked whatever its name, so a fixture can be checked on its
+  own.
+
+Hidden directories are skipped, and a `.focusignore` file lists the paths to
+leave out. A rule without wildcards names a path and excludes everything
+beneath it; a rule with wildcards is matched against the path relative to the
+file that carried it.
+
+### Capturing in bulk
+
+`focus capture tx --batch` reads the hashes from a file and captures them
+with a small pool of workers. Two things follow from that shape:
+
+- **One bad transaction does not end the batch.** A hash that has aged out of
+  the endpoint's retention window says nothing about the other twenty-nine, so
+  it is reported and the batch carries on. The command still exits non-zero,
+  because the caller asked for transactions it did not get.
+- **The fixtures are named after their transaction.** Two transactions in one
+  batch produce files with the same record names, so the short hash is part of
+  the filename: `2b2e276a_envelope.golden.json`. A prefix the user gives goes
+  in front of it.
+
+`--concurrency` caps how many captures are in flight at once and `--rate`
+spaces them out, using the same `capture.Limiter` the rest of the capture
+path uses.
+
+### Encoding a fixture offline
+
+`focus encode` turns a payload that is already in hand into a fixture. It
+contacts nothing: the payload is base64 or hex, the type is detected when it
+is not named, and `golden.Build` and `golden.Save` do the rest. A payload
+that reads as both base64 and hex — a short string of hex digits is valid
+base64 too — is resolved by trying the reading that decodes as XDR.
 
 ## Adding an assertion
 

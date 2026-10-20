@@ -514,3 +514,252 @@ func TestLintReportsAnEmptyDirectory(t *testing.T) {
 		t.Errorf("error is not specific: %v", err)
 	}
 }
+
+// TestLintFindsNestedFixtures checks that the same nested fixtures verify
+// finds are linted too: a fixture in a subdirectory is still a fixture.
+func TestLintFindsNestedFixtures(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "soroban")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, "envelope.golden.json"),
+		filepath.Join(nested, "result.golden.json"),
+	} {
+		fixture, err := golden.Build(fixtureXDR(t, "tx_failed.env.txt"), "TransactionEnvelope", "clean", nil)
+		if err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
+		if err := golden.Save(path, fixture); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	stdout, stderr, err := run(t, "lint", dir)
+	if err != nil {
+		t.Fatalf("lint reported a problem with clean fixtures: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 clean") {
+		t.Errorf("the nested fixture was not linted:\n%s", stdout)
+	}
+}
+
+// mustWriteFixture writes an empty file, for tests that care about which
+// paths a scan finds rather than what is in them.
+func mustWriteFixture(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+// TestCollectFixturesFindsNestedDirectories is the case the old scan missed:
+// a suite that keeps its fixtures in subdirectories must have all of them
+// checked, not just the ones at the top.
+func TestCollectFixturesFindsNestedDirectories(t *testing.T) {
+	dir := t.TempDir()
+
+	top := filepath.Join(dir, "envelope.golden.json")
+	nested := filepath.Join(dir, "soroban", "result.golden.json")
+	deeper := filepath.Join(dir, "envelopes", "payments", "v2.golden.json")
+	mustWriteFixture(t, top)
+	mustWriteFixture(t, nested)
+	mustWriteFixture(t, deeper)
+	mustWriteFixture(t, filepath.Join(dir, "notes.txt"))
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, path := range paths {
+		found[path] = true
+	}
+	for _, want := range []string{top, nested, deeper} {
+		if !found[want] {
+			t.Errorf("%s was not collected:\n%v", want, paths)
+		}
+	}
+	if found[filepath.Join(dir, "notes.txt")] {
+		t.Errorf("a file that is not a fixture was collected:\n%v", paths)
+	}
+}
+
+// TestCollectFixturesSkipsHiddenDirectories checks that version-control and
+// editor directories are left alone.
+func TestCollectFixturesSkipsHiddenDirectories(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, filepath.Join(dir, ".git", "hidden.golden.json"))
+	mustWriteFixture(t, filepath.Join(dir, ".scratch", "hidden.golden.json"))
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursFocusignore checks that a suite can keep
+// throwaway fixtures next to the real ones without them being checked.
+func TestCollectFixturesHonoursFocusignore(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	ignored := filepath.Join(dir, "bench", "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, ignored)
+
+	ignoreFile := filepath.Join(dir, ".focusignore")
+	if err := os.WriteFile(ignoreFile,
+		[]byte("# scratch fixtures\nbench\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursFocusignoreInTheWorkingDirectory checks that the
+// ignore file at the root of a project applies to a relative scan.
+func TestCollectFixturesHonoursFocusignoreInTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join("testdata", "envelope.golden.json")
+	ignored := filepath.Join("testdata", "bench", "envelope.golden.json")
+	mustWriteFixture(t, filepath.Join(dir, kept))
+	mustWriteFixture(t, filepath.Join(dir, ignored))
+
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"),
+		[]byte("testdata/bench\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	paths, err := collectFixtures([]string{"testdata"})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursWildcardIgnoreRules checks that a rule may carry
+// wildcards, and that it then matches the path it names.
+func TestCollectFixturesHonoursWildcardIgnoreRules(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	ignored := filepath.Join(dir, "bench", "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, ignored)
+
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"),
+		[]byte("be*\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesMatchesGlobPatterns checks that a pattern reaches into
+// nested directories.
+func TestCollectFixturesMatchesGlobPatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	top := filepath.Join(dir, "envelope.golden.json")
+	nested := filepath.Join(dir, "soroban", "result.golden.json")
+	mustWriteFixture(t, top)
+	mustWriteFixture(t, nested)
+
+	paths, err := collectFixtures([]string{filepath.Join(dir, "**", "*.golden.json")})
+	if err != nil {
+		t.Fatalf("collectFixtures(pattern): %v", err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("pattern matched %v, want both fixtures", paths)
+	}
+
+	// A pattern without "**" stays in one directory.
+	paths, err = collectFixtures([]string{filepath.Join(dir, "*.golden.json")})
+	if err != nil {
+		t.Fatalf("collectFixtures(pattern): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != top {
+		t.Errorf("pattern matched %v, want only %s", paths, top)
+	}
+}
+
+// TestCollectFixturesReportsAMissingPath checks that a path that is not
+// there is an error rather than a silent no-op.
+func TestCollectFixturesReportsAMissingPath(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := collectFixtures([]string{filepath.Join(dir, "nope")}); err == nil {
+		t.Error("a missing path was accepted")
+	}
+}
+
+// TestVerifyChecksNestedFixtures is the end of the story: a suite whose
+// fixtures live in subdirectories is checked in full.
+func TestVerifyChecksNestedFixtures(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "soroban")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+	captureIntoDir(t, src, dir)
+	captureIntoDir(t, src, nested)
+
+	stdout, stderr, err := run(t, "verify", dir)
+	if err != nil {
+		t.Fatalf("verify: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "4 checked: 4 ok") {
+		t.Errorf("nested fixtures were not checked:\n%s", stdout)
+	}
+}
+
+// TestVerifyAcceptsAPattern checks that a pattern is a valid argument.
+func TestVerifyAcceptsAPattern(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, src, dir)
+
+	stdout, stderr, err := run(t, "verify", filepath.Join(dir, "*.golden.json"))
+	if err != nil {
+		t.Fatalf("verify: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("pattern did not match the fixtures:\n%s", stdout)
+	}
+}

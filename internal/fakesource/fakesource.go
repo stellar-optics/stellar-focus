@@ -8,11 +8,15 @@ package fakesource
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 )
 
 // Source is a scriptable capture.Source.
+//
+// It is safe for concurrent use, because the batch capture calls it from
+// several goroutines at once.
 type Source struct {
 	// Transactions maps a hash to the records returned for it.
 	Transactions map[string][]capture.Record
@@ -30,6 +34,8 @@ type Source struct {
 
 	network  string
 	endpoint string
+
+	mu sync.Mutex
 }
 
 // New returns a fake pointed at a nominal network.
@@ -56,6 +62,10 @@ func (s *Source) NetworkPassphrase(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.PassphraseErr != nil {
 		return "", s.PassphraseErr
 	}
@@ -64,14 +74,20 @@ func (s *Source) NetworkPassphrase(ctx context.Context) (string, error) {
 
 // Transaction implements capture.Source.
 func (s *Source) Transaction(ctx context.Context, hash string) ([]capture.Record, error) {
+	s.mu.Lock()
 	s.Calls++
+	s.mu.Unlock()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if s.Err != nil {
 		return nil, s.Err
 	}
+
+	s.mu.Lock()
 	records, ok := s.Transactions[hash]
+	s.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("transaction %s: %w", hash, capture.ErrNotFound)
 	}
@@ -80,14 +96,20 @@ func (s *Source) Transaction(ctx context.Context, hash string) ([]capture.Record
 
 // LedgerEntry implements capture.Source.
 func (s *Source) LedgerEntry(ctx context.Context, key string) ([]capture.Record, error) {
+	s.mu.Lock()
 	s.Calls++
+	s.mu.Unlock()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if s.Err != nil {
 		return nil, s.Err
 	}
+
+	s.mu.Lock()
 	records, ok := s.Entries[key]
+	s.mu.Unlock()
 	if !ok {
 		return nil, fmt.Errorf("ledger key %s: %w", key, capture.ErrNotFound)
 	}

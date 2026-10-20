@@ -237,6 +237,226 @@ func TestPath(t *testing.T) {
 	}
 }
 
+// writeGolden records a fixture under a name, exactly as a golden test would
+// have recorded it.
+func writeGolden(t *testing.T, dir, name, xdr string) {
+	t.Helper()
+
+	fixture, err := golden.Build(xdr, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, name+".golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+}
+
+// TestAssertAllPassesWhenEveryCaseMatches is the ordinary case: a table of
+// fixtures that all still match.
+func TestAssertAllPassesWhenEveryCaseMatches(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 200))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100), Description: "the first payment"},
+		{Name: "payment_v2", Value: buildEnvelope(t, 200)},
+	}
+	if !g.AssertAll(cases) {
+		t.Errorf("AssertAll() failed against matching golden files:\n%s", tb.Output())
+	}
+	if tb.Failed() {
+		t.Errorf("AssertAll() reported a failure for a table that matched:\n%s", tb.Output())
+	}
+}
+
+// TestAssertAllReportsTheFailingCaseWithItsIndexAndDescription is the reason
+// the table exists: a failure must say which entry failed, without the
+// reader scanning filenames.
+func TestAssertAllReportsTheFailingCaseWithItsIndexAndDescription(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v3", buildEnvelope(t, 300))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100), Description: "the first payment"},
+		{Name: "payment_v2", Value: buildEnvelope(t, 200), Description: "a payment that moved"},
+		{Name: "payment_v3", Value: buildEnvelope(t, 300)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with a drifted case in the table")
+	}
+
+	out := tb.Output()
+	for _, want := range []string{
+		"table summary",
+		"[1/3] payment_v1: ok",
+		"[2/3] payment_v2: DRIFTED",
+		"[3/3] payment_v3: ok",
+		"a payment that moved",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output does not contain %q:\n%s", want, out)
+		}
+	}
+	// The diff itself must still be there: the summary says which entry
+	// failed, the diff says what changed.
+	if !strings.Contains(out, "Body.PaymentOp.Amount") {
+		t.Errorf("failure output does not show what changed:\n%s", out)
+	}
+}
+
+// TestAssertAllRunsEveryCaseAfterAFailure checks that a broken entry does not
+// hide the rest of the table.
+func TestAssertAllRunsEveryCaseAfterAFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v3", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 900)},
+		{Name: "payment_v2", Value: buildEnvelope(t, 100)},
+		{Name: "payment_v3", Value: buildEnvelope(t, 800)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with two drifted cases in the table")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[1/3] payment_v1: DRIFTED") {
+		t.Errorf("the first broken case is not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "[3/3] payment_v3: DRIFTED") {
+		t.Errorf("the last case did not run after an earlier failure:\n%s", out)
+	}
+	if !strings.Contains(out, "[2/3] payment_v2: ok") {
+		t.Errorf("the passing case is not reported:\n%s", out)
+	}
+	if got := strings.Count(out, "is out of date"); got != 2 {
+		t.Errorf("reported %d stale fixtures, want 2:\n%s", got, out)
+	}
+}
+
+// TestAssertAllMergesCaseOptionsWithSuiteOptions checks that a case can ask
+// for its own rules without losing the suite's.
+func TestAssertAllMergesCaseOptionsWithSuiteOptions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "volatile", buildEnvelopeSeq(t, 111, 100))
+	writeGolden(t, dir, "strict", buildEnvelopeSeq(t, 111, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false))
+
+	cases := []golden.Case{
+		{
+			Name:    "volatile",
+			Value:   buildEnvelopeSeq(t, 222, 100),
+			Options: []focus.Option{focus.IgnoreSequence()},
+		},
+		{Name: "strict", Value: buildEnvelopeSeq(t, 222, 100)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed although one case asked for no rules at all")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[1/2] volatile: ok") {
+		t.Errorf("the per-case option was not applied:\n%s", out)
+	}
+	if !strings.Contains(out, "[2/2] strict: DRIFTED") {
+		t.Errorf("the suite's options were not applied to the second case:\n%s", out)
+	}
+}
+
+// TestAssertAllKeepsTheSuiteOptions checks that a case's own options add to
+// the suite's rather than replacing them: here the suite ignores the
+// sequence number and the case ignores the fee, so dropping either one leaves
+// a difference behind.
+func TestAssertAllKeepsTheSuiteOptions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "env", buildEnvelopeWith(t, 111, 100, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false),
+		golden.WithOptions(focus.IgnoreSequence()))
+
+	cases := []golden.Case{
+		{
+			Name:    "env",
+			Value:   buildEnvelopeWith(t, 222, 200, 100),
+			Options: []focus.Option{focus.IgnorePaths("**.Fee")},
+		},
+	}
+	if !g.AssertAll(cases) {
+		t.Errorf("the suite's option was dropped when the case had its own:\n%s", tb.Output())
+	}
+}
+
+// TestAssertAllReportsAMissingFixturePerCase covers the first run of a new
+// table, where one of the fixtures has not been recorded yet.
+func TestAssertAllReportsAMissingFixturePerCase(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "present", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "present", Value: buildEnvelope(t, 100)},
+		{Name: "absent", Value: buildEnvelope(t, 200)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with a fixture that does not exist")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[2/2] absent: DRIFTED") {
+		t.Errorf("the missing fixture is not reported as a failed case:\n%s", out)
+	}
+	if !strings.Contains(out, "does not exist yet") {
+		t.Errorf("the missing fixture does not say how to create it:\n%s", out)
+	}
+}
+
+// TestAssertAllOnAnEmptyTable checks that an empty table is a pass, not a
+// failure: there is nothing to be wrong with.
+func TestAssertAllOnAnEmptyTable(t *testing.T) {
+	t.Parallel()
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(t.TempDir()))
+
+	if !g.AssertAll(nil) {
+		t.Error("AssertAll() failed for an empty table")
+	}
+	if tb.Failed() {
+		t.Errorf("an empty table reported a failure:\n%s", tb.Output())
+	}
+}
+
 // TestLoadRejectsAnUnknownFormat guards against silently misreading a file
 // written by a future version.
 func TestLoadRejectsAnUnknownFormat(t *testing.T) {

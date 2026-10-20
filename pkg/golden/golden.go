@@ -173,12 +173,29 @@ func (g *Golden) Path(name string) string {
 // what to do next.
 func (g *Golden) Assert(name string, actual focus.Value) bool {
 	g.t.Helper()
+	return g.assert(g.t, name, actual, "", nil)
+}
+
+// assert compares a value against the named golden file, reporting through
+// tb.
+//
+// description and extra are supplied by AssertAll: a plain Assert writes the
+// suite's description into a new fixture and uses the suite's options only.
+func (g *Golden) assert(
+	tb focus.TB,
+	name string,
+	actual focus.Value,
+	description string,
+	extra []focus.Option,
+) bool {
+	g.t.Helper()
+	tb.Helper()
 
 	path := g.Path(name)
 
 	if Update() {
-		if err := g.write(path, actual); err != nil {
-			g.t.Errorf("golden: updating %s: %v", path, err)
+		if err := g.write(path, actual, description); err != nil {
+			tb.Errorf("golden: updating %s: %v", path, err)
 			return false
 		}
 		return true
@@ -187,17 +204,17 @@ func (g *Golden) Assert(name string, actual focus.Value) bool {
 	want, err := LoadAs(path, g.format)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			g.t.Errorf("golden: %s does not exist yet.\n"+
+			tb.Errorf("golden: %s does not exist yet.\n"+
 				"Create it by running:\n\n    go test ./... -focus.update\n", path)
 			return false
 		}
-		g.t.Errorf("golden: reading %s: %v", path, err)
+		tb.Errorf("golden: reading %s: %v", path, err)
 		return false
 	}
 	if g.vars != nil {
 		want, err = InterpolateFixture(want, g.vars)
 		if err != nil {
-			g.t.Errorf("golden: interpolating %s: %v", path, err)
+			tb.Errorf("golden: interpolating %s: %v", path, err)
 			return false
 		}
 	}
@@ -210,25 +227,204 @@ func (g *Golden) Assert(name string, actual focus.Value) bool {
 	// The comparison is against the stored XDR, never the decoded rendering:
 	// the decoded form exists for humans reading diffs, and treating it as
 	// authoritative would make the assertion depend on lens's formatting.
-	opts := g.opts
-	if g.noiseSuppression {
-		opts = append(noiseSuppressionOptions(), opts...)
-	}
-	ok := focus.AssertEqualAs(g.t, typeName, want.XDR, actual, opts...)
+	ok := focus.AssertEqualAs(tb, typeName, want.XDR, actual, g.options(extra)...)
 	if !ok {
-		g.t.Errorf("golden: %s is out of date.\n"+
+		tb.Errorf("golden: %s is out of date.\n"+
 			"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n", path)
 	}
 	return ok
 }
 
+// options merges the suite's assertion options with a case's own.
+//
+// The case's options come last, so a case can add to what the suite already
+// asks for. focus options accumulate rather than replace one another, so
+// nothing is overridden by the order; the order is only about reading.
+func (g *Golden) options(extra []focus.Option) []focus.Option {
+	opts := make([]focus.Option, 0, len(g.opts)+len(extra))
+	if g.noiseSuppression {
+		opts = append(opts, noiseSuppressionOptions()...)
+	}
+	opts = append(opts, g.opts...)
+	opts = append(opts, extra...)
+	return opts
+}
+
 // write records a value as a golden file.
-func (g *Golden) write(path string, actual focus.Value) error {
-	fixture, err := Build(actual, g.typeHnt, g.desc, nil)
+//
+// A description given for one case overrides the suite's own, so a table can
+// say what each of its fixtures is for.
+func (g *Golden) write(path string, actual focus.Value, description string) error {
+	if description == "" {
+		description = g.desc
+	}
+	fixture, err := Build(actual, g.typeHnt, description, nil)
 	if err != nil {
 		return err
 	}
 	return SaveAs(path, fixture, g.format)
+}
+
+// Case is one entry of a table-driven golden test.
+//
+// The description and the options travel with the entry rather than with the
+// suite, so a failure can say which entry failed and what it was for — the
+// context a list of bare names cannot carry.
+type Case struct {
+	// Name is the golden file's base name, without a suffix.
+	Name string
+	// Value is the XDR compared against the golden file.
+	Value focus.Value
+	// Description is a note recorded in the fixture when it is written, and
+	// shown beside the entry in the failure summary.
+	Description string
+	// Options are assertion options for this entry alone, merged over the
+	// suite's own options.
+	Options []focus.Option
+}
+
+// AssertAll compares every case of a table against its golden file.
+//
+// Every case runs even when an earlier one fails: a table that stops at the
+// first failure hides how much of the table is broken. The result is false
+// when any case failed.
+//
+// A failure reports the whole table, so the broken entry can be found without
+// scanning filenames:
+//
+//	golden: table summary — 3 case(s), 1 failed:
+//	  [1/3] payment_v1: ok
+//	  [2/3] payment_v2: DRIFTED (a payment that moved)
+//	  [3/3] payment_v3: ok
+//
+// and each failure is repeated with the entry's index, name and description
+// attached, so the diff that follows says which entry it belongs to.
+func (g *Golden) AssertAll(cases []Case) bool {
+	g.t.Helper()
+
+	results := make([]caseResult, 0, len(cases))
+	failed := 0
+	for i, c := range cases {
+		result := g.runCase(i+1, c)
+		if !result.ok {
+			failed++
+		}
+		results = append(results, result)
+	}
+
+	summary := tableSummary(results, failed)
+	if failed == 0 {
+		g.logf("%s", summary)
+		return true
+	}
+
+	g.t.Errorf("%s", summary)
+	for _, r := range results {
+		for _, msg := range r.messages {
+			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
+		}
+	}
+	return false
+}
+
+// runCase runs one case of a table and collects what it reported.
+func (g *Golden) runCase(index int, c Case) caseResult {
+	g.t.Helper()
+
+	rec := &recorder{tb: g.t}
+	ok := g.assert(rec, c.Name, c.Value, c.Description, c.Options)
+
+	result := caseResult{index: index, name: c.Name, description: c.Description, ok: ok}
+	result.messages = append(result.messages, rec.errs...)
+	result.messages = append(result.messages, rec.fatals...)
+	return result
+}
+
+// logf writes to the test log when the TB has one.
+//
+// focus.TB is deliberately small — Helper, Errorf, Fatalf and Name — so there
+// is no way to report a passing summary through it without failing the test.
+// A TB that also offers Logf gets the summary for free; one that does not
+// simply does not see it.
+func (g *Golden) logf(format string, args ...any) {
+	if l, ok := g.t.(interface{ Logf(string, ...any) }); ok {
+		l.Logf(format, args...)
+	}
+}
+
+// caseResult is what one case of a table did.
+type caseResult struct {
+	// index is the case's position in the table, counting from one.
+	index int
+	// name is the case's golden file name.
+	name string
+	// description is the case's note, when it has one.
+	description string
+	// ok reports whether the case matched its golden file.
+	ok bool
+	// messages are the failures the case reported.
+	messages []string
+}
+
+// label names the case in a failure message.
+func (r caseResult) label(total int) string {
+	label := fmt.Sprintf("[%d/%d] %s", r.index, total, r.name)
+	if r.description != "" {
+		label += " (" + r.description + ")"
+	}
+	return label
+}
+
+// status is the word the summary table uses for the case.
+func (r caseResult) status() string {
+	if r.ok {
+		return "ok"
+	}
+	return "DRIFTED"
+}
+
+// tableSummary renders the table of cases and how each of them went.
+func tableSummary(results []caseResult, failed int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "golden: table summary — %d case(s), %d failed:", len(results), failed)
+	for _, r := range results {
+		fmt.Fprintf(&b, "\n  [%d/%d] %s: %s", r.index, len(results), r.name, r.status())
+		if r.description != "" {
+			fmt.Fprintf(&b, " (%s)", r.description)
+		}
+	}
+	return b.String()
+}
+
+// recorder captures what an assertion reports, so a table-driven failure can
+// be re-emitted with the entry's identity attached to it.
+//
+// Assertions report through TB.Errorf and have no other channel, so the
+// context a table needs — the entry's index, name and description — can only
+// be added by intercepting that channel.
+type recorder struct {
+	tb     focus.TB
+	errs   []string
+	fatals []string
+}
+
+// Helper implements focus.TB.
+func (r *recorder) Helper() { r.tb.Helper() }
+
+// Name implements focus.TB.
+func (r *recorder) Name() string { return r.tb.Name() }
+
+// Errorf implements focus.TB, recording the message rather than reporting it.
+func (r *recorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// Fatalf implements focus.TB, recording the message rather than aborting.
+//
+// The assertions this package uses report through Errorf, so nothing here
+// ends a test early; a fatal would be replayed as an ordinary failure.
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.fatals = append(r.fatals, fmt.Sprintf(format, args...))
 }
 
 // Build turns a value into a Fixture, decoding it for the human-readable

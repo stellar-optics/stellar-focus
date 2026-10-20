@@ -10,8 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -34,12 +32,19 @@ func newVerifyCmd(cfg *config, stdout, stderr io.Writer) *cobra.Command {
 Only fixtures carrying capture provenance can be checked; hand-written ones
 are skipped and reported as such rather than silently passing.
 
-Paths may be files or directories. With no path, testdata is checked.
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are checked too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is checked.
 
 Exit status is 0 when every checked fixture still matches, 2 when at least one
 has drifted, and 1 when a fixture could not be checked at all.`,
 		Example: `  focus verify
-  focus verify testdata/ --network mainnet`,
+  focus verify testdata/ --network mainnet
+  focus verify 'testdata/**/*.golden.json'`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				args = []string{defaultVerifyDir}
@@ -116,25 +121,4 @@ has drifted, and 1 when a fixture could not be checked at all.`,
 			return nil
 		},
 	}
-}
-
-// collectFixtures expands files and directories into a list of fixture paths.
-func collectFixtures(args []string) ([]string, error) {
-	var out []string
-	for _, arg := range args {
-		info, err := os.Stat(arg)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", arg, err)
-		}
-		if !info.IsDir() {
-			out = append(out, arg)
-			continue
-		}
-		entries, err := filepath.Glob(filepath.Join(arg, "*.golden.json"))
-		if err != nil {
-			return nil, fmt.Errorf("scanning %s: %w", arg, err)
-		}
-		out = append(out, entries...)
-	}
-	return out, nil
 }

@@ -41,28 +41,43 @@ const (
 
 // Configuration keys. They are the flag names, so help text, environment
 // variables and config files all use the same vocabulary.
+//
+// The one exception is keyOutFile: encode writes one file where capture
+// writes a directory, so its --out is stored under a key of its own.
 const (
-	keyConfig  = "config"
-	keyNetwork = "network"
-	keyRPCURL  = "rpc-url"
-	keyTimeout = "timeout"
-	keyColor   = "color"
-	keyOut     = "out"
-	keyPrefix  = "prefix"
-	keyForce   = "force"
-	keyMask    = "mask-addresses"
+	keyConfig      = "config"
+	keyNetwork     = "network"
+	keyRPCURL      = "rpc-url"
+	keyTimeout     = "timeout"
+	keyColor       = "color"
+	keyOut         = "out"
+	keyPrefix      = "prefix"
+	keyForce       = "force"
+	keyMask        = "mask-addresses"
+	keyBatch       = "batch"
+	keyConcurrency = "concurrency"
+	keyRate        = "rate"
+	keyOutFile     = "out-file"
+	keyType        = "type"
+	keyDescription = "description"
 )
 
 // Defaults, declared once so a flag and a config fallback cannot drift apart.
 const (
-	defaultNetwork = capture.NetworkTestnet
-	defaultRPCURL  = ""
-	defaultTimeout = 30 * time.Second
-	defaultColor   = "auto"
-	defaultOutDir  = "testdata"
-	defaultPrefix  = ""
-	defaultForce   = false
-	defaultMask    = false
+	defaultNetwork     = capture.NetworkTestnet
+	defaultRPCURL      = ""
+	defaultTimeout     = 30 * time.Second
+	defaultColor       = "auto"
+	defaultOutDir      = "testdata"
+	defaultPrefix      = ""
+	defaultForce       = false
+	defaultMask        = false
+	defaultBatch       = ""
+	defaultConcurrency = 4
+	defaultRate        = 0
+	defaultOutFile     = ""
+	defaultType        = ""
+	defaultDescription = ""
 )
 
 // discoveredConfigFiles are checked, in order, when --config is not given.
@@ -97,6 +112,8 @@ func newConfig() *config {
 	v.SetDefault(keyOut, defaultOutDir)
 	v.SetDefault(keyPrefix, defaultPrefix)
 	v.SetDefault(keyForce, defaultForce)
+	v.SetDefault(keyConcurrency, defaultConcurrency)
+	v.SetDefault(keyRate, defaultRate)
 
 	return &config{v: v}
 }
@@ -143,6 +160,55 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyPrefix)
 	c.bind(flags, keyForce)
 	c.bind(flags, keyMask)
+}
+
+// bindBatchFlags declares the flags a batch capture accepts.
+//
+// They live on the transaction subcommand rather than on the capture parent,
+// because only a transaction can be captured in bulk.
+func (c *config) bindBatchFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+
+	flags.String(keyBatch, defaultBatch,
+		"capture every transaction hash listed in this file instead of one hash")
+	flags.Int(keyConcurrency, defaultConcurrency,
+		"how many captures may be in flight at once")
+	flags.Duration(keyRate, defaultRate,
+		"minimum time between two captures, for endpoints that rate-limit")
+
+	c.bind(flags, keyBatch)
+	c.bind(flags, keyConcurrency)
+	c.bind(flags, keyRate)
+}
+
+// bindEncodeFlags declares the flags the encode command accepts.
+//
+// Its output flag is called --out, like capture's, but it names one file
+// rather than a directory, so it is bound to a key of its own: "out" means
+// the directory capture writes into, and "out-file" the file encode writes.
+func (c *config) bindEncodeFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+
+	flags.String(keyOut, defaultOutFile,
+		"file to write the fixture to; standard output when not given")
+	flags.String(keyType, defaultType,
+		"XDR type of the payload; detected when not given")
+	flags.String(keyDescription, defaultDescription,
+		"note recorded in the fixture")
+
+	c.bindAs(flags, keyOutFile, keyOut)
+	c.bind(flags, keyType)
+	c.bind(flags, keyDescription)
+}
+
+// bindAs attaches a declared flag to Viper under a key of its own.
+//
+// Two commands can spell a setting the same way and mean different things
+// by it, so the key a flag is stored under may differ from its name.
+func (c *config) bindAs(flags *pflag.FlagSet, key, name string) {
+	if err := c.v.BindPFlag(key, flags.Lookup(name)); err != nil {
+		panic(fmt.Sprintf("focus: binding --%s: %v", name, err))
+	}
 }
 
 // bind attaches a declared flag to Viper. A missing flag is a programming
@@ -223,6 +289,12 @@ func (c *config) validate() error {
 	if c.outDir() == "" {
 		return usageErrorf("out must not be empty")
 	}
+	if c.concurrency() < 1 {
+		return usageErrorf("concurrency must be at least 1, got %d", c.concurrency())
+	}
+	if c.rate() < 0 {
+		return usageErrorf("rate must not be negative, got %s", c.rate())
+	}
 	return nil
 }
 
@@ -269,4 +341,37 @@ func (c *config) force() bool {
 // deterministic mock accounts.
 func (c *config) maskAddresses() bool {
 	return c.v.GetBool(keyMask)
+}
+
+// batch is the file listing the transaction hashes to capture, or "-" for
+// standard input. An empty value means no batch.
+func (c *config) batch() string {
+	return strings.TrimSpace(c.v.GetString(keyBatch))
+}
+
+// concurrency is how many captures may be in flight at once.
+func (c *config) concurrency() int {
+	return c.v.GetInt(keyConcurrency)
+}
+
+// rate is the minimum time between two captures.
+func (c *config) rate() time.Duration {
+	return c.v.GetDuration(keyRate)
+}
+
+// outFile is the file the encode command writes its fixture to. An empty
+// value means standard output.
+func (c *config) outFile() string {
+	return strings.TrimSpace(c.v.GetString(keyOutFile))
+}
+
+// encodeType is the XDR type of the payload being encoded. An empty value
+// means the type is detected.
+func (c *config) encodeType() string {
+	return strings.TrimSpace(c.v.GetString(keyType))
+}
+
+// encodeDescription is the note recorded in the fixture being written.
+func (c *config) encodeDescription() string {
+	return c.v.GetString(keyDescription)
 }

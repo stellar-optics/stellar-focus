@@ -9,6 +9,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +20,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
@@ -34,6 +38,10 @@ var newSource = func(network, endpoint string, timeout time.Duration) capture.So
 
 // now is injectable so captures in tests carry a fixed timestamp.
 var now = time.Now
+
+// stdin is where a batch read from "-" comes from. It is a variable so a
+// test can supply one without a process.
+var stdin io.Reader = os.Stdin
 
 // Execute builds and runs the root command.
 func Execute(args []string, stdout, stderr io.Writer) error {
@@ -83,6 +91,7 @@ precedence.`,
 
 	root.AddCommand(
 		newCaptureCmd(cfg, stdout, stderr),
+		newEncodeCmd(cfg, stdout, stderr),
 		newLedgerKeyCmd(stdout),
 		newVerifyCmd(cfg, stdout, stderr),
 		newRefreshCmd(cfg, stdout, stderr),
@@ -102,6 +111,140 @@ func newVersionCmd(stdout io.Writer) *cobra.Command {
 			return err
 		},
 	}
+}
+
+// newEncodeCmd builds the command that turns a raw XDR payload into a
+// golden fixture.
+//
+// It exists because the alternative is a shell script around a Go program:
+// a payload that is already in hand — in a debug log, a test case, an RPC
+// response — should not need a network to become a reviewable fixture.
+func newEncodeCmd(cfg *config, stdout, stderr io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "encode [xdr]",
+		Short: "Turn a raw XDR payload into a golden fixture",
+		Long: `Write a golden fixture from an XDR payload, without contacting a network.
+
+The payload is base64 or hex, given as an argument or on standard input. The
+XDR type is detected when --type is not given, which is ambiguous for short
+payloads, so naming it is better wherever the type is known.
+
+The fixture is written to --out, in the format its name implies, or printed to
+standard output when no file is given.`,
+		Example: `  focus encode "AAAAAgAAA..." --type TransactionEnvelope --out testdata/payment.golden.json
+  cat envelope.xdr | focus encode --type TransactionEnvelope --out testdata/payment.golden.json --description "a payment fixture"`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			payload, err := readPayload(args, stdin)
+			if err != nil {
+				return usageErrorf("%v", err)
+			}
+
+			raw, err := payloadBytes(payload)
+			if err != nil {
+				return usageErrorf("%v", err)
+			}
+
+			fixture, err := golden.Build(raw, cfg.encodeType(), cfg.encodeDescription(), nil)
+			if err != nil {
+				return usageErrorf("%v", err)
+			}
+
+			out := cfg.outFile()
+			if out == "" {
+				return printFixture(fixture, stdout)
+			}
+			if err := golden.Save(out, fixture); err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "wrote %s  (%s)\n", out, fixture.Type)
+			return nil
+		},
+	}
+
+	cfg.bindEncodeFlags(cmd)
+	return cmd
+}
+
+// readPayload returns the XDR payload, from the argument or from standard
+// input.
+func readPayload(args []string, input io.Reader) (string, error) {
+	if len(args) > 0 {
+		return strings.TrimSpace(args[0]), nil
+	}
+	if isTerminal(input) {
+		return "", fmt.Errorf("give the XDR payload as an argument or on standard input")
+	}
+
+	data, err := io.ReadAll(input)
+	if err != nil {
+		return "", fmt.Errorf("reading standard input: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// isTerminal reports whether a reader is a terminal, so a command that would
+// otherwise wait for input says what it wants instead.
+func isTerminal(r io.Reader) bool {
+	file, ok := r.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// payloadBytes decodes a payload that may be base64 or hex.
+//
+// Both turn up in debug logs and RPC responses, and a command that accepted
+// only one of them would be half a command. When a payload reads as both —
+// a short string of hex digits is valid base64 too — the reading that
+// decodes as XDR wins.
+func payloadBytes(payload string) ([]byte, error) {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return nil, fmt.Errorf("no XDR payload")
+	}
+
+	var candidates [][]byte
+	if b, err := base64.StdEncoding.DecodeString(payload); err == nil {
+		candidates = append(candidates, b)
+	}
+	if b, err := hex.DecodeString(payload); err == nil {
+		candidates = append(candidates, b)
+	}
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("the payload is neither base64 nor hex")
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+
+	for _, candidate := range candidates {
+		encoded := base64.StdEncoding.EncodeToString(candidate)
+		if _, err := lens.Decode(encoded); err == nil {
+			return candidate, nil
+		}
+	}
+	return candidates[0], nil
+}
+
+// printFixture writes a fixture to a writer, in the JSON format the rest of
+// the package uses.
+func printFixture(fixture *golden.Fixture, stdout io.Writer) error {
+	serializer, err := golden.SerializerFor(golden.JSON)
+	if err != nil {
+		return err
+	}
+	data, err := serializer.Marshal(fixture)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, string(data))
+	return err
 }
 
 func newLedgerKeyCmd(stdout io.Writer) *cobra.Command {
@@ -144,11 +287,29 @@ func newCaptureCmd(cfg *config, stdout, stderr io.Writer) *cobra.Command {
 		Short: "Record a transaction's envelope, result and meta",
 		Long: `Fetch a transaction and write its envelope, result and meta as separate
 fixture files, each stamped with the network, ledger and capture time so it
-can be re-checked later with focus verify.`,
+can be re-checked later with focus verify.
+
+With --batch the hashes are read from a file instead, one per line, and the
+transactions are captured a few at a time. A transaction that cannot be
+captured is reported and the batch carries on.
+
+A batch names each fixture after the transaction it came from, so two
+transactions in one batch do not overwrite each other.`,
 		Example: `  focus capture tx 2b2e276a… --out testdata/
-  focus capture tx 2b2e276a… --out testdata/ --prefix failed_payment`,
-		Args: cobra.ExactArgs(1),
+  focus capture tx 2b2e276a… --out testdata/ --prefix failed_payment
+  focus capture tx --batch hashes.txt --out testdata/ --concurrency 4`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cfg.batch() != "" {
+				if len(args) > 0 {
+					return usageErrorf("give a transaction hash or --batch, not both")
+				}
+				return captureBatchCmd(cmd.Context(), cfg, stdout, stderr)
+			}
+			if len(args) == 0 {
+				return usageErrorf("give a transaction hash, or --batch to read the hashes from a file")
+			}
+
 			endpoint, err := capture.ResolveEndpoint(cfg.network(), cfg.rpcURL())
 			if err != nil {
 				return usageErrorf("%v", err)
@@ -185,6 +346,7 @@ can be re-checked later with focus verify.`,
 	}
 
 	cfg.bindCaptureFlags(cmd)
+	cfg.bindBatchFlags(txCmd)
 	cmd.AddCommand(txCmd, entryCmd)
 	return cmd
 }
@@ -207,19 +369,26 @@ no others, for the format this version reads, for an XDR that is valid
 base64 and decodes as the type the fixture claims, and for a capture
 timestamp that is RFC3339.
 
-Paths may be files or directories. With no path, testdata is checked.
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are checked too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is checked.
 
 Exit status is 0 when every fixture is clean and 1 when at least one has a
 problem, so the command can be a step in CI.`,
 		Example: `  focus lint testdata/
-  focus lint testdata/envelope.golden.json`,
+  focus lint testdata/envelope.golden.json
+  focus lint 'testdata/**/*.golden.json'`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				args = []string{defaultVerifyDir}
 			}
 
-			paths, err := collectFixtureFiles(args)
+			paths, err := collectFixtures(args)
 			if err != nil {
 				return failureErrorf("%v", err)
 			}
@@ -256,35 +425,6 @@ problem, so the command can be a step in CI.`,
 	}
 }
 
-// collectFixtureFiles expands files and directories into the fixture paths
-// they hold.
-//
-// Unlike collectFixtures, it looks for every format the package supports, so
-// a directory of mixed fixtures is checked in full.
-func collectFixtureFiles(args []string) ([]string, error) {
-	suffixes := []string{"*.golden.json", "*.golden.yaml", "*.golden.yml", "*.golden.txt"}
-
-	var out []string
-	for _, arg := range args {
-		info, err := os.Stat(arg)
-		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", arg, err)
-		}
-		if !info.IsDir() {
-			out = append(out, arg)
-			continue
-		}
-		for _, suffix := range suffixes {
-			entries, err := filepath.Glob(filepath.Join(arg, suffix))
-			if err != nil {
-				return nil, fmt.Errorf("scanning %s: %w", arg, err)
-			}
-			out = append(out, entries...)
-		}
-	}
-	return out, nil
-}
-
 // writeFixtures captures records and writes them, refusing to clobber
 // existing files unless asked.
 func writeFixtures(
@@ -295,10 +435,43 @@ func writeFixtures(
 	force, maskAddresses bool,
 	stdout io.Writer,
 ) error {
+	written, err := writeRecords(ctx, src, records, outDir, prefix, force, maskAddresses)
+	if err != nil {
+		return err
+	}
+
+	for _, w := range written {
+		fmt.Fprintf(stdout, "wrote %s  (%s, ledger %d)\n",
+			w.path, w.fixture.Type, fixtureLedger(w.fixture))
+	}
+	return nil
+}
+
+// writtenFixture is a fixture written to disk.
+type writtenFixture struct {
+	// path is where the fixture was written.
+	path string
+	// fixture is the fixture itself.
+	fixture *golden.Fixture
+}
+
+// writeRecords captures records and writes them, refusing to clobber
+// existing files unless asked.
+//
+// It is the part of a capture that touches the disk, separated from the
+// reporting so a batch can capture many transactions and say what each of
+// them produced.
+func writeRecords(
+	ctx context.Context,
+	src capture.Source,
+	records []capture.Record,
+	outDir, prefix string,
+	force, maskAddresses bool,
+) ([]writtenFixture, error) {
 	if maskAddresses {
 		masked, err := capture.Anonymize(records)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		for i := range masked {
 			masked[i].Anonymized = true
@@ -307,9 +480,10 @@ func writeFixtures(
 	}
 	fixtures, err := capture.Capture(ctx, src, records, now())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	written := make([]writtenFixture, 0, len(fixtures))
 	for i, f := range fixtures {
 		name := records[i].Name
 		if prefix != "" {
@@ -319,17 +493,17 @@ func writeFixtures(
 
 		if !force {
 			if _, statErr := os.Stat(path); statErr == nil {
-				return fmt.Errorf(
+				return nil, fmt.Errorf(
 					"%s already exists; pass --force to overwrite it, or --prefix to write alongside it", path)
 			}
 		}
 
 		if err := golden.Save(path, f); err != nil {
-			return err
+			return nil, err
 		}
-		fmt.Fprintf(stdout, "wrote %s  (%s, ledger %d)\n", path, f.Type, fixtureLedger(f))
+		written = append(written, writtenFixture{path: path, fixture: f})
 	}
-	return nil
+	return written, nil
 }
 
 // fixtureLedger reports the ledger a fixture was captured at, for the capture
@@ -364,7 +538,13 @@ would re-record the data too. This command re-renders only the decoded
 section, leaving the XDR, the type, the description and the capture
 provenance as they are.
 
-Paths may be files or directories. With no path, testdata is refreshed.
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are refreshed too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is refreshed.
 
 With --dry-run nothing is written: the difference each fixture would get is
 printed instead.`,
