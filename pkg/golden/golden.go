@@ -12,6 +12,11 @@
 //	go test ./... -focus.update
 //
 // The flag is namespaced so it never collides with a project's own -update.
+//
+// Fixtures may be stored gzip-compressed (a .golden.json.gz suffix writes
+// them that way), and reads are transparent about it; content is compared
+// after line-ending normalization, so a checkout on Windows asserts the same
+// as one on Linux.
 package golden
 
 import (

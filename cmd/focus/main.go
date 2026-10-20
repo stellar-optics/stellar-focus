@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr)
+	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr, newGoldenCmd())
 	code, printable := cli.ExitCode(err)
 	if printable && err != nil {
 		fmt.Fprintln(os.Stderr, "focus:", err)

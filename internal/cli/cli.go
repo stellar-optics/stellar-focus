@@ -35,6 +35,7 @@ var now = time.Now
 // Execute builds and runs the root command.
 func Execute(args []string, stdout, stderr io.Writer) error {
 	root := newRootCmd(stdout, stderr)
+	root.AddCommand(extra...)
 	root.SetArgs(args)
 	return root.Execute()
 }
