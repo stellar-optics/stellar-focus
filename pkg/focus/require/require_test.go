@@ -103,6 +103,9 @@ func TestEveryMirrorReportsFatally(t *testing.T) {
 		{"EventCount", func(tb *faketb.TB) { require.EventCount(tb, "bad", 1) }},
 		{"ReturnValue", func(tb *faketb.TB) { require.ReturnValue(tb, "bad", "x") }},
 		{"ContractTrapped", func(tb *faketb.TB) { require.ContractTrapped(tb, "bad") }},
+		{"ContractAuthValid", func(tb *faketb.TB) {
+			require.ContractAuthValid(tb, env,
+				"GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6", focus.ContractCall{})
 		{"ContractTrappedWith", func(tb *faketb.TB) {
 			require.ContractTrappedWith(tb, "bad", "Error(Contract, #4)")
 		}},
