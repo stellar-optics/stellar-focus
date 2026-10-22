@@ -1,13 +1,15 @@
 // Package fakesource provides an in-memory capture.Source for tests.
 //
-// Capture and verify are the only parts of stellar-focus that touch the
-// network, so they are the only parts that need a fake. Everything else is
-// already offline by construction.
+// Capture, verify and simulate are the only parts of stellar-focus that
+// touch the network, so they are the only parts that need a fake.
+// Everything else is already offline by construction.
 package fakesource
 
 import (
 	"context"
 	"fmt"
+
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 )
@@ -18,9 +20,15 @@ type Source struct {
 	Transactions map[string][]capture.Record
 	// Entries maps a base64 ledger key to the records returned for it.
 	Entries map[string][]capture.Record
+	// Simulations maps a base64 envelope to the simulation response
+	// returned for it.
+	Simulations map[string]*protocol.SimulateTransactionResponse
 	// Err, when set, is returned by every call, simulating an endpoint that
 	// is unreachable.
 	Err error
+	// SimulationErr, when set, is returned by every simulation, simulating
+	// an endpoint that cannot answer a preflight.
+	SimulationErr error
 	// Passphrase and PassphraseErr configure optional network metadata.
 	Passphrase    string
 	PassphraseErr error
@@ -37,6 +45,7 @@ func New(network, endpoint string) *Source {
 	return &Source{
 		Transactions: map[string][]capture.Record{},
 		Entries:      map[string][]capture.Record{},
+		Simulations:  map[string]*protocol.SimulateTransactionResponse{},
 		network:      network,
 		endpoint:     endpoint,
 	}
@@ -92,4 +101,28 @@ func (s *Source) LedgerEntry(ctx context.Context, key string) ([]capture.Record,
 		return nil, fmt.Errorf("ledger key %s: %w", key, capture.ErrNotFound)
 	}
 	return records, nil
+}
+
+// SimulateTransaction implements simulate.Source, so a suite can preflight a
+// transaction offline.
+//
+// The response is the one canned for the envelope in the request; an
+// envelope with no canned response is an error rather than an empty
+// simulation, so a test that forgot to set one up fails loudly.
+func (s *Source) SimulateTransaction(
+	ctx context.Context,
+	req protocol.SimulateTransactionRequest,
+) (*protocol.SimulateTransactionResponse, error) {
+	s.Calls++
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.SimulationErr != nil {
+		return nil, s.SimulationErr
+	}
+	resp, ok := s.Simulations[req.Transaction]
+	if !ok {
+		return nil, fmt.Errorf("no simulation is canned for that envelope")
+	}
+	return resp, nil
 }

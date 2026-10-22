@@ -8,6 +8,8 @@ import (
 	rpcproto "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-focus/pkg/simulate"
 )
 
 // contractIDString renders a contract id as its strkey "C…" form.
@@ -273,6 +275,89 @@ func AssertContractTrapped(t TB, result Value) bool {
 	return contractTrapped(t, "AssertContractTrapped", result)
 }
 
+// AssertSimulationSucceeded checks that a simulation ran without the host
+// rejecting it.
+//
+// The host rejects a simulation when the transaction would not run: a failing
+// precondition, a missing contract, a trap in the invocation. The rejection
+// message is the host's own, so it says what went wrong.
+//
+// The result comes from simulate.Simulate, which never talks to the network
+// itself — this package holds no network code.
+func AssertSimulationSucceeded(t TB, result *simulate.SimulateResult) bool {
+	t.Helper()
+
+	if result == nil {
+		t.Errorf("AssertSimulationSucceeded: there is no simulation result")
+		return false
+	}
+	if result.Error != "" {
+		t.Errorf("AssertSimulationSucceeded: the simulation was rejected: %s", result.Error)
+		return false
+	}
+	return true
+}
+
+// AssertSimulatedReturnValue checks the value a simulated invocation would
+// return.
+//
+// The simulation ran against the ledger as it was when it ran, so this is a
+// check on the shape of the answer rather than on a stored fixture.
+func AssertSimulatedReturnValue(t TB, result *simulate.SimulateResult, want Value) bool {
+	t.Helper()
+
+	if result == nil {
+		t.Errorf("AssertSimulatedReturnValue: there is no simulation result")
+		return false
+	}
+	if result.Error != "" {
+		t.Errorf("AssertSimulatedReturnValue: the simulation was rejected: %s", result.Error)
+		return false
+	}
+	if result.ReturnValue == nil {
+		t.Errorf("AssertSimulatedReturnValue: the simulation returned no value")
+		return false
+	}
+
+	wantVal, ok := scVal(want)
+	if !ok {
+		t.Errorf("AssertSimulatedReturnValue: want value could not be read as an ScVal")
+		return false
+	}
+
+	if result.ReturnValue.Equals(wantVal) {
+		return true
+	}
+
+	t.Errorf("AssertSimulatedReturnValue: the simulation returned %s, want %s",
+		describeScVal(*result.ReturnValue), describeScVal(wantVal))
+	return false
+}
+
+// AssertInstructionsBelow checks that a simulation stayed under an
+// instruction budget.
+//
+// The budget is exclusive: a transaction that uses exactly the limit is over
+// it. Instructions are counted against the ledger state of the moment, so the
+// number moves with the chain — this is a ceiling to catch a regression, not
+// an exact figure to pin.
+func AssertInstructionsBelow(t TB, result *simulate.SimulateResult, limit uint32) bool {
+	t.Helper()
+
+	if result == nil {
+		t.Errorf("AssertInstructionsBelow: there is no simulation result")
+		return false
+	}
+	if result.Error != "" {
+		t.Errorf("AssertInstructionsBelow: the simulation was rejected: %s", result.Error)
+		return false
+	}
+	if result.Instructions >= limit {
+		t.Errorf("AssertInstructionsBelow: the simulation used %d instruction(s), want fewer than %d",
+			result.Instructions, limit)
+		return false
+	}
+	return true
 // AssertContractError checks that a contract invocation failed with a
 // particular error, and that the error is the one the test expects.
 //

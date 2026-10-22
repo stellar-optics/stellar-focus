@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/simulate"
 )
 
 // fatalTB adapts a focus.TB so reported failures become fatal.
@@ -347,13 +348,32 @@ func ContractTrapped(t focus.TB, result focus.Value) {
 	focus.AssertContractTrapped(fatal(t), result)
 }
 
-// ContractTrappedWith is focus.AssertContractTrappedWith, stopping the test on
-// failure.
+// ContractTrappedWith is focus.AssertContractTrappedWith, stopping the test
+// on failure.
 func ContractTrappedWith(t focus.TB, result focus.Value, want string) {
 	t.Helper()
 	focus.AssertContractTrappedWith(fatal(t), result, want)
 }
 
+// SimulationSucceeded is focus.AssertSimulationSucceeded, stopping the test on
+// failure.
+func SimulationSucceeded(t focus.TB, result *simulate.SimulateResult) {
+	t.Helper()
+	focus.AssertSimulationSucceeded(fatal(t), result)
+}
+
+// SimulatedReturnValue is focus.AssertSimulatedReturnValue, stopping the test
+// on failure.
+func SimulatedReturnValue(t focus.TB, result *simulate.SimulateResult, want focus.Value) {
+	t.Helper()
+	focus.AssertSimulatedReturnValue(fatal(t), result, want)
+}
+
+// InstructionsBelow is focus.AssertInstructionsBelow, stopping the test on
+// failure.
+func InstructionsBelow(t focus.TB, result *simulate.SimulateResult, limit uint32) {
+	t.Helper()
+	focus.AssertInstructionsBelow(fatal(t), result, limit)
 // ContractError is focus.AssertContractError, stopping the test on failure.
 func ContractError(t focus.TB, metaOrResult focus.Value, wantType xdr.ScErrorType, wantCode uint32) {
 	t.Helper()

@@ -191,6 +191,35 @@ and call outcome included — for checks this package does not provide.
 `focus.TrapEvidence{Result, Meta}` pair when the result and meta are separate
 fixtures, and searches the rendered host diagnostics.
 
+### Preflighting a transaction
+
+A simulation runs a transaction against the current ledger state without
+submitting it, and reports what would have happened: the return value, the
+ledger entries it would touch, and the resources it would consume. That makes
+a resource regression visible before submission rather than after it has
+failed on chain.
+
+```go
+result, err := simulate.Simulate(ctx, src, envelopeXDR)
+if err != nil {
+	t.Fatalf("simulation failed: %v", err)
+}
+
+focus.AssertSimulationSucceeded(t, result)
+focus.AssertSimulatedReturnValue(t, result, xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: &seven})
+focus.AssertInstructionsBelow(t, result, 100_000)
+```
+
+The network call lives in `pkg/simulate`, never in `pkg/focus` or
+`pkg/golden`: the assertions take the result and nothing else. The seam is
+`simulate.Source`, which `capture.RPCSource` implements against a real
+endpoint and a test implements with a canned response, so a suite stays
+offline.
+
+**A simulation is not a fixture.** It runs against the ledger as it is right
+now, so the same transaction simulated twice can report a different footprint
+and a different instruction count. Assert on a budget and a shape, not on an
+exact snapshot.
 `AssertContractError` answers the question a trap leaves open: not *that* the
 contract failed but *how*. It reads the Soroban return value and the host's
 error diagnostic, and names both sides of the comparison:
