@@ -49,6 +49,49 @@ func TestFailureMessageSideBySide(t *testing.T) {
 	}
 }
 
+func TestFailureMessageDiffContext(t *testing.T) {
+	t.Parallel()
+
+	want := buildEnvelope(t, paymentOp(t, 100_0000000))
+	got := buildEnvelope(t, paymentOp(t, 200_0000000))
+
+	tb := faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(1))
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if !strings.Contains(msg, "Body.PaymentOp.Asset = native") {
+		t.Errorf("one context line does not show the neighboring asset field:\n%s", msg)
+	}
+	if strings.Index(msg, "Body.PaymentOp.Asset = native") > strings.Index(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Amount") {
+		t.Errorf("preceding context appears after the changed field:\n%s", msg)
+	}
+
+	tb = faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(0))
+	msg, err = tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if strings.Contains(msg, "Body.PaymentOp.Asset = native") {
+		t.Errorf("zero context lines still show neighboring fields:\n%s", msg)
+	}
+
+	want = buildEnvelope(t, paymentOp(t, 100_0000000))
+	got = buildEnvelope(t, creditPaymentOp(t, 100_0000000))
+	tb = faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(1))
+	msg, err = tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if strings.Index(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Asset") < 0 ||
+		strings.Index(msg, "Body.PaymentOp.Amount =") < strings.Index(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Asset") {
+		t.Errorf("following context does not appear after the changed field:\n%s", msg)
+	}
+}
+
 // TestFailureMessageAddedAndRemoved checks that a value present on one side
 // only is shown with a single labelled side rather than as an empty pair.
 func TestFailureMessageAddedAndRemoved(t *testing.T) {

@@ -437,6 +437,45 @@ func TestIgnoreSorobanAuth(t *testing.T) {
 	}
 }
 
+func TestIgnoreLedgerHeader(t *testing.T) {
+	t.Parallel()
+
+	want := xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{
+		LedgerSeq:  1,
+		TotalCoins: 100,
+		FeePool:    200,
+		IdPool:     3,
+		ScpValue:   xdr.StellarValue{CloseTime: 10},
+	}}
+	got := xdr.LedgerHeaderHistoryEntry{Header: xdr.LedgerHeader{
+		LedgerSeq:  2,
+		TotalCoins: 101,
+		FeePool:    201,
+		IdPool:     4,
+		ScpValue:   xdr.StellarValue{CloseTime: 11},
+	}}
+
+	tb := faketb.New()
+	if !focus.AssertEqualAs(tb, "LedgerHeaderHistoryEntry", want, got, focus.IgnoreLedgerHeader()) {
+		t.Errorf("volatile ledger header fields were not ignored:\n%s", tb.Output())
+	}
+
+	got.Header.LedgerVersion = want.Header.LedgerVersion + 1
+	tb = faketb.New()
+	if focus.AssertEqualAs(tb, "LedgerHeaderHistoryEntry", want, got, focus.IgnoreLedgerHeader()) {
+		t.Fatal("a meaningful ledger header difference was ignored")
+	}
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	for _, field := range []string{"CloseTime", "LedgerSeq", "TotalCoins", "FeePool", "IdPool"} {
+		if !strings.Contains(msg, field) {
+			t.Errorf("failure message does not report ignored field %q:\n%s", field, msg)
+		}
+	}
+}
+
 // TestNormalizeAddress maps the dynamic addresses in both values to the same
 // symbolic aliases, so identity is preserved while the concrete keys are not.
 func TestNormalizeAddress(t *testing.T) {

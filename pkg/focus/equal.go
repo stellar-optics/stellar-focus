@@ -139,7 +139,7 @@ func roundTripMessage(original, roundTripped *lens.Value, changes []lens.Change,
 	var b strings.Builder
 	fmt.Fprintf(&b, "AssertXDRRoundTrip: %s did not survive a MarshalBinary/UnmarshalBinary "+
 		"round-trip — %s\n\n", humanType(original.Type), pluralChanges(len(changes)))
-	b.WriteString(renderChanges(changes, c))
+	b.WriteString(renderChanges(changes, c, original, roundTripped))
 	b.WriteString("\n")
 	fmt.Fprintf(&b, "original   %s\n", describePayload(original))
 	fmt.Fprintf(&b, "round-trip %s\n", describePayload(roundTripped))
