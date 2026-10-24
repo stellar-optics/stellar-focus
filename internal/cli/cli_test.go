@@ -33,6 +33,10 @@ func withFake(t *testing.T, src *fakesource.Source) {
 	}
 	now = func() time.Time { return time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() { newSource, now = originalSource, originalNow })
+
+	// The verification cache is a local artifact, so a test run keeps it in
+	// a temporary directory rather than leaving one in the working tree.
+	t.Setenv("FOCUS_VERIFY_CACHE", filepath.Join(t.TempDir(), "verify-cache.json"))
 }
 
 func run(t *testing.T, args ...string) (stdout, stderr string, err error) {

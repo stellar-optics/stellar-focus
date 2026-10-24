@@ -31,6 +31,15 @@ Working and tested:
   explanation and hint; operation result codes can be checked by short name,
   and an unknown code or an XDR constant name is called out as such
 - Soroban: event matching, event counts, return values, contract traps
+- Ordered event sequences: `AssertEventsEqual` pins the whole list of contract
+  events — the count, the order and each event's payload — and a failure prints
+  the event that deviated beside the event that was wanted, with the options
+  that relaxed the comparison named
+- Soroban resource budgets and the refundable resource fee, read from the
+  transaction's `SorobanTransactionData`
+- Typed operation assertions: what a payment pays and to whom, what starting
+  balance an account is created with, and what limit a trustline is changed to
+  — with amounts in both stroops and XLM
 - Contract errors by category and code: the `ScError` a failed invocation
   recorded — a contract's own error code, or one of the host's named codes —
   read from the Soroban return value or from the host's error diagnostic
@@ -107,6 +116,10 @@ Working and tested:
   export to Go fuzz seed corpora
 - `focus capture` and `focus verify` against a live network, from a Soroban
   RPC endpoint or from Horizon, chosen with `--source`
+- Narrowed verification: `focus verify --since`, `--filter` and `--drifted-only`,
+  so a repository with hundreds of fixtures can be re-checked without
+  re-fetching all of them, with the fixtures left out reported rather than
+  quietly passing
 - A machine-readable `focus verify`: `--format json` prints one JSON document
   with the counts, the status of every fixture and the paths that changed, so
   a pipeline can post a pull-request comment or a step summary without

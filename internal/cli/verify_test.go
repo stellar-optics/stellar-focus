@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
+	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
 // captureIntoDir seeds a directory with the fixtures of one captured
@@ -179,6 +180,249 @@ func TestVerifyDriftExitsWithDriftCode(t *testing.T) {
 	}
 	if !IsDrift(err) {
 		t.Errorf("drift error does not classify as ErrDrift: %v", err)
+	}
+}
+
+// TestVerifySinceChecksOnlyRecentFixtures checks that --since narrows a run
+// to the fixtures captured after a threshold, and that the fixtures left out
+// are reported rather than quietly passing.
+func TestVerifySinceChecksOnlyRecentFixtures(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+	src.Calls = 0
+
+	// The fixtures were captured at the fake clock's time, so a threshold
+	// after it leaves nothing to check.
+	stdout, _, err := run(t, "verify", dir, "--since", "2026-08-06T00:00:00Z")
+	if err != nil {
+		t.Fatalf("verify with a threshold after the capture: %v", err)
+	}
+	if !strings.Contains(stdout, "FILTERED") {
+		t.Errorf("the old fixtures were not reported as filtered:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "2 filtered") {
+		t.Errorf("the summary does not count the filtered fixtures:\n%s", stdout)
+	}
+	if src.Calls != 0 {
+		t.Errorf("the network was contacted %d time(s) for fixtures that were filtered out", src.Calls)
+	}
+
+	// A threshold before the capture leaves both fixtures to check.
+	src.Calls = 0
+	stdout, _, err = run(t, "verify", dir, "--since", "2026-08-01T00:00:00Z")
+	if err != nil {
+		t.Fatalf("verify with a threshold before the capture: %v", err)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("the recent fixtures were not checked:\n%s", stdout)
+	}
+	if src.Calls == 0 {
+		t.Error("the network was not contacted for the fixtures that were in range")
+	}
+}
+
+// TestVerifySinceAcceptsADuration checks that a duration is counted back
+// from now, which is how a run is narrowed to the last day's fixtures.
+func TestVerifySinceAcceptsADuration(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	// The fixtures are made to look as if they were captured a week ago.
+	for _, name := range []string{"envelope.golden.json", "result.golden.json"} {
+		ageFixture(t, filepath.Join(dir, name), "2026-07-29T12:00:00Z")
+	}
+	src.Calls = 0
+
+	// A window of two days leaves them out; a window of a month does not.
+	stdout, _, err := run(t, "verify", dir, "--since", "48h")
+	if err != nil {
+		t.Fatalf("verify --since 48h: %v", err)
+	}
+	if !strings.Contains(stdout, "2 filtered") {
+		t.Errorf("the fixtures outside the window were not filtered:\n%s", stdout)
+	}
+	if src.Calls != 0 {
+		t.Errorf("the network was contacted %d time(s) for fixtures outside the window", src.Calls)
+	}
+
+	stdout, _, err = run(t, "verify", dir, "--since", "720h")
+	if err != nil {
+		t.Fatalf("verify --since 720h: %v", err)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("the fixtures inside the window were not checked:\n%s", stdout)
+	}
+}
+
+// ageFixture rewrites a fixture's capture time, so a run can be narrowed to
+// the fixtures captured after a threshold.
+func ageFixture(t *testing.T, path, at string) {
+	t.Helper()
+
+	f, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("loading %s: %v", path, err)
+	}
+	if f.Captured == nil {
+		t.Fatalf("%s carries no provenance, so it has no capture time", path)
+	}
+	f.Captured.At = at
+	if err := golden.Save(path, f); err != nil {
+		t.Fatalf("saving %s: %v", path, err)
+	}
+}
+
+// TestVerifyRejectsAnUnusableSince checks that a threshold that cannot be
+// read is refused before any fixture is loaded.
+func TestVerifyRejectsAnUnusableSince(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+
+	_, _, err := run(t, "verify", t.TempDir(), "--since", "last tuesday")
+	if err == nil {
+		t.Fatal("a threshold that cannot be read was accepted")
+	}
+	if !strings.Contains(err.Error(), "--since") {
+		t.Errorf("the error does not name the setting at fault: %v", err)
+	}
+}
+
+// TestVerifyFilterSelectsFixtures checks that --filter narrows a run by
+// filename or by the metadata a fixture carries.
+func TestVerifyFilterSelectsFixtures(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+	src.Calls = 0
+
+	// A glob picks one fixture out of the two.
+	stdout, _, err := run(t, "verify", dir, "--filter", "envelope*")
+	if err != nil {
+		t.Fatalf("verify --filter envelope*: %v", err)
+	}
+	if !strings.Contains(stdout, "1 checked: 1 ok, 0 drifted, 0 skipped, 1 filtered") {
+		t.Errorf("the summary does not describe a narrowed run:\n%s", stdout)
+	}
+	if src.Calls != 1 {
+		t.Errorf("the network was contacted %d time(s), want 1", src.Calls)
+	}
+
+	// A metadata selector picks them all.
+	src.Calls = 0
+	stdout, _, err = run(t, "verify", dir, "--filter", "network:testnet")
+	if err != nil {
+		t.Fatalf("verify --filter network:testnet: %v", err)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("the metadata selector did not match the fixtures:\n%s", stdout)
+	}
+
+	// A metadata selector that matches nothing leaves nothing to check.
+	src.Calls = 0
+	stdout, _, err = run(t, "verify", dir, "--filter", "network:mainnet")
+	if err != nil {
+		t.Fatalf("verify --filter network:mainnet: %v", err)
+	}
+	if !strings.Contains(stdout, "2 filtered") {
+		t.Errorf("the summary does not count the filtered fixtures:\n%s", stdout)
+	}
+	if src.Calls != 0 {
+		t.Errorf("the network was contacted %d time(s) for fixtures that were filtered out", src.Calls)
+	}
+}
+
+// TestVerifyDriftedOnlyRechecksWhatDrifted is the workflow the flag exists
+// for: a run finds what drifted, the drift is fixed, and the next run only
+// looks at the fixtures that drifted.
+func TestVerifyDriftedOnlyRechecksWhatDrifted(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	// The chain moves: the envelope no longer matches what was captured.
+	src.Transactions[testHash] = driftedRecords(t)
+
+	if _, _, err := run(t, "verify", dir); err == nil {
+		t.Fatal("verify reported success despite drift")
+	}
+
+	// The chain moves back, and the next run looks only at what drifted.
+	src.Transactions[testHash] = sourceWithTx(t).Transactions[testHash]
+	src.Calls = 0
+
+	stdout, _, err := run(t, "verify", dir, "--drifted-only")
+	if err != nil {
+		t.Fatalf("verify --drifted-only: %v", err)
+	}
+	if !strings.Contains(stdout, "1 checked: 1 ok") {
+		t.Errorf("the drifted fixture was not re-checked:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 skipped") {
+		t.Errorf("the fixture that matched was not skipped:\n%s", stdout)
+	}
+	if src.Calls != 1 {
+		t.Errorf("the network was contacted %d time(s), want 1", src.Calls)
+	}
+
+	// Now that everything matches, a further run leaves it all alone.
+	src.Calls = 0
+	stdout, _, err = run(t, "verify", dir, "--drifted-only")
+	if err != nil {
+		t.Fatalf("verify --drifted-only: %v", err)
+	}
+	if !strings.Contains(stdout, "2 skipped") {
+		t.Errorf("the fixtures that matched were not skipped:\n%s", stdout)
+	}
+	if src.Calls != 0 {
+		t.Errorf("the network was contacted %d time(s) for fixtures that had already matched", src.Calls)
+	}
+}
+
+// TestVerifyDriftedOnlyRechecksAChangedFixture checks that a fixture that
+// has changed since the last check is looked at again: the outcome cached
+// for the old content says nothing about a fixture that has changed.
+func TestVerifyDriftedOnlyRechecksAChangedFixture(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	if _, _, err := run(t, "verify", dir); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	// The fixture changes on disk, keeping its provenance but not its
+	// content.
+	path := filepath.Join(dir, "envelope.golden.json")
+	f, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("loading %s: %v", path, err)
+	}
+	f.XDR = fixtureXDR(t, "tx_success.env.txt")
+	if err := golden.Save(path, f); err != nil {
+		t.Fatalf("saving %s: %v", path, err)
+	}
+	src.Calls = 0
+
+	_, stderr, err := run(t, "verify", dir, "--drifted-only")
+	if err == nil {
+		t.Fatal("verify --drifted-only did not notice the changed fixture")
+	}
+	if src.Calls == 0 {
+		t.Error("the changed fixture was not re-checked")
+	}
+	if !strings.Contains(stderr, "DRIFTED") {
+		t.Errorf("the changed fixture was not reported as drifted:\n%s", stderr)
 	}
 }
 

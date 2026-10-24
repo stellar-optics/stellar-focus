@@ -328,6 +328,43 @@ func EventCount(t focus.TB, meta focus.Value, want int) {
 	focus.AssertEventCount(fatal(t), meta, want)
 }
 
+// EventsEqual is focus.AssertEventsEqual, stopping the test on failure.
+func EventsEqual(t focus.TB, meta focus.Value, want []focus.Event, opts ...focus.EventOption) {
+	t.Helper()
+	focus.AssertEventsEqual(fatal(t), meta, want, opts...)
+}
+
+// Payment is focus.AssertPayment, stopping the test on failure.
+func Payment(t focus.TB, envelope focus.Value, opIndex int, wantDest string, wantAmount int64, wantAsset string) {
+	t.Helper()
+	focus.AssertPayment(fatal(t), envelope, opIndex, wantDest, wantAmount, wantAsset)
+}
+
+// CreateAccount is focus.AssertCreateAccount, stopping the test on failure.
+func CreateAccount(t focus.TB, envelope focus.Value, opIndex int, wantDest string, wantStartingBalance int64) {
+	t.Helper()
+	focus.AssertCreateAccount(fatal(t), envelope, opIndex, wantDest, wantStartingBalance)
+}
+
+// ChangeTrust is focus.AssertChangeTrust, stopping the test on failure.
+func ChangeTrust(t focus.TB, envelope focus.Value, opIndex int, wantAsset string, wantLimit int64) {
+	t.Helper()
+	focus.AssertChangeTrust(fatal(t), envelope, opIndex, wantAsset, wantLimit)
+}
+
+// SorobanResources is focus.AssertSorobanResources, stopping the test on
+// failure.
+func SorobanResources(t focus.TB, envelope focus.Value, maxInstructions uint32, readBytes, writeBytes uint32) {
+	t.Helper()
+	focus.AssertSorobanResources(fatal(t), envelope, maxInstructions, readBytes, writeBytes)
+}
+
+// ResourceFee is focus.AssertResourceFee, stopping the test on failure.
+func ResourceFee(t focus.TB, envelope focus.Value, wantFee int64) {
+	t.Helper()
+	focus.AssertResourceFee(fatal(t), envelope, wantFee)
+}
+
 // ReturnValue is focus.AssertReturnValue, stopping the test on failure.
 func ReturnValue(t focus.TB, meta focus.Value, want focus.Value) {
 	t.Helper()

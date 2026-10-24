@@ -42,23 +42,27 @@ const (
 // Configuration keys. They are the flag names, so help text, environment
 // variables and config files all use the same vocabulary.
 const (
-	keyConfig  = "config"
-	keyNetwork = "network"
-	keyRPCURL  = "rpc-url"
-	keySource  = "source"
-	keyTimeout = "timeout"
-	keyColor   = "color"
-	keyOut     = "out"
-	keyPrefix  = "prefix"
-	keyForce   = "force"
-	keyMask    = "mask-addresses"
-	keyPass    = "passphrase"
-	keyFileSrc = "file-source"
-	keySanit   = "sanitize"
-	keyMemo    = "mask-memo"
-	keyData    = "scrub-data"
-	keyKeys    = "scrub-keys"
-	keyArchive = "archive-url"
+	keyConfig      = "config"
+	keyNetwork     = "network"
+	keyRPCURL      = "rpc-url"
+	keySource      = "source"
+	keyTimeout     = "timeout"
+	keyColor       = "color"
+	keyOut         = "out"
+	keyPrefix      = "prefix"
+	keyForce       = "force"
+	keyMask        = "mask-addresses"
+	keyPass        = "passphrase"
+	keyFileSrc     = "file-source"
+	keySanit       = "sanitize"
+	keyMemo        = "mask-memo"
+	keyData        = "scrub-data"
+	keyKeys        = "scrub-keys"
+	keyArchive     = "archive-url"
+	keySince       = "since"
+	keyFilter      = "filter"
+	keyDriftedOnly = "drifted-only"
+	keyVerifyCache = "verify-cache"
 )
 
 // The capture sources the command can talk to.
@@ -194,6 +198,26 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyMemo)
 	c.bind(flags, keyData)
 	c.bind(flags, keyKeys)
+}
+
+// bindVerifyFlags declares the flags that narrow what a verify run checks.
+//
+// They are the reason a repository with hundreds of fixtures can still be
+// verified on every commit: most of them are old, and the ones that matter
+// are the ones that drifted.
+func (c *config) bindVerifyFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+
+	flags.String(keySince, "",
+		"only check fixtures captured after this duration (48h) or timestamp (2026-10-01T00:00:00Z)")
+	flags.String(keyFilter, "",
+		"only check fixtures whose filename matches this glob, or whose metadata matches key:value")
+	flags.Bool(keyDriftedOnly, false,
+		"only re-check fixtures that previously drifted or could not be checked")
+
+	c.bind(flags, keySince)
+	c.bind(flags, keyFilter)
+	c.bind(flags, keyDriftedOnly)
 }
 
 // bind attaches a declared flag to Viper. A missing flag is a programming
@@ -374,6 +398,39 @@ func (c *config) prefix() string {
 // force permits capture to overwrite existing fixtures.
 func (c *config) force() bool {
 	return c.v.GetBool(keyForce)
+}
+
+// since is the threshold a fixture's capture time must be newer than.
+//
+// It is either a duration counted back from now, or an RFC3339 timestamp.
+// An empty string means no threshold.
+func (c *config) since() string {
+	return strings.TrimSpace(c.v.GetString(keySince))
+}
+
+// filter narrows a verify run to the fixtures it should check.
+//
+// It is either a glob over the filename, or a metadata selector of the form
+// "key:value".
+func (c *config) filter() string {
+	return strings.TrimSpace(c.v.GetString(keyFilter))
+}
+
+// driftedOnly reports whether a verify run should re-check only the fixtures
+// that previously drifted or could not be checked.
+func (c *config) driftedOnly() bool {
+	return c.v.GetBool(keyDriftedOnly)
+}
+
+// verifyCachePath is where the verify command keeps what its last run found.
+//
+// It sits beside the capture cache, under .focus, so one directory name
+// covers every local artifact the tool writes.
+func (c *config) verifyCachePath() string {
+	if path := strings.TrimSpace(c.v.GetString(keyVerifyCache)); path != "" {
+		return path
+	}
+	return defaultVerifyCachePath
 }
 
 // maskAddresses replaces real account addresses in captured fixtures with

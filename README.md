@@ -191,6 +191,65 @@ and call outcome included — for checks this package does not provide.
 `focus.TrapEvidence{Result, Meta}` pair when the result and meta are separate
 fixtures, and searches the rendered host diagnostics.
 
+#### The whole event sequence
+
+`AssertEventEmitted` matches one event anywhere in the meta. When the order is
+the point — `init`, `deposit`, `transfer`, `audit` — assert the whole sequence:
+
+```go
+focus.AssertEventsEqual(t, meta, []focus.Event{
+	{Topics: []any{"init"}},
+	{Topics: []any{"deposit"}, Data: scAmount(100)},
+	{Topics: []any{"audit"}},
+})
+```
+
+The count has to match too, and each event is matched at its own index. A
+failure names the event that deviated and prints what was emitted beside what
+was wanted:
+
+```
+AssertEventsEqual: event 1 of 3 does not match
+
+  actual:   topics["deposit"]  data u32(100)
+  expected: topics["withdraw"]  data u32(100)
+```
+
+Options relax the comparison for the whole list — `focus.IgnoreEventData()`,
+`focus.IgnoreEventTopics()` and `focus.IgnoreEventContractID()` — and whatever
+they relax is named in the failure, because an assertion that quietly stops
+checking something is how a test starts passing for the wrong reason.
+
+#### Resource budgets
+
+```go
+focus.AssertSorobanResources(t, envelope, 100_000, 64_000, 64_000)
+focus.AssertResourceFee(t, envelope, 100_000_000)
+```
+
+`AssertSorobanResources` checks the limits the transaction bids — CPU
+instructions, ledger bytes read and written — against the budgets a test
+gives, and names every dimension that went over. A budget of zero leaves that
+dimension unchecked. `AssertResourceFee` pins the refundable resource fee, in
+stroops and in XLM.
+
+### Operations
+
+`AssertOperationTypes` checks the discriminator of an operation. The typed
+assertions check what the operation does:
+
+```go
+focus.AssertPayment(t, envelope, 0, dest, 100_0000000, "native")
+focus.AssertCreateAccount(t, envelope, 0, dest, 20_0000000)
+focus.AssertChangeTrust(t, envelope, 0, "USDC:GA2J…HVAW", 1000_0000000)
+```
+
+Amounts are in stroops, and a failure shows both units:
+
+```
+AssertPayment: operation 0 amount is 1000000000 (100.0000000 XLM), want 2000000000 (200.0000000 XLM)
+```
+
 `AssertContractError` answers the question a trap leaves open: not *that* the
 contract failed but *how*. It reads the Soroban return value and the host's
 error diagnostic, and names both sides of the comparison:
@@ -523,6 +582,29 @@ check it was never eligible for.
 
 Defaults to **testnet**; use `--network mainnet` or `--rpc-url`.
 
+### Checking less of it
+
+A repository with hundreds of fixtures does not need all of them re-fetched on
+every commit, so a run can be narrowed:
+
+```sh
+focus verify testdata/ --since 48h              # only fixtures captured recently
+focus verify testdata/ --since 2026-10-01T00:00:00Z
+focus verify testdata/ --filter 'envelope*'     # only fixtures matching a glob
+focus verify testdata/ --filter network:testnet # …or a metadata selector
+focus verify testdata/ --drifted-only           # only what drifted last time
+```
+
+A fixture left out is reported as `FILTERED`, with the reason, so a narrowed
+run never looks like a run that found nothing wrong.
+
+`--drifted-only` remembers what each run found, in `.focus/verify-cache.json`.
+Only the fixtures that drifted or could not be checked are looked at again —
+and a fixture whose contents have changed since the last check is checked too,
+because the old outcome says nothing about a fixture that has moved. The cache
+is a speed-up, never a source of truth; delete it and the next run checks
+everything.
+
 ### Verifying in a pipeline
 
 The report above is written for a person. A pipeline wants a document it can
@@ -666,8 +748,7 @@ focus capture tx 2b2e276a8f99a292… --sanitize
 replaces data entry values with `[REDACTED_DATA]`, and `--scrub-keys`
 replaces anything shaped like a secret key (`S` and 55 more characters) with
 `[REDACTED_SECRET_KEY]`; `--sanitize` is all three. The decoded section is
-rendered from the masked XDR, so it is clean too. A sanitized fixture no
-longer matches the chain, so `focus verify` skips it.
+rendered from the masked XDR, so it is clean too.A sanitized fixture no longer matches the chain, so `focus verify` skips it.
 
 ### Configuration
 
