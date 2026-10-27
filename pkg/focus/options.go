@@ -30,6 +30,8 @@ type config struct {
 	// maxChanges caps how many differences are printed before the rest are
 	// summarised.
 	maxChanges int
+	// diffContext is the number of unchanged sibling fields shown around each difference.
+	diffContext int
 	// label names the step or scenario an assertion belongs to. When set, it
 	// is shown beside the assertion name in every failure message.
 	label string
@@ -49,7 +51,7 @@ type sorter struct {
 }
 
 func newConfig(opts ...Option) *config {
-	c := &config{colorMode: "never", maxChanges: 20}
+	c := &config{colorMode: "never", maxChanges: 20, diffContext: 3}
 	for _, o := range opts {
 		o(c)
 	}
@@ -101,6 +103,17 @@ func IgnoreSignatures() Option {
 // IgnoreTimeBounds ignores time bounds, which move with wall-clock time.
 func IgnoreTimeBounds() Option {
 	return IgnorePaths("**.TimeBounds", "**.MinTime", "**.MaxTime")
+}
+
+// IgnoreLedgerHeader ignores volatile ledger-close metadata in ledger headers.
+func IgnoreLedgerHeader() Option {
+	return IgnorePaths(
+		"**.Header.ScpValue.CloseTime",
+		"**.Header.LedgerSeq",
+		"**.Header.TotalCoins",
+		"**.Header.FeePool",
+		"**.Header.IdPool",
+	)
 }
 
 // IgnoreFee ignores the fee bid and the fee charged.
@@ -737,6 +750,12 @@ func WithColor(mode string) Option {
 // less prints all of them.
 func WithMaxChanges(n int) Option {
 	return func(c *config) { c.maxChanges = n }
+}
+
+// WithDiffContext sets how many unchanged sibling fields appear around each
+// changed field in a failure diff. The default is 3; 0 disables context.
+func WithDiffContext(lines int) Option {
+	return func(c *config) { c.diffContext = max(lines, 0) }
 }
 
 // palette resolves the colour palette for failure output.

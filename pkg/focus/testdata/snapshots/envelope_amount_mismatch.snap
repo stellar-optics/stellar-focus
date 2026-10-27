@@ -1,5 +1,7 @@
 AssertEnvelopeEqual: envelopes differ — 1 difference
 
+  V1.Tx.Operations[0].Body.PaymentOp.Destination = GAPB7YMUQ6MPQ23PTFDNBZP7HGGTZPI2DT5JJURUOIXNPLGHW2O3WYXZ
+  V1.Tx.Operations[0].Body.PaymentOp.Asset = native
   ~ V1.Tx.Operations[0].Body.PaymentOp.Amount
       want │ 1000000000 100.0000000 (stroops: 1000000000)
       got  │ 2000000000 200.0000000 (stroops: 2000000000)

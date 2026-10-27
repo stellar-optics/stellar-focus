@@ -59,7 +59,7 @@ func diffMessage(
 	}
 
 	b.WriteString("\n")
-	b.WriteString(renderChanges(changes, c))
+	b.WriteString(renderChanges(changes, c, want, got))
 	b.WriteString("\n")
 
 	// The raw payloads come last, truncated, so they are available for
@@ -81,7 +81,7 @@ func diffMessage(
 // addition colour — so a focus failure and `lens diff` agree. With colour off
 // the palette is empty and the plain text is the coloured text minus the
 // escapes.
-func renderChanges(changes []lens.Change, c *config) string {
+func renderChanges(changes []lens.Change, c *config, want, got *lens.Value) string {
 	shown := changes
 	var elided int
 	if c.maxChanges > 0 && len(changes) > c.maxChanges {
@@ -92,13 +92,83 @@ func renderChanges(changes []lens.Change, c *config) string {
 	p := c.palette()
 	var b strings.Builder
 	for _, ch := range shown {
+		renderDiffContext(&b, ch, want, got, c.diffContext, true, p)
 		renderChange(&b, ch, p)
+		renderDiffContext(&b, ch, want, got, c.diffContext, false, p)
 	}
 	if elided > 0 {
 		fmt.Fprintf(&b, "%s… and %d more difference(s); raise the limit with focus.WithMaxChanges%s\n",
 			p.Dim, elided, p.Reset)
 	}
 	return b.String()
+}
+
+func renderDiffContext(b *strings.Builder, ch lens.Change, want, got *lens.Value, limit int, before bool, p lensformat.Palette) {
+	if limit == 0 || want == nil || got == nil || want.Node == nil || got.Node == nil {
+		return
+	}
+
+	parentPath := parentChangePath(ch.Path)
+	wantParent := want.Node.Find(parentPath)
+	gotParent := got.Node.Find(parentPath)
+	if wantParent == nil || gotParent == nil {
+		return
+	}
+
+	changedIndex := -1
+	for index, child := range wantParent.Children {
+		if nodeChildPath(parentPath, wantParent, child, index) == ch.Path {
+			changedIndex = index
+			break
+		}
+	}
+	if changedIndex < 0 {
+		return
+	}
+
+	if before {
+		start := max(0, changedIndex-limit)
+		for index := start; index < changedIndex; index++ {
+			renderContextChild(b, parentPath, wantParent, gotParent, index, p)
+		}
+		return
+	}
+	end := min(len(wantParent.Children), changedIndex+limit+1)
+	for index := changedIndex + 1; index < end; index++ {
+		renderContextChild(b, parentPath, wantParent, gotParent, index, p)
+	}
+}
+
+func renderContextChild(b *strings.Builder, parentPath string, wantParent, gotParent *lens.Node, index int, p lensformat.Palette) {
+	if index >= len(gotParent.Children) {
+		return
+	}
+	wantChild, gotChild := wantParent.Children[index], gotParent.Children[index]
+	path := nodeChildPath(parentPath, wantParent, wantChild, index)
+	if path != nodeChildPath(parentPath, gotParent, gotChild, index) ||
+		wantChild.Kind != lens.KindScalar || gotChild.Kind != lens.KindScalar ||
+		!equalScalars(wantChild.Value, gotChild.Value) || wantChild.Note != gotChild.Note {
+		return
+	}
+	fmt.Fprintf(b, "  %s%s = %s%s\n", p.Dim, path, wantChild.String(), p.Reset)
+}
+
+func parentChangePath(path string) string {
+	cut := max(strings.LastIndex(path, "."), strings.LastIndex(path, "["))
+	if cut < 0 {
+		return ""
+	}
+	return path[:cut]
+}
+
+func nodeChildPath(parentPath string, parent, child *lens.Node, index int) string {
+	if parent.Kind == lens.KindList && child.Name == "" {
+		return fmt.Sprintf("%s[%d]", parentPath, index)
+	}
+	if parentPath == "" {
+		return child.Name
+	}
+	return parentPath + "." + child.Name
 }
 
 // renderChange renders one difference: the path with the marker for the kind
