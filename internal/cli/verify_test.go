@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -423,6 +424,107 @@ func TestVerifyDriftedOnlyRechecksAChangedFixture(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "DRIFTED") {
 		t.Errorf("the changed fixture was not reported as drifted:\n%s", stderr)
+	}
+}
+
+// TestVerifyJSONFormatCarriesPathLevelDiffs checks that a drifted entry
+// carries the differences themselves — the field, the kind of change and the
+// value on each side — and not only their count. That is what lets a CI job
+// quote a path-level diff without parsing the rendered terminal output.
+func TestVerifyJSONFormatCarriesPathLevelDiffs(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	// The chain has moved on: same hash, different content.
+	src.Transactions[testHash] = driftedRecords(t)
+
+	stdout, stderr, err := run(t, "verify", dir, "--format", "json")
+	if err == nil {
+		t.Fatal("verify reported success despite drift")
+	}
+	if code, _ := ExitCode(err); code != ExitDrift {
+		t.Errorf("exit code %d, want %d", code, ExitDrift)
+	}
+	if stderr != "" {
+		t.Errorf("the JSON run wrote to stderr:\n%s", stderr)
+	}
+
+	var report VerifyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+
+	var drifted *VerifyItemResult
+	for i := range report.Results {
+		if report.Results[i].Status == statusDrifted {
+			drifted = &report.Results[i]
+		}
+	}
+	if drifted == nil {
+		t.Fatalf("no drifted fixture in the report:\n%s", stdout)
+	}
+	if len(drifted.Diffs) != drifted.DiffCount {
+		t.Fatalf("drifted fixture reports %d differences and %d diff entries, want the same non-zero count:\n%s",
+			drifted.DiffCount, len(drifted.Diffs), stdout)
+	}
+
+	paths := make(map[string]bool, len(drifted.DiffPaths))
+	for _, path := range drifted.DiffPaths {
+		paths[path] = true
+	}
+
+	var withValues int
+	for _, diff := range drifted.Diffs {
+		if diff.Path == "" {
+			t.Errorf("a diff entry does not name its field:\n%s", stdout)
+		}
+		if !paths[diff.Path] {
+			t.Errorf("diff for %q is not in diff_paths %v", diff.Path, drifted.DiffPaths)
+		}
+		switch diff.Op {
+		case "modified", "added", "removed", "type_changed":
+		default:
+			t.Errorf("diff for %q has unknown op %q", diff.Path, diff.Op)
+		}
+		if diff.Before != nil || diff.After != nil {
+			withValues++
+		}
+	}
+	if withValues == 0 {
+		t.Errorf("no diff entry carries a value on either side:\n%s", stdout)
+	}
+
+	// The wire format is part of the contract, so check the keys a script
+	// reads rather than only the struct that produced them.
+	var raw struct {
+		Results []map[string]json.RawMessage `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+	var found bool
+	for _, result := range raw.Results {
+		if string(result["status"]) != `"`+statusDrifted+`"` {
+			continue
+		}
+		found = true
+		var entries []map[string]json.RawMessage
+		if err := json.Unmarshal(result["diffs"], &entries); err != nil {
+			t.Fatalf("diffs is not an array of objects: %v\n%s", err, stdout)
+		}
+		for _, entry := range entries {
+			for _, key := range []string{"path", "op", "before", "after"} {
+				if _, ok := entry[key]; !ok {
+					t.Errorf("a diff entry has no %q key:\n%s", key, stdout)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no drifted result on the wire:\n%s", stdout)
 	}
 }
 
