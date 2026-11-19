@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +71,22 @@ type ArchivalSource struct {
 
 	mu         sync.Mutex
 	passphrase string
+}
+
+// ArchiveSource is the name for the history archive source used in
+// CaptureLedgerRange discussions; it is the same type as ArchivalSource.
+type ArchiveSource = ArchivalSource
+
+// NewArchiveSource returns a Source backed by a history archive, and is the
+// spelling NewArchivalSource is also known by.
+func NewArchiveSource(network, archiveURL string, timeout time.Duration) *ArchiveSource {
+	return NewArchivalSource(network, archiveURL, timeout)
+}
+
+// LedgerHeaderAt implements LedgerHeaderSource by reading the header from
+// the checkpoint that holds sequence.
+func (s *ArchivalSource) LedgerHeaderAt(ctx context.Context, sequence uint32) (Record, error) {
+	return s.LedgerHeader(ctx, sequence)
 }
 
 // NewArchivalSource returns a Source backed by the history archive at
@@ -387,7 +406,25 @@ func readXDRStream(r io.Reader, visit func([]byte) (bool, error)) error {
 
 // get fetches an archive file. A missing file — a checkpoint not yet
 // published, or never — is reported as ErrNotFound.
+//
+// An endpoint that is not an HTTP URL is treated as a local directory laid
+// out like an archive, so an offline copy of one can be ingested without a
+// server in front of it.
 func (s *ArchivalSource) get(ctx context.Context, url string) (io.ReadCloser, error) {
+	if dir, ok := s.localDir(); ok {
+		rel := strings.TrimPrefix(url, s.endpoint)
+		rel = strings.TrimPrefix(rel, "/")
+		path := filepath.Join(dir, filepath.FromSlash(rel))
+		file, err := os.Open(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("%s: %w", url, ErrNotFound)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading history archive file %s: %w", path, err)
+		}
+		return file, nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("history archive request %s: %w", url, err)
@@ -405,6 +442,19 @@ func (s *ArchivalSource) get(ctx context.Context, url string) (io.ReadCloser, er
 		return nil, fmt.Errorf("%s: history archive returned %s", url, resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// localDir reports the directory an endpoint names, when the endpoint is a
+// filesystem path rather than an HTTP URL. A file:// URL is accepted too.
+func (s *ArchivalSource) localDir() (string, bool) {
+	endpoint := s.endpoint
+	if strings.HasPrefix(endpoint, "file://") {
+		return strings.TrimPrefix(endpoint, "file://"), true
+	}
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return "", false
+	}
+	return endpoint, true
 }
 
 // FallbackSource tries a primary source and, for anything the primary no

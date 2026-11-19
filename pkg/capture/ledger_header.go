@@ -106,6 +106,36 @@ func (s *RPCSource) LedgerHeader(ctx context.Context) (*protocol.GetLatestLedger
 	return &resp, nil
 }
 
+// LedgerHeaderAt implements LedgerHeaderSource, asking RPC for the ledger at
+// sequence. RPC reports headers with their close metadata, so one request
+// fills a ledger batch entry.
+func (s *RPCSource) LedgerHeaderAt(ctx context.Context, sequence uint32) (Record, error) {
+	resp, err := s.client.GetLedgers(ctx, protocol.GetLedgersRequest{
+		StartLedger: sequence,
+		Pagination:  &protocol.LedgerPaginationOptions{Limit: 1},
+	})
+	if err != nil {
+		return Record{}, fmt.Errorf("rpc getLedgers(%d): %w", sequence, err)
+	}
+	for _, ledger := range resp.Ledgers {
+		if ledger.Sequence != sequence {
+			continue
+		}
+		if ledger.LedgerHeader == "" {
+			return Record{}, fmt.Errorf("rpc getLedgers(%d): response carried no header XDR", sequence)
+		}
+		return Record{
+			Name:   "ledger-header",
+			Type:   "LedgerHeaderHistoryEntry",
+			XDR:    ledger.LedgerHeader,
+			Ledger: sequence,
+			Description: fmt.Sprintf("header of ledger %d (%s, close time %d)",
+				sequence, ledger.Hash, ledger.LedgerCloseTime),
+		}, nil
+	}
+	return Record{}, fmt.Errorf("ledger %d: %w", sequence, ErrNotFound)
+}
+
 // decodeLedgerHeader unmarshals raw XDR bytes into a LedgerHeaderHistoryEntry.
 //
 // Kept as its own function so tests can exercise the decode-then-assert path
