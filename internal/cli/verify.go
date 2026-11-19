@@ -96,6 +96,26 @@ type VerifyItemResult struct {
 	// DiffPaths names the fields that changed, in the order lens reports
 	// them.
 	DiffPaths []string `json:"diff_paths,omitempty"`
+	// Diffs describes each of those differences: the field, the kind of
+	// change, and the value on each side. It is the machine-readable form
+	// of the lines the terminal diff prints, so a pipeline can quote what
+	// changed without parsing coloured text.
+	Diffs []VerifyDiff `json:"diffs,omitempty"`
+}
+
+// VerifyDiff is one path-level difference inside a drifted fixture.
+type VerifyDiff struct {
+	// Path locates the field, in the same notation the terminal diff and
+	// the failure messages use.
+	Path string `json:"path"`
+	// Op is the kind of change: modified, added, removed or type_changed.
+	Op string `json:"op"`
+	// Before is the value the fixture stores. It is null when the field was
+	// added, and zero, false and "" are reported as they are.
+	Before any `json:"before"`
+	// After is the value the chain returned. It is null when the field was
+	// removed.
+	After any `json:"after"`
 }
 
 func newVerifyCmd(cfg *config, stdout, stderr io.Writer) *cobra.Command {
@@ -134,9 +154,10 @@ With --archive-url, a fixture whose transaction RPC no longer keeps is
 checked against the history archive, using the ledger in its provenance.
 
 With --format json, a single JSON document is printed instead of the
-human-readable report: the counts, and one entry per fixture. It is meant
-for a pipeline that has to act on the result — a pull-request comment, a
-step summary, a test report — rather than read it.
+human-readable report: the counts, and one entry per fixture, including the
+fields that changed and the value on each side of them for a fixture that
+drifted. It is meant for a pipeline that has to act on the result — a
+pull-request comment, a step summary, a test report — rather than read it.
 
 Exit status is 0 when every checked fixture still matches, 2 when at least one
 has drifted, and 1 when a fixture could not be checked at all. The exit
@@ -360,7 +381,7 @@ func verifyFixtures(
 			}
 			if res.Diff != nil {
 				item.DiffCount = len(res.Diff.Changes)
-				item.DiffPaths = diffPaths(res.Diff)
+				item.DiffPaths, item.Diffs = diffDetails(res.Diff)
 			}
 			report.Results = append(report.Results, item)
 		}
@@ -403,19 +424,29 @@ func verifyFixtures(
 	return report, nil
 }
 
-// diffPaths names the fields a diff reports as changed.
+// diffDetails names the fields a diff reports as changed, and describes each
+// change.
 //
 // The paths are lens's own, so a path in the JSON report is the same path
-// the command-line diff prints and the same one a failure message quotes.
-func diffPaths(diff *lens.DiffResult) []string {
+// the command-line diff prints and the same one a failure message quotes. The
+// values are lens's decoded scalars, so they serialize as the JSON types a
+// script expects rather than as a rendered string.
+func diffDetails(diff *lens.DiffResult) ([]string, []VerifyDiff) {
 	if diff == nil || len(diff.Changes) == 0 {
-		return nil
+		return nil, nil
 	}
 	paths := make([]string, 0, len(diff.Changes))
+	diffs := make([]VerifyDiff, 0, len(diff.Changes))
 	for _, change := range diff.Changes {
 		paths = append(paths, change.Path)
+		diffs = append(diffs, VerifyDiff{
+			Path:   change.Path,
+			Op:     change.Op.String(),
+			Before: change.Before,
+			After:  change.After,
+		})
 	}
-	return paths
+	return paths, diffs
 }
 
 // writeVerifyReport prints the report as an indented JSON document.

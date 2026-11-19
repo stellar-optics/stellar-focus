@@ -696,8 +696,16 @@ focus verify testdata/ --format json
       "path": "testdata/result.golden.json",
       "status": "drifted",
       "type": "TransactionResult",
-      "diff_count": 2,
-      "diff_paths": ["V1.Tx.Operations[0].Body.PaymentOp.Amount"]
+      "diff_count": 1,
+      "diff_paths": ["V1.Tx.Operations[0].Body.PaymentOp.Amount"],
+      "diffs": [
+        {
+          "path": "V1.Tx.Operations[0].Body.PaymentOp.Amount",
+          "op": "modified",
+          "before": 1000000000,
+          "after": 2000000000
+        }
+      ]
     },
     {
       "path": "testdata/handwritten.golden.json",
@@ -711,7 +719,10 @@ focus verify testdata/ --format json
 
 Nothing else is printed: the progress lines and the rendered diff are for the
 terminal, and the document carries the same information in a form a script can
-use — the counts, the status of each fixture, and the paths that changed.
+use — the counts, the status of each fixture, and, for a fixture that drifted,
+the field that changed and the value on each side of it. `op` is one of
+`modified`, `added`, `removed` or `type_changed`, matching the marker the
+terminal diff prints; the side a change does not have is `null`.
 
 The exit status is the same in either format — `2` on drift, `1` when a
 fixture could not be checked, `0` otherwise — so a pipeline can branch on the
