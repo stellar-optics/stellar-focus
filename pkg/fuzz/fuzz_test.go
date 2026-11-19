@@ -10,6 +10,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/fuzz"
+	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
 // TestCorpusDecodes checks that every seed is real XDR of the type the
@@ -137,6 +138,149 @@ func containsSeed(seeds []fuzz.Seed, want []byte) bool {
 		}
 	}
 	return false
+}
+
+// FuzzGoldenDeserializer checks that arbitrary bytes cannot make a fixture
+// deserializer panic, loop, or allocate without bound.
+//
+// Malformed input is expected — returning an error is the pass — so the
+// failure modes that matter are the ones the engine finds on its own: a
+// panic, a deadlock, or an OOM. Every format is tried against every input
+// rather than trusting a format hint, so a mutation that is still valid JSON
+// but broken YAML exercises both readers.
+func FuzzGoldenDeserializer(f *testing.F) {
+	for _, seed := range fuzz.GoldenSeeds() {
+		f.Add(seed.Data)
+	}
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		for _, format := range []golden.Format{golden.JSON, golden.YAML, golden.Text} {
+			serializer, err := golden.SerializerFor(format)
+			if err != nil {
+				t.Fatalf("SerializerFor(%q) error = %v", format, err)
+			}
+			fixture, err := serializer.Unmarshal(data)
+			if err != nil {
+				continue
+			}
+			// A document that reads has to write: if the encoder disagrees
+			// with the decoder that accepted it, the package could store a
+			// fixture it can never load back.
+			encoded, err := serializer.Marshal(fixture)
+			if err != nil {
+				t.Fatalf("%s: Marshal() after a successful Unmarshal() error = %v", format, err)
+			}
+			if len(encoded) == 0 {
+				t.Fatalf("%s: Marshal() returned no bytes for a fixture it read", format)
+			}
+		}
+	})
+}
+
+// FuzzInterpolate checks that arbitrary template text either renders or comes
+// back as an error: no panic, no runaway execution.
+func FuzzInterpolate(f *testing.F) {
+	for _, seed := range fuzz.TemplateSeeds() {
+		f.Add(seed.Template)
+	}
+
+	f.Fuzz(func(t *testing.T, text string) {
+		rendered, err := golden.Interpolate(text, templateFuzzData())
+		if err != nil {
+			// Rejecting a malformed template is the pass.
+			return
+		}
+		// Text without an action is returned as it came in; anything else
+		// means a template with no template in it was rewritten.
+		if !strings.Contains(text, "{{") && rendered != text {
+			t.Fatalf("Interpolate(%q) = %q, want the text unchanged", text, rendered)
+		}
+	})
+}
+
+// TestGoldenSeedsInitializeTheFuzzHarness checks the corpus the deserializer
+// target starts from: every format has a valid fixture and a corrupt document,
+// and each seed behaves the way its name says.
+func TestGoldenSeedsInitializeTheFuzzHarness(t *testing.T) {
+	t.Parallel()
+
+	seeds := fuzz.GoldenSeeds()
+	if len(seeds) == 0 {
+		t.Fatal("the golden seed corpus is empty")
+	}
+
+	valid := map[golden.Format]int{}
+	corrupt := map[golden.Format]int{}
+	for _, seed := range seeds {
+		serializer, err := golden.SerializerFor(seed.Format)
+		if err != nil {
+			t.Fatalf("seed %s: SerializerFor(%q) error = %v", seed.Name, seed.Format, err)
+		}
+		_, err = serializer.Unmarshal(seed.Data)
+		switch {
+		case strings.HasPrefix(seed.Name, "valid/"):
+			if err != nil {
+				t.Errorf("seed %s does not deserialize: %v", seed.Name, err)
+				continue
+			}
+			valid[seed.Format]++
+		case strings.HasPrefix(seed.Name, "corrupt/"):
+			if err == nil {
+				t.Errorf("seed %s is named corrupt but deserialized", seed.Name)
+				continue
+			}
+			corrupt[seed.Format]++
+		default:
+			t.Errorf("seed %s has neither a valid/ nor a corrupt/ prefix", seed.Name)
+		}
+	}
+
+	for _, format := range []golden.Format{golden.JSON, golden.YAML, golden.Text} {
+		if valid[format] == 0 {
+			t.Errorf("the corpus holds no valid %s fixture", format)
+		}
+		if corrupt[format] == 0 {
+			t.Errorf("the corpus holds no corrupt %s document", format)
+		}
+	}
+}
+
+// TestTemplateSeedsInitializeTheFuzzHarness checks that the template corpus
+// covers both sides of the parser: templates that render and templates that
+// are rejected.
+func TestTemplateSeedsInitializeTheFuzzHarness(t *testing.T) {
+	t.Parallel()
+
+	seeds := fuzz.TemplateSeeds()
+	if len(seeds) == 0 {
+		t.Fatal("the template seed corpus is empty")
+	}
+
+	rendered := 0
+	for _, seed := range seeds {
+		if _, err := golden.Interpolate(seed.Template, templateFuzzData()); err == nil {
+			rendered++
+		}
+	}
+	if rendered == 0 {
+		t.Error("no template seed renders; the corpus covers only error paths")
+	}
+	if rendered == len(seeds) {
+		t.Errorf("all %d template seeds render; the corpus covers no error path", len(seeds))
+	}
+}
+
+// templateFuzzData is the context both the seeds and the fuzz target render
+// against. It carries a scalar, a list and a nested map so a mutation has
+// something of every shape to reach for.
+func templateFuzzData() map[string]any {
+	return map[string]any{
+		"Name":     "world",
+		"Sequence": 42,
+		"Enabled":  true,
+		"List":     []any{"a", "b"},
+		"Nested":   map[string]any{"Value": "inner"},
+	}
 }
 
 // ExampleCorpus shows the pattern a downstream project follows to seed a

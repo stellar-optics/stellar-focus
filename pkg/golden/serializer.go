@@ -1035,6 +1035,22 @@ func buildArray(entries []flatEntry, depth int) (any, error) {
 		groups[seg.index] = append(groups[seg.index], e)
 	}
 
+	// Every index below the highest names an element and every element has at
+	// least one entry, so an array longer than the entries that describe it
+	// cannot be complete. Find the first gap before allocating: a corrupted
+	// "a[4294967295]: 1" line must be an error, not a multi-gigabyte array.
+	if highest >= len(entries) {
+		for i := 0; i <= len(entries); i++ {
+			if _, ok := leaves[i]; ok {
+				continue
+			}
+			if _, ok := groups[i]; ok {
+				continue
+			}
+			return nil, fmt.Errorf("array index %d is missing", i)
+		}
+	}
+
 	out := make([]any, 0, highest+1)
 	for i := 0; i <= highest; i++ {
 		if v, ok := leaves[i]; ok {

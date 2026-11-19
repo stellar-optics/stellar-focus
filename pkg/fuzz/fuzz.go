@@ -1,4 +1,5 @@
-// Package fuzz provides seed corpora for fuzzing XDR decoders.
+// Package fuzz provides seed corpora for fuzzing XDR decoders and the
+// library's own parsers.
 //
 // The corpus is the XDR stellar-focus has been reading all along: real
 // mainnet transactions, captured and kept as fixtures. A project that wants
@@ -26,6 +27,22 @@
 // Types lists what is here:
 //
 //	fuzz.Types() // TransactionEnvelope, TransactionMeta, TransactionResult
+//
+// The golden fixture deserializer and the template interpolation engine read
+// arbitrary files and arbitrary text, so they have seed corpora here too:
+// valid fixtures in every format the package writes, corrupted documents, and
+// malformed templates. Targets live in a _test.go file because that is where
+// the go tool looks for them:
+//
+//	func FuzzGoldenDeserializer(f *testing.F) {
+//	    for _, seed := range fuzz.GoldenSeeds() {
+//	        f.Add(seed.Data)
+//	    }
+//	    f.Fuzz(func(t *testing.T, data []byte) {
+//	        // data is arbitrary JSON, YAML or text: an error is fine, a panic
+//	        // or an unbounded allocation is not.
+//	    })
+//	}
 package fuzz
 
 import (
@@ -37,6 +54,8 @@ import (
 	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
 //go:embed testdata
@@ -168,6 +187,151 @@ func Types() []string {
 // normalizeType folds a type name to the form used for comparison.
 func normalizeType(name string) string {
 	return strings.ToLower(strings.NewReplacer("_", "", " ", "", "-", "").Replace(strings.TrimSpace(name)))
+}
+
+// GoldenSeed is one input for fuzzing the golden fixture deserializers.
+//
+// Format names the encoding the bytes are written in, so a target can check
+// that a valid seed really is the document the corpus claims it is.
+type GoldenSeed struct {
+	// Name identifies the seed, e.g. "valid/json" or "corrupt/yaml-tab".
+	Name string
+	// Format is the fixture format the bytes are written in.
+	Format golden.Format
+	// Data is the document to deserialize.
+	Data []byte
+}
+
+// TemplateSeed is one input for fuzzing the template interpolation engine.
+type TemplateSeed struct {
+	// Name identifies the seed, e.g. "unclosed-action".
+	Name string
+	// Template is the template text to render.
+	Template string
+}
+
+// goldenSeeds is the golden deserializer corpus, built once.
+var goldenSeeds = loadGoldenSeeds()
+
+// templateSeeds is the interpolation corpus.
+var templateSeeds = []TemplateSeed{
+	{Name: "valid", Template: "hello {{ .Name }} / {{ .Sequence }}"},
+	{Name: "conditional", Template: "{{ if .Enabled }}{{ .Name }}{{ else }}off{{ end }}"},
+	{Name: "range", Template: "{{ range .List }}{{ . }},{{ end }}"},
+	{Name: "nested-field", Template: "{{ .Nested.Value }}"},
+	// Malformed templates: every one of these must come back as an error,
+	// not as a panic and not as a partial render.
+	{Name: "unclosed-action", Template: "hello {{ .Name"},
+	{Name: "unclosed-quote", Template: "{{ .Name | printf \"%s }}"},
+	{Name: "unknown-function", Template: "{{ nope .Name }}"},
+	{Name: "dangling-pipeline", Template: "{{ .Name | }}"},
+	{Name: "unclosed-block", Template: "{{ if .Enabled }}yes"},
+	{Name: "stray-end", Template: "{{ end }}"},
+	{Name: "missing-key", Template: "{{ .Missing }}"},
+	{Name: "range-over-scalar", Template: "{{ range .Name }}x{{ end }}"},
+	{Name: "bad-printf", Template: "{{ printf \"%d\" \"not a number\" }}"},
+}
+
+// GoldenSeeds returns the seed corpus for the golden fixture deserializer: a
+// valid fixture in each format the package writes, plus documents that are
+// corrupted in the ways a hand-edit or a bad merge corrupts one.
+func GoldenSeeds() []GoldenSeed {
+	out := make([]GoldenSeed, len(goldenSeeds))
+	copy(out, goldenSeeds)
+	return out
+}
+
+// TemplateSeeds returns the seed corpus for template interpolation: templates
+// that render and templates that must be rejected.
+func TemplateSeeds() []TemplateSeed {
+	out := make([]TemplateSeed, len(templateSeeds))
+	copy(out, templateSeeds)
+	return out
+}
+
+// loadGoldenSeeds builds the golden deserializer corpus.
+//
+// The valid seeds are written by the serializers themselves rather than
+// copied out of a fixture file, so they cannot drift away from what the
+// package writes today: a fixture is seeded, then serialized in each format,
+// then mutated into the corrupt variants.
+func loadGoldenSeeds() []GoldenSeed {
+	fixture := goldenSeedFixture()
+
+	seeds := make([]GoldenSeed, 0, 12)
+	for _, format := range []golden.Format{golden.JSON, golden.YAML, golden.Text} {
+		serializer, err := golden.SerializerFor(format)
+		if err != nil {
+			panic(fmt.Sprintf("fuzz: serializer for %s: %v", format, err))
+		}
+		data, err := serializer.Marshal(fixture)
+		if err != nil {
+			panic(fmt.Sprintf("fuzz: building the %s golden seed: %v", format, err))
+		}
+		seeds = append(seeds, GoldenSeed{Name: "valid/" + format.String(), Format: format, Data: data})
+	}
+
+	jsonSeed := seeds[0].Data
+	seeds = append(seeds,
+		GoldenSeed{Name: "corrupt/json-truncated", Format: golden.JSON,
+			Data: append([]byte(nil), jsonSeed[:len(jsonSeed)/2]...)},
+		GoldenSeed{Name: "corrupt/json-unknown-format", Format: golden.JSON,
+			Data: []byte(`{"format":"focus/v99","type":"TransactionEnvelope","xdr":"AAAA"}`)},
+		GoldenSeed{Name: "corrupt/json-wrong-types", Format: golden.JSON,
+			Data: []byte(`{"type":7,"xdr":[]}`)},
+		GoldenSeed{Name: "corrupt/json-trailing-value", Format: golden.JSON,
+			Data: []byte(`{"type":"X","xdr":"AAAA"}{}`)},
+		GoldenSeed{Name: "corrupt/yaml-tab-indent", Format: golden.YAML,
+			Data: []byte("format: focus/v1\ntype: X\n\txdr: AAAA\n")},
+		GoldenSeed{Name: "corrupt/yaml-unterminated-quote", Format: golden.YAML,
+			Data: []byte("type: \"X\nxdr: AAAA\n")},
+		GoldenSeed{Name: "corrupt/yaml-duplicate-key", Format: golden.YAML,
+			Data: []byte("type: X\ntype: Y\nxdr: AAAA\n")},
+		GoldenSeed{Name: "corrupt/text-missing-separator", Format: golden.Text,
+			Data: []byte("type TransactionEnvelope\n")},
+		GoldenSeed{Name: "corrupt/text-unterminated-index", Format: golden.Text,
+			Data: []byte("xdr: AAAA\ndecoded.a[1: 2\n")},
+		// A path that asks for an absurd array index must be rejected rather
+		// than allocating the array it names.
+		GoldenSeed{Name: "corrupt/text-huge-index", Format: golden.Text,
+			Data: []byte("type: X\nxdr: AAAA\ndecoded.a[4294967295]: 1\n")},
+		GoldenSeed{Name: "corrupt/empty", Format: golden.JSON, Data: nil},
+	)
+
+	seeds = append(seeds, GoldenSeed{Name: "valid/yaml-deep", Format: golden.YAML, Data: deepYAMLSeed()})
+	return seeds
+}
+
+// goldenSeedFixture is the fixture the valid golden seeds are built from: a
+// real captured envelope, so the corpus starts with the data the package is
+// meant to read.
+func goldenSeedFixture() *golden.Fixture {
+	envelope, err := files.ReadFile("testdata/tx_failed.env.txt")
+	if err != nil {
+		panic(fmt.Sprintf("fuzz: reading the golden seed envelope: %v", err))
+	}
+	return &golden.Fixture{
+		Format:      golden.FormatVersion,
+		Type:        "TransactionEnvelope",
+		Description: "a failed Soroban call",
+		XDR:         strings.TrimSpace(string(envelope)),
+		Decoded:     json.RawMessage(`{"V1":{"Tx":{"Fee":"100","Operations":[]}}}`),
+	}
+}
+
+// deepYAMLSeed renders a fixture nested deepYAMLDepth levels deep, which is
+// valid input and exercises the reader's recursion rather than its error
+// paths.
+func deepYAMLSeed() []byte {
+	const depth = 200
+
+	var b strings.Builder
+	b.WriteString("type: TransactionEnvelope\nxdr: AAAA\ndecoded:\n")
+	for i := 0; i < depth; i++ {
+		b.WriteString(strings.Repeat("  ", i+1))
+		b.WriteString("a:\n")
+	}
+	return []byte(b.String())
 }
 
 // sorobanMetaSeed builds a Soroban transaction meta.
