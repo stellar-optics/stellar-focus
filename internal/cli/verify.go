@@ -7,11 +7,13 @@ package cli
 // in, with its tests beside it.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	"github.com/spf13/cobra"
 
@@ -147,6 +149,10 @@ every commit, so a run can be narrowed:
   --drifted-only               only re-check fixtures that previously drifted
                                or could not be checked
 
+Checks run a few at a time: --concurrency (or -j) sets how many, and it
+defaults to the number of CPUs. Progress is still printed in fixture order,
+so the report does not depend on which check finished first.
+
 What each run found is cached under .focus, so --drifted-only knows what to
 re-check. The cache is a speed-up, never a source of truth.
 
@@ -169,6 +175,7 @@ status is the same in either format.`,
   focus verify testdata/ --filter 'envelope*'
   focus verify testdata/ --filter network:testnet
   focus verify testdata/ --drifted-only
+  focus verify testdata/ --concurrency 8
   focus verify testdata/ --network mainnet \
     --archive-url https://history.stellar.org/prd/core-live/core_live_001
   focus verify testdata/ --format json`,
@@ -255,36 +262,39 @@ func verifyFixtures(
 
 	cache := loadVerifyCache(cfg.verifyCachePath())
 
-	var checked, matched, drifted, skipped, errored, filtered int
-	for _, path := range paths {
+	// Loading and narrowing happen first, in the order the run was given
+	// the fixtures. That order is the report's order, and it stays the same
+	// however the checks themselves are scheduled.
+	fixtures := make([]*golden.Fixture, len(paths))
+	items := make([]VerifyItemResult, len(paths))
+	// counted says whether a fixture belongs in the "checked" total. A
+	// fixture left out by a filter, or skipped by --drifted-only, does not;
+	// one that was examined and found unverifiable does.
+	counted := make([]bool, len(paths))
+	pending := make([]int, 0, len(paths))
+
+	for i, path := range paths {
 		f, loadErr := golden.Load(path)
 		if loadErr != nil {
-			if !asJSON {
-				fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, loadErr)
-			}
-			errored++
-			checked++
-			report.Results = append(report.Results, VerifyItemResult{
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusErrored,
 				Error:  loadErr.Error(),
-			})
+			}
+			counted[i] = true
 			continue
 		}
+		fixtures[i] = f
 
 		// A fixture the filters exclude is not checked at all, and is
 		// reported as filtered rather than quietly passing.
 		if reason, excluded := excludedBy(filter, since, path, f); excluded {
-			if !asJSON {
-				fmt.Fprintf(stdout, "%-40s FILTERED %s\n", path, reason)
-			}
-			filtered++
-			report.Results = append(report.Results, VerifyItemResult{
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusFiltered,
 				Type:   f.Type,
 				Error:  reason,
-			})
+			}
 			continue
 		}
 
@@ -293,87 +303,66 @@ func verifyFixtures(
 		if cfg.driftedOnly() {
 			entry, known := cache.lookup(path, f)
 			if known && entry.Outcome == outcomeOK {
-				if !asJSON {
-					fmt.Fprintf(stdout, "%-40s SKIP    last check on %s matched the chain\n",
-						path, entry.CheckedAt)
-				}
-				skipped++
-				report.Results = append(report.Results, VerifyItemResult{
+				items[i] = VerifyItemResult{
 					Path:   path,
 					Status: statusSkipped,
 					Type:   f.Type,
 					Error:  fmt.Sprintf("last check on %s matched the chain", entry.CheckedAt),
-				})
+				}
 				continue
 			}
 		}
 
-		res := capture.Verify(cmd.Context(), src, path, f)
+		pending = append(pending, i)
+		counted[i] = true
+	}
+
+	// The network checks are what --concurrency parallelises. Each worker
+	// writes only its own index, so no lock is needed and the outcomes
+	// cannot arrive out of order.
+	results := make([]capture.VerifyResult, len(paths))
+	verifyFixturesConcurrently(cmd.Context(), src, paths, fixtures, pending, results, cfg.verifyConcurrency())
+
+	// Turn each fresh result into its report entry, then print the whole
+	// run in path order: a progress line must not interleave with another
+	// worker's, and the same fixtures must produce the same output every
+	// time, however many workers ran.
+	for _, i := range pending {
+		path, f, res := paths[i], fixtures[i], results[i]
 		switch {
 		case res.Err != nil && errors.Is(res.Err, capture.ErrNotFound):
 			// The transaction is gone from the network, so the fixture can
 			// no longer be checked against it. It counts as drift.
-			if !asJSON {
-				fmt.Fprintf(stderr, "%-40s GONE    %v\n", path, res.Err)
-			}
-			drifted++
-			cache.record(path, f, outcomeDrifted)
-			report.Results = append(report.Results, VerifyItemResult{
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusDrifted,
 				Type:   f.Type,
 				Error:  res.Err.Error(),
-			})
-		case res.Err != nil && (f.Captured == nil || f.Captured.TxHash == "" || f.Captured.Sanitized):
-			if !asJSON {
-				fmt.Fprintf(stdout, "%-40s SKIP    %v\n", path, res.Err)
 			}
-			skipped++
-			report.Results = append(report.Results, VerifyItemResult{
+		case res.Err != nil && (f.Captured == nil || f.Captured.TxHash == "" || f.Captured.Sanitized):
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusSkipped,
 				Type:   f.Type,
 				Error:  res.Err.Error(),
-			})
+			}
 		case res.Err != nil:
 			// The endpoint or the file failed, so this fixture was
 			// not checked. That is not drift and must not be counted
 			// as a pass.
-			if !asJSON {
-				fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, res.Err)
-			}
-			errored++
-			cache.record(path, f, outcomeErrored)
-			report.Results = append(report.Results, VerifyItemResult{
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusErrored,
 				Type:   f.Type,
 				Error:  res.Err.Error(),
-			})
-		case res.Match:
-			if !asJSON {
-				fmt.Fprintf(stdout, "%-40s ok\n", path)
 			}
-			matched++
-			cache.record(path, f, outcomeOK)
-			report.Results = append(report.Results, VerifyItemResult{
+		case res.Match:
+			items[i] = VerifyItemResult{
 				Path:   path,
 				Status: statusMatched,
 				Type:   f.Type,
-			})
+			}
 		default:
-			if !asJSON {
-				fmt.Fprintf(stderr, "%-40s DRIFTED\n", path)
-			}
-			if res.Diff != nil && !asJSON {
-				f := lensformat.NewDiffFormatter(
-					lensformat.WithDiffPalette(lensformat.PaletteFor(stderr, cfg.colorMode())))
-				if fErr := f.Format(stderr, res.Diff); fErr != nil {
-					fmt.Fprintf(stderr, "  (could not render the diff: %v)\n", fErr)
-				}
-			}
-			drifted++
-			cache.record(path, f, outcomeDrifted)
 			item := VerifyItemResult{
 				Path:   path,
 				Status: statusDrifted,
@@ -383,9 +372,62 @@ func verifyFixtures(
 				item.DiffCount = len(res.Diff.Changes)
 				item.DiffPaths, item.Diffs = diffDetails(res.Diff)
 			}
-			report.Results = append(report.Results, item)
+			items[i] = item
 		}
-		checked++
+	}
+
+	var checked, matched, drifted, skipped, errored, filtered int
+	for i, path := range paths {
+		item := items[i]
+		if counted[i] {
+			checked++
+		}
+		switch item.Status {
+		case statusMatched:
+			if !asJSON {
+				fmt.Fprintf(stdout, "%-40s ok\n", path)
+			}
+			matched++
+			cache.record(path, fixtures[i], outcomeOK)
+		case statusDrifted:
+			if results[i].Err != nil {
+				if !asJSON {
+					fmt.Fprintf(stderr, "%-40s GONE    %v\n", path, results[i].Err)
+				}
+			} else {
+				if !asJSON {
+					fmt.Fprintf(stderr, "%-40s DRIFTED\n", path)
+				}
+				if results[i].Diff != nil && !asJSON {
+					f := lensformat.NewDiffFormatter(
+						lensformat.WithDiffPalette(lensformat.PaletteFor(stderr, cfg.colorMode())))
+					if fErr := f.Format(stderr, results[i].Diff); fErr != nil {
+						fmt.Fprintf(stderr, "  (could not render the diff: %v)\n", fErr)
+					}
+				}
+			}
+			drifted++
+			cache.record(path, fixtures[i], outcomeDrifted)
+		case statusSkipped:
+			if !asJSON {
+				fmt.Fprintf(stdout, "%-40s SKIP    %s\n", path, item.Error)
+			}
+			skipped++
+		case statusErrored:
+			if !asJSON {
+				fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, item.Error)
+			}
+			errored++
+			if results[i].Err != nil {
+				cache.record(path, fixtures[i], outcomeErrored)
+			}
+		case statusFiltered:
+			if !asJSON {
+				fmt.Fprintf(stdout, "%-40s FILTERED %s\n", path, item.Error)
+			}
+			filtered++
+		}
+		report.Results = append(report.Results, item)
 	}
 
 	if err := cache.save(cfg.verifyCachePath()); err != nil && !asJSON {
@@ -422,6 +464,55 @@ func verifyFixtures(
 		return report, driftErrorf("%d fixture(s) no longer match the chain", drifted)
 	}
 	return report, nil
+}
+
+// verifyFixturesConcurrently checks the pending fixtures a few at a time.
+//
+// A large repository does not need its fixtures re-fetched one after another:
+// the checks are independent, and the endpoint is the slow part. Workers are
+// capped at the number of pending fixtures so a handful of fixtures does not
+// start a thread for each core.
+//
+// results is indexed by the fixture's position in paths, so each worker
+// writes only its own index and the caller can rely on the order it gave the
+// fixtures in, not the order the network answered in.
+func verifyFixturesConcurrently(
+	ctx context.Context,
+	src capture.Source,
+	paths []string,
+	fixtures []*golden.Fixture,
+	pending []int,
+	results []capture.VerifyResult,
+	workers int,
+) {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(pending) {
+		workers = len(pending)
+	}
+	if workers == 0 {
+		return
+	}
+
+	queue := make(chan int)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range queue {
+				results[i] = capture.Verify(ctx, src, paths[i], fixtures[i])
+			}
+		}()
+	}
+
+	for _, i := range pending {
+		queue <- i
+	}
+	close(queue)
+	wg.Wait()
 }
 
 // diffDetails names the fields a diff reports as changed, and describes each
