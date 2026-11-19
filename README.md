@@ -667,7 +667,7 @@ A run checks fixtures a few at a time, so a large suite is not fetched one
 fixture after another:
 
 ```sh
-focus verify testdata/ --concurrency 8   # or -j 8; defaults to the CPU count
+focus verify testdata/ --concurrency 8   # or -j 8; defaults to 4
 ```
 
 The report is still printed in fixture order, so the worker count changes how

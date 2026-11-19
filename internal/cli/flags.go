@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"runtime"
 	"strings"
 	"time"
 
@@ -58,26 +57,6 @@ const (
 	keyMask        = "mask-addresses"
 	keyBatch       = "batch"
 	keyConcurrency = "concurrency"
-	// keyVerifyConcurrency is verify's own key. It shares the --concurrency
-	// flag name with capture, but not the setting: capture's concurrency is
-	// stored under "concurrency", and a command's flag must not read the
-	// other's binding through Viper.
-	keyVerifyConcurrency = "verify-concurrency"
-	keyRate              = "rate"
-	keyOutFile           = "out-file"
-	keyType              = "type"
-	keyDescription       = "description"
-	keyPass              = "passphrase"
-	keyFileSrc           = "file-source"
-	keySanit             = "sanitize"
-	keyMemo              = "mask-memo"
-	keyData              = "scrub-data"
-	keyKeys              = "scrub-keys"
-	keyArchive           = "archive-url"
-	keySince             = "since"
-	keyFilter            = "filter"
-	keyDriftedOnly       = "drifted-only"
-	keyVerifyCache       = "verify-cache"
 	keyRate        = "rate"
 	keyOutFile     = "out-file"
 	keyType        = "type"
@@ -129,10 +108,6 @@ const (
 	defaultDescription = ""
 )
 
-// defaultVerifyConcurrency is the number of fixtures verify checks at once
-// when told nothing else: every core the machine has.
-var defaultVerifyConcurrency = runtime.NumCPU()
-
 // discoveredConfigFiles are checked, in order, when --config is not given.
 // An absent file is not an error: most projects have no focus config at all.
 var discoveredConfigFiles = []string{
@@ -167,7 +142,6 @@ func newConfig() *config {
 	v.SetDefault(keyPrefix, defaultPrefix)
 	v.SetDefault(keyForce, defaultForce)
 	v.SetDefault(keyConcurrency, defaultConcurrency)
-	v.SetDefault(keyVerifyConcurrency, defaultVerifyConcurrency)
 	v.SetDefault(keyRate, defaultRate)
 	v.SetDefault(keyPass, defaultPass)
 	v.SetDefault(keyFileSrc, defaultFileSrc)
@@ -264,13 +238,10 @@ func (c *config) bindVerifyFlags(cmd *cobra.Command) {
 		"only check fixtures whose filename matches this glob, or whose metadata matches key:value")
 	flags.Bool(keyDriftedOnly, false,
 		"only re-check fixtures that previously drifted or could not be checked")
-	flags.IntP(keyConcurrency, "j", defaultVerifyConcurrency,
-		"how many fixtures may be checked at once")
 
 	c.bind(flags, keySince)
 	c.bind(flags, keyFilter)
 	c.bind(flags, keyDriftedOnly)
-	c.bindAs(flags, keyVerifyConcurrency, keyConcurrency)
 }
 
 // bindBatchFlags declares the flags a batch capture accepts.
@@ -417,9 +388,6 @@ func (c *config) validate() error {
 	if c.concurrency() < 1 {
 		return usageErrorf("concurrency must be at least 1, got %d", c.concurrency())
 	}
-	if c.verifyConcurrency() < 1 {
-		return usageErrorf("concurrency must be at least 1, got %d", c.verifyConcurrency())
-	}
 	if c.rate() < 0 {
 		return usageErrorf("rate must not be negative, got %s", c.rate())
 	}
@@ -556,11 +524,6 @@ func (c *config) batch() string {
 // concurrency is how many captures may be in flight at once.
 func (c *config) concurrency() int {
 	return c.v.GetInt(keyConcurrency)
-}
-
-// verifyConcurrency is how many fixtures a verify run checks at once.
-func (c *config) verifyConcurrency() int {
-	return c.v.GetInt(keyVerifyConcurrency)
 }
 
 // rate is the minimum time between two captures.

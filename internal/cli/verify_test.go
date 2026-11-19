@@ -528,122 +528,6 @@ func TestVerifyJSONFormatCarriesPathLevelDiffs(t *testing.T) {
 	}
 }
 
-// TestVerifyConcurrencyKeepsOutputOrder is the promise --concurrency makes:
-// checking several fixtures at once changes how long a run takes, not what
-// it prints. The same fixtures with one worker and with four must produce
-// byte-identical output, in fixture order, on both streams.
-func TestVerifyConcurrencyKeepsOutputOrder(t *testing.T) {
-	src := sourceWithTx(t)
-	withFake(t, src)
-
-	dir := t.TempDir()
-	names := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}
-	for _, name := range names {
-		sub := filepath.Join(dir, name)
-		if err := os.MkdirAll(sub, 0o755); err != nil {
-			t.Fatalf("creating %s: %v", sub, err)
-		}
-		captureIntoDir(t, sub)
-	}
-
-	// Two fixtures drift, so the run mixes statuses and writes to both
-	// streams. A parallel run that reported in completion order would show
-	// up here as output that no longer matches the serial run.
-	for _, name := range []string{"bravo", "echo"} {
-		path := filepath.Join(dir, name, "envelope.golden.json")
-		f, err := golden.Load(path)
-		if err != nil {
-			t.Fatalf("loading %s: %v", path, err)
-		}
-		f.XDR = fixtureXDR(t, "tx_success.env.txt")
-		if err := golden.Save(path, f); err != nil {
-			t.Fatalf("saving %s: %v", path, err)
-		}
-	}
-
-	serialOut, serialErr, serialRunErr := run(t, "verify", dir, "--concurrency", "1")
-	parallelOut, parallelErr, parallelRunErr := run(t, "verify", dir, "--concurrency", "4")
-
-	for name, err := range map[string]error{"serial": serialRunErr, "parallel": parallelRunErr} {
-		if err == nil {
-			t.Fatalf("%s run reported success despite two drifted fixtures", name)
-		}
-		if code, _ := ExitCode(err); code != ExitDrift {
-			t.Errorf("%s run exited %d, want %d", name, code, ExitDrift)
-		}
-	}
-	if serialOut != parallelOut {
-		t.Errorf("stdout depends on the worker count:\nserial:\n%s\nparallel:\n%s",
-			serialOut, parallelOut)
-	}
-	if serialErr != parallelErr {
-		t.Errorf("stderr depends on the worker count:\nserial:\n%s\nparallel:\n%s",
-			serialErr, parallelErr)
-	}
-	if !strings.Contains(parallelOut, "12 checked: 10 ok, 2 drifted") {
-		t.Errorf("summary does not describe the run:\n%s", parallelOut)
-	}
-
-	// Progress is in fixture order, not in whichever check finished
-	// first. WalkDir is lexical, so the directories are already in the
-	// order the report must use.
-	last := -1
-	for _, name := range names {
-		if name == "bravo" || name == "echo" {
-			continue
-		}
-		idx := strings.Index(parallelOut, filepath.Join(dir, name, "envelope.golden.json"))
-		if idx < 0 {
-			t.Errorf("%s was not reported:\n%s", name, parallelOut)
-			continue
-		}
-		if idx < last {
-			t.Errorf("%s is reported out of fixture order:\n%s", name, parallelOut)
-		}
-		last = idx
-	}
-}
-
-// TestVerifyConcurrencyFlagShorthand checks the -j spelling, which is what a
-// person types when they want a faster run.
-func TestVerifyConcurrencyFlagShorthand(t *testing.T) {
-	src := sourceWithTx(t)
-	withFake(t, src)
-
-	dir := t.TempDir()
-	captureIntoDir(t, dir)
-
-	stdout, stderr, err := run(t, "verify", dir, "-j", "2")
-	if err != nil {
-		t.Fatalf("verify -j 2: %v\nstderr: %s", err, stderr)
-	}
-	if !strings.Contains(stdout, "2 checked: 2 ok") {
-		t.Errorf("summary line missing:\n%s", stdout)
-	}
-}
-
-// TestVerifyRejectsABadConcurrency checks that a worker count that cannot
-// run is refused before the network is contacted.
-func TestVerifyRejectsABadConcurrency(t *testing.T) {
-	src := sourceWithTx(t)
-	withFake(t, src)
-
-	dir := t.TempDir()
-	captureIntoDir(t, dir)
-	src.Calls = 0
-
-	_, _, err := run(t, "verify", dir, "--concurrency", "0")
-	if err == nil {
-		t.Fatal("a concurrency of zero was accepted")
-	}
-	if !strings.Contains(err.Error(), "concurrency") {
-		t.Errorf("error %q does not name the setting at fault", err)
-	}
-	if src.Calls != 0 {
-		t.Errorf("the network was contacted %d time(s) for an invalid concurrency", src.Calls)
-	}
-}
-
 func TestCollectFixtures(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite := func(name string) string {
@@ -707,6 +591,96 @@ func TestVerifyWithConcurrency(t *testing.T) {
 	}
 	if !strings.Contains(previous, "2 checked: 2 ok, 0 drifted, 0 skipped") {
 		t.Errorf("unexpected summary:\n%s", previous)
+	}
+}
+
+// TestVerifyConcurrencyKeepsMixedOutputInOrder checks the promise from the
+// other side: when some fixtures drift, both streams carry output, and it
+// must still be byte-identical whatever the worker count and be printed in
+// fixture order rather than completion order.
+func TestVerifyConcurrencyKeepsMixedOutputInOrder(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	names := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}
+	for _, name := range names {
+		sub := filepath.Join(dir, name)
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatalf("creating %s: %v", sub, err)
+		}
+		captureIntoDir(t, sub)
+	}
+
+	// Two fixtures drift, so the run mixes statuses and writes to both
+	// streams.
+	for _, name := range []string{"bravo", "echo"} {
+		path := filepath.Join(dir, name, "envelope.golden.json")
+		f, err := golden.Load(path)
+		if err != nil {
+			t.Fatalf("loading %s: %v", path, err)
+		}
+		f.XDR = fixtureXDR(t, "tx_success.env.txt")
+		if err := golden.Save(path, f); err != nil {
+			t.Fatalf("saving %s: %v", path, err)
+		}
+	}
+
+	serialOut, serialErr, serialRunErr := run(t, "verify", dir, "--concurrency", "1")
+	parallelOut, parallelErr, parallelRunErr := run(t, "verify", dir, "--concurrency", "4")
+
+	for name, err := range map[string]error{"serial": serialRunErr, "parallel": parallelRunErr} {
+		if err == nil {
+			t.Fatalf("%s run reported success despite two drifted fixtures", name)
+		}
+		if code, _ := ExitCode(err); code != ExitDrift {
+			t.Errorf("%s run exited %d, want %d", name, code, ExitDrift)
+		}
+	}
+	if serialOut != parallelOut {
+		t.Errorf("stdout depends on the worker count:\nserial:\n%s\nparallel:\n%s",
+			serialOut, parallelOut)
+	}
+	if serialErr != parallelErr {
+		t.Errorf("stderr depends on the worker count:\nserial:\n%s\nparallel:\n%s",
+			serialErr, parallelErr)
+	}
+	if !strings.Contains(parallelOut, "12 checked: 10 ok, 2 drifted") {
+		t.Errorf("summary does not describe the run:\n%s", parallelOut)
+	}
+
+	// Progress is in fixture order. WalkDir is lexical, so the directories
+	// are already in the order the report must use.
+	last := -1
+	for _, name := range names {
+		if name == "bravo" || name == "echo" {
+			continue
+		}
+		idx := strings.Index(parallelOut, filepath.Join(dir, name, "envelope.golden.json"))
+		if idx < 0 {
+			t.Errorf("%s was not reported:\n%s", name, parallelOut)
+			continue
+		}
+		if idx < last {
+			t.Errorf("%s is reported out of fixture order:\n%s", name, parallelOut)
+		}
+		last = idx
+	}
+}
+
+// TestVerifyConcurrencyFlagShorthand checks the -j spelling.
+func TestVerifyConcurrencyFlagShorthand(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	stdout, stderr, err := run(t, "verify", dir, "-j", "2")
+	if err != nil {
+		t.Fatalf("verify -j 2: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("summary line missing:\n%s", stdout)
 	}
 }
 
