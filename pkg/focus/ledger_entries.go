@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/stellar/go-stellar-sdk/amount"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
@@ -102,6 +103,111 @@ func AssertEntryDeleted(t TB, meta Value, key Value) bool {
 	t.Helper()
 	return assertEntryChange(t, "AssertEntryDeleted", meta, key,
 		xdr.LedgerEntryChangeTypeLedgerEntryRemoved)
+}
+
+// EntryStateTransition names the lifecycle transition an assertion looks for.
+type EntryStateTransition int
+
+const (
+	// StateCreated asserts the entry was created by the transaction. An entry
+	// restored from the Soroban archival state counts as created, since it is
+	// new to the live ledger.
+	StateCreated EntryStateTransition = iota
+	// StateUpdated asserts the entry was modified.
+	StateUpdated
+	// StateDeleted asserts the entry was removed.
+	StateDeleted
+)
+
+// String names the transition for a failure headline.
+func (s EntryStateTransition) String() string {
+	switch s {
+	case StateCreated:
+		return "created"
+	case StateUpdated:
+		return "modified"
+	case StateDeleted:
+		return "deleted"
+	default:
+		return "changed"
+	}
+}
+
+// changeKindFor reports the protocol change kind a transition looks for.
+func changeKindFor(want EntryStateTransition) xdr.LedgerEntryChangeType {
+	switch want {
+	case StateCreated:
+		return xdr.LedgerEntryChangeTypeLedgerEntryCreated
+	case StateUpdated:
+		return xdr.LedgerEntryChangeTypeLedgerEntryUpdated
+	case StateDeleted:
+		return xdr.LedgerEntryChangeTypeLedgerEntryRemoved
+	default:
+		return xdr.LedgerEntryChangeType(0)
+	}
+}
+
+// AssertLedgerEntryState checks that the ledger entry identified by key went
+// through the given lifecycle transition in the transaction.
+//
+// key accepts an xdr.LedgerKey, an xdr.LedgerEntry, or either as base64 XDR,
+// raw bytes or a decoded *lens.Value. A string that is a G... account address
+// names that account's entry.
+//
+// It reports failure when no change of the wanted kind touched the entry, and
+// lists what the transaction did to the ledger instead.
+func AssertLedgerEntryState(t TB, meta, key Value, want EntryStateTransition) bool {
+	t.Helper()
+	const assertion = "AssertLedgerEntryState"
+
+	changes, ok := ledgerChanges(t, assertion, meta)
+	if !ok {
+		return false
+	}
+	wantKey, ok := resolveLedgerKey(t, assertion, key)
+	if !ok {
+		return false
+	}
+
+	wantKind := changeKindFor(want)
+	for _, c := range changes {
+		if c.keyID == wantKey.keyID && changeKindSatisfies(c.kind, wantKind) {
+			return true
+		}
+	}
+
+	t.Errorf("%s: no ledger entry was %s for %s\n\n%s",
+		assertion, want.String(), wantKey.label, indent(describeChanges(changes)))
+	return false
+}
+
+// accountAddressKey reports whether v names an account entry by its address,
+// and returns that address. A muxed address names its underlying account.
+func accountAddressKey(v Value) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	vb, err := strkey.Version(s)
+	if err != nil {
+		return "", false
+	}
+	if vb != strkey.VersionByteAccountID {
+		return "", false
+	}
+	return s, true
+}
+
+// accountLedgerKey builds the account LedgerKey an address names.
+func accountLedgerKey(addr string) (xdr.LedgerKey, error) {
+	aid, err := xdr.AddressToAccountId(addr)
+	if err != nil {
+		return xdr.LedgerKey{}, fmt.Errorf("%q is not a valid account address: %w", addr, err)
+	}
+	return xdr.LedgerKey{
+		Type:    xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{AccountId: aid},
+	}, nil
 }
 
 // AssertLedgerKeyEqual compares two ledger keys structurally.
@@ -327,9 +433,16 @@ func resolveLedgerKey(t TB, assertion string, v Value) (ledgerKey, bool) {
 	)
 	if !guard(t, assertion, func() {
 		var key xdr.LedgerKey
-		key, err = coerceLedgerKey(v)
-		if err != nil {
-			return
+		if addr, ok := accountAddressKey(v); ok {
+			key, err = accountLedgerKey(addr)
+			if err != nil {
+				return
+			}
+		} else {
+			key, err = coerceLedgerKey(v)
+			if err != nil {
+				return
+			}
 		}
 		out.keyID, err = ledgerKeyID(key)
 		if err != nil {

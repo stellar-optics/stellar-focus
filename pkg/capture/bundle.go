@@ -19,6 +19,10 @@ const BundleFormat = "focus/bundle/v1"
 // BundleSuffix is the manifest filename suffix a bundle directory carries.
 const BundleSuffix = ".bundle.json"
 
+// GitHubActionsWorkflowPath is where GenerateGitHubActionWorkflow's output is
+// meant to be checked in, relative to the repository root.
+const GitHubActionsWorkflowPath = ".github/workflows/focus-verify.yml"
+
 // BundleMember is one captured transaction inside a bundle manifest.
 //
 // The fixture files stay ordinary fixtures — each one is a golden file an
@@ -250,4 +254,23 @@ func BundleGone(results []VerifyResult) int {
 		}
 	}
 	return n
+}
+
+// ExportCIWorkflow writes the GitHub Actions workflow that verifies this
+// bundle's fixtures into dir/.github/workflows/focus-verify.yml and returns
+// the path it was written to. A missing directory is created; an existing
+// workflow file is overwritten, since the manifest is the source of truth
+// for what the workflow checks.
+func ExportCIWorkflow(dir string, bundle *Bundle) (string, error) {
+	if dir == "" {
+		dir = "."
+	}
+	path := filepath.Join(dir, GitHubActionsWorkflowPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("creating workflow directory %s: %w", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(GenerateGitHubActionWorkflow(bundle)), 0o644); err != nil {
+		return "", fmt.Errorf("writing GitHub Actions workflow %s: %w", path, err)
+	}
+	return path, nil
 }
