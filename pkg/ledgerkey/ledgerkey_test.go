@@ -182,6 +182,109 @@ func TestContractCode(t *testing.T) {
 	}
 }
 
+// configSettingIDs returns every id the ConfigSettingID enum defines. The
+// enum is contiguous from zero, so it is walked until an id is no longer valid
+// rather than listed by hand — a setting added by a protocol upgrade is then
+// covered by the test that follows without being added to a table here.
+func configSettingIDs() []xdr.ConfigSettingId {
+	var ids []xdr.ConfigSettingId
+	for i := int32(0); ; i++ {
+		id := xdr.ConfigSettingId(i)
+		if !id.ValidEnum(i) {
+			return ids
+		}
+		ids = append(ids, id)
+	}
+}
+
+func TestConfigSetting(t *testing.T) {
+	t.Parallel()
+
+	ids := configSettingIDs()
+	if len(ids) == 0 {
+		t.Fatal("the ConfigSettingID enum defines no ids")
+	}
+
+	for _, id := range ids {
+		t.Run(id.String(), func(t *testing.T) {
+			t.Parallel()
+
+			encoded := ledgerkey.ConfigSetting(id)
+			if encoded == "" {
+				t.Fatalf("ConfigSetting(%d) returned an empty key", id)
+			}
+
+			// Byte accuracy: the string has to be the canonical encoding of the
+			// key the SDK itself builds, not merely something that decodes.
+			want := xdr.LedgerKey{
+				Type:          xdr.LedgerEntryTypeConfigSetting,
+				ConfigSetting: &xdr.LedgerKeyConfigSetting{ConfigSettingId: id},
+			}
+			wantEncoded, err := want.MarshalBinaryBase64()
+			if err != nil {
+				t.Fatalf("encoding the expected key: %v", err)
+			}
+			if encoded != wantEncoded {
+				t.Errorf("key = %q, want %q", encoded, wantEncoded)
+			}
+
+			key := decodeKey(t, encoded)
+			if key.Type != xdr.LedgerEntryTypeConfigSetting {
+				t.Fatalf("key type = %s, want ConfigSetting", key.Type)
+			}
+			setting, ok := key.GetConfigSetting()
+			if !ok {
+				t.Fatal("config setting key carries no config setting arm")
+			}
+			if setting.ConfigSettingId != id {
+				t.Errorf("setting id = %s, want %s", setting.ConfigSettingId, id)
+			}
+		})
+	}
+}
+
+func TestEvictionIterator(t *testing.T) {
+	t.Parallel()
+
+	encoded := ledgerkey.EvictionIterator()
+	if encoded == "" {
+		t.Fatal("EvictionIterator returned an empty key")
+	}
+
+	key := decodeKey(t, encoded)
+	if key.Type != xdr.LedgerEntryTypeConfigSetting {
+		t.Fatalf("key type = %s, want ConfigSetting", key.Type)
+	}
+	setting, ok := key.GetConfigSetting()
+	if !ok {
+		t.Fatal("eviction iterator key carries no config setting arm")
+	}
+	if setting.ConfigSettingId != xdr.ConfigSettingIdConfigSettingEvictionIterator {
+		t.Errorf("setting id = %s, want %s",
+			setting.ConfigSettingId, xdr.ConfigSettingIdConfigSettingEvictionIterator)
+	}
+
+	// The cursor lives in the eviction-iterator setting, so the shortcut and
+	// the general builder must agree byte for byte.
+	if want := ledgerkey.ConfigSetting(xdr.ConfigSettingIdConfigSettingEvictionIterator); encoded != want {
+		t.Errorf("key = %q, want %q (ConfigSetting for the eviction iterator)", encoded, want)
+	}
+}
+
+func TestConfigSettingRejectsUnknownID(t *testing.T) {
+	t.Parallel()
+
+	// One past the last defined id: no such setting exists on chain, so the
+	// builder has no key to return.
+	unknown := xdr.ConfigSettingId(len(configSettingIDs()))
+	if unknown.ValidEnum(int32(unknown)) {
+		t.Fatalf("id %d is a defined setting, so it is not an unknown id", unknown)
+	}
+	if got := ledgerkey.ConfigSetting(unknown); got != "" {
+		t.Errorf("ConfigSetting(%d) = %q, want the empty string", unknown, got)
+	}
+}
+
 func TestConstructorsProduceComparableCanonicalXDR(t *testing.T) {
 	t.Parallel()
 
