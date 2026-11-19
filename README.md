@@ -663,6 +663,16 @@ focus verify testdata/ --drifted-only           # only what drifted last time
 A fixture left out is reported as `FILTERED`, with the reason, so a narrowed
 run never looks like a run that found nothing wrong.
 
+A run checks fixtures a few at a time, so a large suite is not fetched one
+fixture after another:
+
+```sh
+focus verify testdata/ --concurrency 8   # or -j 8; defaults to 4
+```
+
+The report is still printed in fixture order, so the worker count changes how
+long a run takes and nothing about what it prints.
+
 `--drifted-only` remembers what each run found, in `.focus/verify-cache.json`.
 Only the fixtures that drifted or could not be checked are looked at again —
 and a fixture whose contents have changed since the last check is checked too,

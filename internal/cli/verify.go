@@ -274,21 +274,8 @@ func verifyFixtures(
 
 	cache := loadVerifyCache(cfg.verifyCachePath())
 
-	concurrency := cfg.concurrency()
 	checks := make([]fixtureCheck, len(paths))
-
-	var wg sync.WaitGroup
-	slot := make(chan struct{}, concurrency)
-	for i, path := range paths {
-		wg.Add(1)
-		go func(i int, path string) {
-			defer wg.Done()
-			slot <- struct{}{}
-			defer func() { <-slot }()
-			checks[i] = checkFixture(cmd, cfg, src, cache, filter, since, stdout, stderr, path)
-		}(i, path)
-	}
-	wg.Wait()
+	verifyFixtureSet(cmd, cfg, src, cache, filter, since, stdout, stderr, paths, checks, cfg.concurrency())
 
 	var checked, matched, drifted, skipped, errored, filtered int
 	for _, ch := range checks {
@@ -458,6 +445,59 @@ func checkFixture(
 		}
 	}
 	return ch
+}
+
+// verifyFixtureSet checks every fixture with a bounded pool of workers.
+//
+// Fixtures are independent, and the endpoint is the slow part, so several are
+// checked at once. The pool is sized by --concurrency and capped at the
+// number of fixtures, so a small suite does not start a goroutine per core
+// and a large one does not start a goroutine per fixture: a fixed set of
+// workers pulls indexes from a queue instead.
+//
+// Each worker writes only its own index in checks, so no lock is needed and
+// the caller can print the results in path order however the checks were
+// scheduled.
+func verifyFixtureSet(
+	cmd *cobra.Command,
+	cfg *config,
+	src capture.Source,
+	cache *verifyCache,
+	filter *fixtureFilter,
+	since time.Time,
+	stdout, stderr io.Writer,
+	paths []string,
+	checks []fixtureCheck,
+	workers int,
+) {
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(paths) {
+		workers = len(paths)
+	}
+	if workers == 0 {
+		return
+	}
+
+	queue := make(chan int)
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range queue {
+				checks[i] = checkFixture(cmd, cfg, src, cache, filter, since, stdout, stderr, paths[i])
+			}
+		}()
+	}
+
+	for i := range paths {
+		queue <- i
+	}
+	close(queue)
+	wg.Wait()
 }
 
 // diffDetails names the fields a diff reports as changed, and describes each
