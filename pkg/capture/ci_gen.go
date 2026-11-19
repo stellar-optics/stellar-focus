@@ -52,3 +52,86 @@ jobs:
         run: "$RUNNER_TEMP/focus" verify --network testnet %s
 `, strconv.Quote(schedule), strconv.Quote(fixturePath))), nil
 }
+
+// defaultGoVersions are the Go versions a generated workflow matrices over.
+// The matrix catches regressions introduced by a new Go release as well as
+// by a new protocol release.
+var defaultGoVersions = []string{"1.25", "1.26"}
+
+// defaultNetworks are the networks a generated workflow verifies against.
+var defaultNetworks = []string{NetworkTestnet, NetworkMainnet}
+
+// quotedStrings renders a string list as a YAML flow sequence of quoted
+// strings, safe for the workflow's matrix.
+func quotedStrings(values []string) string {
+	quoted := make([]string, len(values))
+	for i, v := range values {
+		quoted[i] = strconv.Quote(v)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+// hasString reports whether values contains v.
+func hasString(values []string, v string) bool {
+	for _, value := range values {
+		if value == v {
+			return true
+		}
+	}
+	return false
+}
+
+// GenerateGitHubActionWorkflow returns a complete GitHub Actions workflow
+// that verifies a captured bundle's fixtures on every push and on a
+// schedule, across a matrix of Go versions and networks.
+//
+// The workflow checks the repository out, builds focus from it, caches the
+// Go module cache between runs, and runs `focus verify --drifted-only`, so
+// a regression in a new release fails the run instead of silently drifting
+// fixtures. A non-zero --rate or an explicit --rpc-url can be added through
+// the FOCUS_* environment variables the command reads.
+func GenerateGitHubActionWorkflow(bundle *Bundle) string {
+	networks := append([]string{}, defaultNetworks...)
+	if bundle != nil && bundle.Network != "" && !hasString(networks, bundle.Network) {
+		networks = append(networks, bundle.Network)
+	}
+
+	return fmt.Sprintf(`name: Verify Stellar fixtures
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focus-verify:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: %s
+        network: %s
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+
+      - name: Install focus
+        run: go install ./cmd/focus
+
+      - name: Verify bundle fixtures against ${{ matrix.network }}
+        run: focus verify --network ${{ matrix.network }} --drifted-only testdata/
+        env:
+          FOCUS_NETWORK: ${{ matrix.network }}
+`, quotedStrings(defaultGoVersions), quotedStrings(networks))
+}

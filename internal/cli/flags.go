@@ -173,6 +173,8 @@ func (c *config) bindRootFlags(root *cobra.Command) {
 		`when to colourise output: "auto", "always" or "never"`)
 	flags.String(keyPass, defaultPass,
 		"network passphrase, for a network focus cannot name or a source that does not report one")
+	flags.IntP(keyConcurrency, "j", defaultConcurrency,
+		"how many captures or checks may run at once")
 
 	c.bind(flags, configFlag)
 	c.bind(flags, keyNetwork)
@@ -183,6 +185,7 @@ func (c *config) bindRootFlags(root *cobra.Command) {
 	c.bind(flags, keyTimeout)
 	c.bind(flags, keyColor)
 	c.bind(flags, keyPass)
+	c.bind(flags, keyConcurrency)
 }
 
 // bindCaptureFlags declares the flags shared by both capture subcommands.
@@ -250,13 +253,10 @@ func (c *config) bindBatchFlags(cmd *cobra.Command) {
 
 	flags.String(keyBatch, defaultBatch,
 		"capture every transaction hash listed in this file instead of one hash")
-	flags.Int(keyConcurrency, defaultConcurrency,
-		"how many captures may be in flight at once")
 	flags.Duration(keyRate, defaultRate,
 		"minimum time between two captures, for endpoints that rate-limit")
 
 	c.bind(flags, keyBatch)
-	c.bind(flags, keyConcurrency)
 	c.bind(flags, keyRate)
 }
 

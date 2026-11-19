@@ -349,3 +349,211 @@ func mustCreditAsset(t *testing.T, code string) xdr.Asset {
 	}
 	return asset
 }
+
+func TestAssertBalanceChangeRange(t *testing.T) {
+	t.Parallel()
+
+	thresholds := xdr.NewThreshold(1, 0, 0, 0)
+	before := accountEntryValue(t, testSource, 100_0000000, thresholds)
+	after := accountEntryValue(t, testSource, 99_9999900, thresholds)
+	afterPayment := accountEntryValue(t, testSource, 94_9999900, thresholds)
+
+	// A 100 XLM payment plus a fee: between one and two hundred stroops of
+	// fee makes the delta land anywhere in [-50000200, -49999800].
+	meta := metaV2WithTx(t,
+		[]xdr.LedgerEntryChange{stateChange(before), updatedChange(after)},
+		nil,
+		[]xdr.LedgerEntryChange{stateChange(after), updatedChange(afterPayment)},
+	)
+
+	tests := []struct {
+		name     string
+		meta     focus.Value
+		account  focus.Value
+		asset    focus.Value
+		minDelta int64
+		maxDelta int64
+	}{
+		{
+			name:     "fee at the low end of the range",
+			meta:     meta,
+			account:  testSource,
+			asset:    "native",
+			minDelta: -50_000200,
+			maxDelta: -49_999800,
+		},
+		{
+			name:     "delta exactly on a bound passes",
+			meta:     meta,
+			account:  testSource,
+			asset:    "native",
+			minDelta: -50_000100,
+			maxDelta: -50_000100,
+		},
+		{
+			name:     "unpaid fee inside a wide range",
+			meta:     meta,
+			account:  testSource,
+			asset:    "native",
+			minDelta: -100_000000,
+			maxDelta: 0,
+		},
+		{
+			name:     "credit asset within tolerance",
+			meta:     meta,
+			account:  testDest,
+			asset:    eurAsset,
+			minDelta: -1000,
+			maxDelta: 1000,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if !focus.AssertBalanceChangeRange(tb, tc.meta, tc.account, tc.asset, tc.minDelta, tc.maxDelta) {
+				t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+			}
+		})
+	}
+
+	t.Run("no change is a delta of zero", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		untouched := metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(before)})
+		if !focus.AssertBalanceChangeRange(tb, untouched, testDest, "native", -100, 100) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+}
+
+func TestAssertBalanceChangeRangeRejectsOutOfBoundsDelta(t *testing.T) {
+	t.Parallel()
+
+	thresholds := xdr.NewThreshold(1, 0, 0, 0)
+	before := accountEntryValue(t, testSource, 100_0000000, thresholds)
+	after := accountEntryValue(t, testSource, 95_0000000, thresholds)
+	meta := metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(after)})
+
+	tests := []struct {
+		name     string
+		minDelta int64
+		maxDelta int64
+		contains []string
+	}{
+		{
+			name:     "delta below the minimum",
+			minDelta: -40_000000,
+			maxDelta: -30_000000,
+			contains: []string{
+				"AssertBalanceChangeRange: account GCJNH…ZST6 native balance changed by",
+				"-50000000 (-5.0000000 XLM), outside [-40000000 (-4.0000000 XLM), -30000000 (-3.0000000 XLM)]",
+				"ledger changes present (2)",
+			},
+		},
+		{
+			name:     "delta above the maximum",
+			minDelta: -60_000000,
+			maxDelta: -55_000000,
+			contains: []string{
+				"-50000000 (-5.0000000 XLM), outside [-60000000 (-6.0000000 XLM), -55000000 (-5.5000000 XLM)]",
+			},
+		},
+		{
+			name:     "empty range passes nothing",
+			minDelta: -50_000000,
+			maxDelta: -50_000001,
+			contains: []string{"outside [-50000000 (-5.0000000 XLM), -50000001 (-5.0000001 XLM)]"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if focus.AssertBalanceChangeRange(tb, meta, testSource, "native", tc.minDelta, tc.maxDelta) {
+				t.Fatal("assertion passed with a delta outside the range")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
+
+func TestAssertBalanceChangeRangeInputErrors(t *testing.T) {
+	t.Parallel()
+
+	meta := func() string {
+		thresholds := xdr.NewThreshold(1, 0, 0, 0)
+		entry := accountEntryValue(t, testSource, 100, thresholds)
+		return metaV2(t, []xdr.LedgerEntryChange{updatedChange(entry)})
+	}()
+
+	tests := []struct {
+		name     string
+		account  focus.Value
+		asset    focus.Value
+		contains []string
+	}{
+		{
+			name:     "account is not an address",
+			account:  "not-an-account",
+			asset:    "native",
+			contains: []string{"account could not be read as an account", "not a strkey"},
+		},
+		{
+			name:     "account is a contract address",
+			account:  "C" + strings.Repeat("A", 55),
+			asset:    "native",
+			contains: []string{"not an account address"},
+		},
+		{
+			name:     "asset has no issuer",
+			account:  testSource,
+			asset:    "USDC",
+			contains: []string{`asset could not be read as an asset`, `use "native" or "CODE:ISSUER"`},
+		},
+		{
+			name:     "meta is an envelope",
+			account:  testSource,
+			asset:    "native",
+			contains: []string{"is not a valid TransactionMeta"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			metaValue := focus.Value(meta)
+			if tc.name == "meta is an envelope" {
+				metaValue = buildEnvelope(t, paymentOp(t, 100))
+			}
+
+			tb := faketb.New()
+			if focus.AssertBalanceChangeRange(tb, metaValue, tc.account, tc.asset, 0, 0) {
+				t.Fatal("assertion passed with invalid input")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
