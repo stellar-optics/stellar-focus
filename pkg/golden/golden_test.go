@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/fuzz"
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
@@ -695,6 +696,43 @@ func TestNewProvenanceFillsTheKnownPassphrase(t *testing.T) {
 		}
 		if got := golden.PassphraseFor(tc.network); got != tc.want {
 			t.Errorf("PassphraseFor(%q) = %q, want %q", tc.network, got, tc.want)
+		}
+	}
+}
+
+// TestFuzzSeedsAreBuiltFromARealGoldenFixture checks that the deserializer
+// fuzz corpus starts from a fixture this package actually writes: the valid
+// seeds must carry the captured envelope, not a hand-written stub. A fuzz
+// target seeded with bytes its own encoder cannot produce would teach the
+// parser nothing.
+func TestFuzzSeedsAreBuiltFromARealGoldenFixture(t *testing.T) {
+	t.Parallel()
+
+	env := envelope(t)
+	seeded := map[golden.Format]bool{}
+
+	for _, seed := range fuzz.GoldenSeeds() {
+		if !strings.HasPrefix(seed.Name, "valid/") {
+			continue
+		}
+		serializer, err := golden.SerializerFor(seed.Format)
+		if err != nil {
+			t.Fatalf("SerializerFor(%q) error = %v", seed.Format, err)
+		}
+		fixture, err := serializer.Unmarshal(seed.Data)
+		if err != nil {
+			t.Errorf("the %s seed does not deserialize: %v", seed.Format, err)
+			continue
+		}
+		if fixture.XDR != env || fixture.Type != "TransactionEnvelope" {
+			continue
+		}
+		seeded[seed.Format] = true
+	}
+
+	for _, format := range []golden.Format{golden.JSON, golden.YAML, golden.Text} {
+		if !seeded[format] {
+			t.Errorf("the fuzz corpus has no valid %s fixture built from the captured envelope", format)
 		}
 	}
 }

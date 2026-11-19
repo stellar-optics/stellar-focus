@@ -209,3 +209,27 @@ func astBannedMatch(importPath string) string {
 	}
 	return ""
 }
+
+// TestPackageDependencies enforces the dependency boundary of pkg/focus by
+// reading its source, not by asking the toolchain what was linked.
+//
+// A test helper is imported into other people's projects, so everything this
+// package imports is inherited by them. The permitted set is deliberately
+// short: the standard library, the Stellar SDK, lens, and this module's own
+// packages. Test files are excluded, because they are not part of the package
+// a downstream project compiles; TestLibraryImportsStayLightAST covers them.
+//
+// Any other external import fails here, in CI, rather than in a downstream
+// project that suddenly has an assertion framework in its dependency graph.
+func TestPackageDependencies(t *testing.T) {
+	t.Parallel()
+
+	pkg := parsePackageImports(t, false)
+
+	if offenders := outsideTheBoundary(pkg); len(offenders) > 0 {
+		t.Errorf("pkg/focus imports packages outside its dependency boundary:\n  %s\n\n"+
+			"Permitted non-standard-library modules: %s.\n"+
+			"Test helpers are imported into other people's projects; keep this list short.",
+			strings.Join(offenders, "\n  "), strings.Join(permittedImportRoots, ", "))
+	}
+}

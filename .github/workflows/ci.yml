@@ -129,6 +129,31 @@ jobs:
           path: coverage.out
           if-no-files-found: error
 
+  fuzz:
+    name: Fuzz golden parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The golden deserializer and the template engine read arbitrary files
+      # and arbitrary text. Malformed input returning an error is the pass; a
+      # panic, a hang or an unbounded allocation fails the run. Go executes
+      # one fuzz target per invocation, so each target is its own step.
+      - name: Fuzz the golden fixture deserializer
+        run: |
+          go test ./pkg/fuzz -run '^$' \
+            -fuzz '^FuzzGoldenDeserializer$' -fuzztime 30s -fuzzminimizetime 10s
+
+      - name: Fuzz template interpolation
+        run: |
+          go test ./pkg/fuzz -run '^$' \
+            -fuzz '^FuzzInterpolate$' -fuzztime 30s -fuzzminimizetime 10s
+
   library:
     name: Library smoke test
     runs-on: ubuntu-latest
@@ -168,6 +193,12 @@ jobs:
             go list -deps ./pkg/focus | grep 'spf13'
             exit 1
           fi
+
+      # The AST check states the whole boundary, not just the CLI half: only
+      # the standard library, the Stellar SDK, lens and this module itself may
+      # be imported by pkg/focus.
+      - name: pkg/focus stays within its dependency boundary
+        run: go test ./pkg/focus -run TestPackageDependencies -count=1 -v
 
       - name: golden -focus.update round-trips
         run: |
