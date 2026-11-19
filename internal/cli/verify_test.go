@@ -681,6 +681,49 @@ func TestCollectFixtures(t *testing.T) {
 	}
 }
 
+// TestVerifyWithConcurrency checks that --concurrency parallelizes the check
+// without changing the result: every concurrency prints the same lines in
+// the same order, and all fixtures are still checked.
+func TestVerifyWithConcurrency(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+	dir := t.TempDir()
+
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+		t.Fatalf("capture failed: %v", err)
+	}
+
+	var previous string
+	for _, concurrency := range []string{"1", "2", "4"} {
+		stdout, stderr, err := run(t, "verify", dir, "--concurrency", concurrency)
+		if err != nil {
+			t.Fatalf("verify --concurrency %s failed: %v\nstderr: %s", concurrency, err, stderr)
+		}
+		if previous != "" && stdout != previous {
+			t.Errorf("verify output changed with concurrency %s:\nbefore:\n%s\nafter:\n%s",
+				concurrency, previous, stdout)
+		}
+		previous = stdout
+	}
+	if !strings.Contains(previous, "2 checked: 2 ok, 0 drifted, 0 skipped") {
+		t.Errorf("unexpected summary:\n%s", previous)
+	}
+}
+
+// TestVerifyRejectsZeroConcurrency checks that --concurrency 0 is refused
+// before any fixture is checked.
+func TestVerifyRejectsZeroConcurrency(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+
+	_, _, err := run(t, "verify", t.TempDir(), "--concurrency", "0")
+	if err == nil {
+		t.Fatal("verify accepted --concurrency 0")
+	}
+	if !strings.Contains(err.Error(), "concurrency must be at least 1") {
+		t.Errorf("error does not name the limit: %v", err)
+	}
+}
+
 // driftedRecords is what the fake endpoint returns after the chain has
 // moved: same hash, different envelope, same result.
 func driftedRecords(t *testing.T) []capture.Record {

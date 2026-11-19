@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -235,6 +237,44 @@ func TestArchivalSourceReadsALedgerHeader(t *testing.T) {
 	}
 	if _, err := src.LedgerHeader(context.Background(), archiveLedger+5); !errors.Is(err, capture.ErrNotFound) {
 		t.Errorf("a ledger missing from its checkpoint: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestArchivalSourceReadsALocalArchiveDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	header := xdr.LedgerHeaderHistoryEntry{
+		Hash: xdr.Hash{7, 7, 7},
+		Header: xdr.LedgerHeader{
+			LedgerSeq:     archiveLedger,
+			LedgerVersion: 21,
+			ScpValue:      xdr.StellarValue{CloseTime: 1700000000},
+		},
+	}
+	path := filepath.Join(dir, strings.TrimPrefix(fakearchive.Path("ledger", archiveLedger), "/"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, fakearchive.Gzip([]xdr.LedgerHeaderHistoryEntry{header}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := capture.NewArchiveSource(capture.NetworkTestnet, dir, time.Second)
+	record, err := src.LedgerHeaderAt(context.Background(), archiveLedger)
+	if err != nil {
+		t.Fatalf("LedgerHeaderAt() error = %v", err)
+	}
+	var decoded xdr.LedgerHeaderHistoryEntry
+	if err := xdr.SafeUnmarshalBase64(record.XDR, &decoded); err != nil {
+		t.Fatalf("decoding header: %v", err)
+	}
+	if decoded.Header.LedgerSeq != archiveLedger || decoded.Header.LedgerVersion != 21 {
+		t.Errorf("header = %+v, want ledger %d", decoded.Header, archiveLedger)
+	}
+
+	if _, err := src.LedgerHeaderAt(context.Background(), archiveLedger+5); !errors.Is(err, capture.ErrNotFound) {
+		t.Errorf("a ledger missing from the directory: error = %v, want ErrNotFound", err)
 	}
 }
 

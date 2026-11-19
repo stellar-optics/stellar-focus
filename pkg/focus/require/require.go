@@ -477,10 +477,24 @@ func EntryDeleted(t focus.TB, meta, key focus.Value) {
 	focus.AssertEntryDeleted(fatal(t), meta, key)
 }
 
+// LedgerEntryState is focus.AssertLedgerEntryState, stopping the test on
+// failure.
+func LedgerEntryState(t focus.TB, meta, key focus.Value, wantState focus.EntryStateTransition) {
+	t.Helper()
+	focus.AssertLedgerEntryState(fatal(t), meta, key, wantState)
+}
+
 // BalanceChanged is focus.AssertBalanceChanged, stopping the test on failure.
 func BalanceChanged(t focus.TB, meta, account, asset focus.Value, delta int64) {
 	t.Helper()
 	focus.AssertBalanceChanged(fatal(t), meta, account, asset, delta)
+}
+
+// BalanceChangeRange is focus.AssertBalanceChangeRange, stopping the test on
+// failure.
+func BalanceChangeRange(t focus.TB, meta, account, asset focus.Value, minDelta, maxDelta int64) {
+	t.Helper()
+	focus.AssertBalanceChangeRange(fatal(t), meta, account, asset, minDelta, maxDelta)
 }
 
 // TrustlineModified is focus.AssertTrustlineModified, stopping the test on

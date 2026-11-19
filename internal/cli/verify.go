@@ -8,12 +8,14 @@ package cli
 
 import (
 	"context"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -148,6 +150,7 @@ every commit, so a run can be narrowed:
                                metadata selector such as network:testnet
   --drifted-only               only re-check fixtures that previously drifted
                                or could not be checked
+  --concurrency <N>, -j <N>    check this many fixtures at once (default 4)
 
 Checks run a few at a time: --concurrency (or -j) sets how many, and it
 defaults to the number of CPUs. Progress is still printed in fixture order,
@@ -217,12 +220,27 @@ func validVerifyFormat(format string) error {
 	}
 }
 
+// fixtureCheck holds everything a single fixture's check produced: the
+// result for the report, and the human rendering buffered so the run can
+// print fixtures in path order no matter how many goroutines checked them.
+type fixtureCheck struct {
+	item    VerifyItemResult
+	fixture *golden.Fixture
+	line    string
+	target  io.Writer
+	diff    string
+	// counted says whether the fixture was actually looked at: filtered
+	// fixtures and ones skipped because their last check matched are not
+	// counted, everything else is.
+	counted bool
+}
+
 // verifyFixtures checks every fixture and reports what it found.
 //
-// The report is returned whatever happens, so the JSON output has a
-// document to print even when the run failed before it could check
-// anything. When asJSON is set, nothing is written to the terminal: the
-// report is the output.
+// Fixtures are independent of one another, so they are checked with a worker
+// pool sized by --concurrency. The report and the terminal output are
+// rendered in path order afterwards, so the run's output is stable and
+// deterministic whatever the concurrency.
 func verifyFixtures(
 	cmd *cobra.Command,
 	cfg *config,
@@ -283,6 +301,29 @@ func verifyFixtures(
 			}
 			counted[i] = true
 			continue
+	concurrency := cfg.concurrency()
+	checks := make([]fixtureCheck, len(paths))
+
+	var wg sync.WaitGroup
+	slot := make(chan struct{}, concurrency)
+	for i, path := range paths {
+		wg.Add(1)
+		go func(i int, path string) {
+			defer wg.Done()
+			slot <- struct{}{}
+			defer func() { <-slot }()
+			checks[i] = checkFixture(cmd, cfg, src, cache, filter, since, stdout, stderr, path)
+		}(i, path)
+	}
+	wg.Wait()
+
+	var checked, matched, drifted, skipped, errored, filtered int
+	for _, ch := range checks {
+		if !asJSON {
+			fmt.Fprint(ch.target, ch.line)
+			if ch.diff != "" {
+				fmt.Fprint(stderr, ch.diff)
+			}
 		}
 		fixtures[i] = f
 
@@ -428,6 +469,26 @@ func verifyFixtures(
 			filtered++
 		}
 		report.Results = append(report.Results, item)
+		switch ch.item.Status {
+		case statusMatched:
+			matched++
+			cache.record(ch.item.Path, ch.fixture, outcomeOK)
+		case statusDrifted:
+			drifted++
+			cache.record(ch.item.Path, ch.fixture, outcomeDrifted)
+		case statusErrored:
+			errored++
+			cache.record(ch.item.Path, ch.fixture, outcomeErrored)
+		case statusFiltered:
+			filtered++
+		case statusSkipped:
+			skipped++
+		}
+		if ch.counted {
+			checked++
+		}
+
+		report.Results = append(report.Results, ch.item)
 	}
 
 	if err := cache.save(cfg.verifyCachePath()); err != nil && !asJSON {
@@ -513,6 +574,107 @@ func verifyFixturesConcurrently(
 	}
 	close(queue)
 	wg.Wait()
+// checkFixture checks one fixture and buffers its rendering, without writing
+// to the terminal. Fixtures checked concurrently only touch their own
+// fixtureCheck, so nothing here needs a lock.
+func checkFixture(
+	cmd *cobra.Command,
+	cfg *config,
+	src capture.Source,
+	cache *verifyCache,
+	filter *fixtureFilter,
+	since time.Time,
+	stdout, stderr io.Writer,
+	path string,
+) fixtureCheck {
+	ch := fixtureCheck{item: VerifyItemResult{Path: path}}
+
+	f, loadErr := golden.Load(path)
+	if loadErr != nil {
+		ch.item.Status = statusErrored
+		ch.item.Error = loadErr.Error()
+		ch.line = fmt.Sprintf("%-40s ERROR   %v\n", path, loadErr)
+		ch.target = stderr
+		ch.counted = true
+		return ch
+	}
+	ch.fixture = f
+	ch.item.Type = f.Type
+
+	// A fixture the filters exclude is not checked at all, and is reported
+	// as filtered rather than quietly passing.
+	if reason, excluded := excludedBy(filter, since, path, f); excluded {
+		ch.item.Status = statusFiltered
+		ch.item.Error = reason
+		ch.line = fmt.Sprintf("%-40s FILTERED %s\n", path, reason)
+		ch.target = stdout
+		return ch
+	}
+
+	// Under --drifted-only a fixture whose last check matched the chain,
+	// and which has not changed since, is left alone.
+	if cfg.driftedOnly() {
+		if entry, known := cache.lookup(path, f); known && entry.Outcome == outcomeOK {
+			ch.item.Status = statusSkipped
+			ch.item.Error = fmt.Sprintf("last check on %s matched the chain", entry.CheckedAt)
+			ch.line = fmt.Sprintf("%-40s SKIP    last check on %s matched the chain\n",
+				path, entry.CheckedAt)
+			ch.target = stdout
+			return ch
+		}
+	}
+
+	res := capture.Verify(cmd.Context(), src, path, f)
+	switch {
+	case res.Err != nil && errors.Is(res.Err, capture.ErrNotFound):
+		// The transaction is gone from the network, so the fixture can no
+		// longer be checked against it. It counts as drift.
+		ch.item.Status = statusDrifted
+		ch.item.Error = res.Err.Error()
+		ch.line = fmt.Sprintf("%-40s GONE    %v\n", path, res.Err)
+		ch.target = stderr
+		ch.counted = true
+	case res.Err != nil && (f.Captured == nil || f.Captured.TxHash == "" || f.Captured.Sanitized):
+		// No capture provenance: there is nothing to re-fetch, so the
+		// fixture is skipped but it was still looked at.
+		ch.item.Status = statusSkipped
+		ch.item.Error = res.Err.Error()
+		ch.line = fmt.Sprintf("%-40s SKIP    %v\n", path, res.Err)
+		ch.target = stdout
+		ch.counted = true
+	case res.Err != nil:
+		// The endpoint or the file failed, so this fixture was not
+		// checked. That is not drift and must not be counted as a pass.
+		ch.item.Status = statusErrored
+		ch.item.Error = res.Err.Error()
+		ch.line = fmt.Sprintf("%-40s ERROR   %v\n", path, res.Err)
+		ch.target = stderr
+		ch.counted = true
+	case res.Match:
+		ch.item.Status = statusMatched
+		ch.line = fmt.Sprintf("%-40s ok\n", path)
+		ch.target = stdout
+		ch.counted = true
+	default:
+		ch.item.Status = statusDrifted
+		ch.line = fmt.Sprintf("%-40s DRIFTED\n", path)
+		ch.target = stderr
+		ch.counted = true
+		if res.Diff != nil {
+			// Render into a buffer instead of straight to stderr, so a
+			// concurrent run can print the diff beside its line in order.
+			var diffBuf bytes.Buffer
+			format := lensformat.NewDiffFormatter(
+				lensformat.WithDiffPalette(lensformat.PaletteFor(&diffBuf, cfg.colorMode())))
+			if fErr := format.Format(&diffBuf, res.Diff); fErr != nil {
+				fmt.Fprintf(&diffBuf, "  (could not render the diff: %v)\n", fErr)
+			}
+			ch.diff = diffBuf.String()
+			ch.item.DiffCount = len(res.Diff.Changes)
+			ch.item.DiffPaths, ch.item.Diffs = diffDetails(res.Diff)
+		}
+	}
+	return ch
 }
 
 // diffDetails names the fields a diff reports as changed, and describes each

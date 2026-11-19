@@ -179,6 +179,38 @@ func parseLedgerEntryRecords(data []byte) ([]struct {
 	return out, nil
 }
 
+// LedgerHeaderAt implements LedgerHeaderSource by reading a ledger from
+// Horizon's /ledgers collection, which reports the header XDR alongside the
+// close time.
+func (s *HorizonSource) LedgerHeaderAt(ctx context.Context, sequence uint32) (Record, error) {
+	path := fmt.Sprintf("%s/ledgers/%d", s.endpoint, sequence)
+	body, err := s.get(ctx, path)
+	if err != nil {
+		return Record{}, err
+	}
+
+	var ledger struct {
+		Hash      string `json:"hash"`
+		Sequence  uint32 `json:"sequence"`
+		ClosedAt  string `json:"closed_at"`
+		HeaderXDR string `json:"header_xdr"`
+	}
+	if err := json.Unmarshal(body, &ledger); err != nil {
+		return Record{}, fmt.Errorf("decode horizon ledger %d: %w", sequence, err)
+	}
+	if ledger.HeaderXDR == "" {
+		return Record{}, fmt.Errorf("horizon ledger %d: response carried no header XDR", sequence)
+	}
+
+	return Record{
+		Name:        "ledger-header",
+		Type:        "LedgerHeaderHistoryEntry",
+		XDR:         ledger.HeaderXDR,
+		Ledger:      sequence,
+		Description: fmt.Sprintf("header of ledger %d (%s, closed %s)", sequence, ledger.Hash, ledger.ClosedAt),
+	}, nil
+}
+
 func (s *HorizonSource) get(ctx context.Context, endpoint string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

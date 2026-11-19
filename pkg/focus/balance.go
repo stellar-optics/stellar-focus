@@ -61,6 +61,53 @@ func AssertBalanceChanged(t TB, meta Value, account Value, asset Value, delta in
 	return false
 }
 
+// AssertBalanceChangeRange checks that a transaction changed an account's
+// balance in an asset by somewhere between minDelta and maxDelta stroops,
+// inclusive.
+//
+// It accepts the same account, asset and meta forms as AssertBalanceChanged,
+// and computes the delta the same way: the net change across every ledger
+// change in the meta. Bounds are inclusive, so passing the same value for
+// both is an exact-delta assertion.
+//
+// Use it where dynamic fees or DEX slippage make an exact delta flaky: a
+// payment of 100 XLM with a fee that can land anywhere between 0 and 200
+// stroops is bounded by [-100000200, -99999800] for the sender. A zero bound
+// is an ordinary bound, not an unchecked side — a delta of zero passes only
+// when it falls within [minDelta, maxDelta].
+func AssertBalanceChangeRange(t TB, meta, account, asset Value, minDelta, maxDelta int64) bool {
+	t.Helper()
+	const assertion = "AssertBalanceChangeRange"
+
+	changes, ok := ledgerChanges(t, assertion, meta)
+	if !ok {
+		return false
+	}
+	addr, ok := resolveAccount(t, assertion, "account", account)
+	if !ok {
+		return false
+	}
+	spec, ok := resolveAsset(t, assertion, "asset", asset)
+	if !ok {
+		return false
+	}
+
+	got, ok := balanceDelta(t, assertion, changes, addr, spec)
+	if !ok {
+		return false
+	}
+	if got < minDelta || got > maxDelta {
+		t.Errorf("%s: %s balance changed by %s, outside [%s, %s]\n\n%s",
+			assertion, describeBalanceSubject(addr, spec),
+			amountStroops(xdr.Int64(got), spec.unit()),
+			amountStroops(xdr.Int64(minDelta), spec.unit()),
+			amountStroops(xdr.Int64(maxDelta), spec.unit()),
+			indent(describeAccountChanges(changes, addr)))
+		return false
+	}
+	return true
+}
+
 // balanceDelta sums the balance movements for one account and asset across a
 // meta's changes.
 //

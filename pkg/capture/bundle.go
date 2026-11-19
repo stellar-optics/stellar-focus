@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
+
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
@@ -18,6 +20,10 @@ const BundleFormat = "focus/bundle/v1"
 
 // BundleSuffix is the manifest filename suffix a bundle directory carries.
 const BundleSuffix = ".bundle.json"
+
+// GitHubActionsWorkflowPath is where GenerateGitHubActionWorkflow's output is
+// meant to be checked in, relative to the repository root.
+const GitHubActionsWorkflowPath = ".github/workflows/focus-verify.yml"
 
 // BundleMember is one captured transaction inside a bundle manifest.
 //
@@ -239,6 +245,117 @@ func VerifyBundle(ctx context.Context, src Source, dir string, b *Bundle) []Veri
 	return results
 }
 
+// LedgerBatchFormat identifies the multi-ledger manifest layout.
+const LedgerBatchFormat = "focus/ledger-batch/v1"
+
+// LedgerBatchEntry is one ledger inside a multi-ledger bundle: its close
+// metadata and the header XDR itself, which is what makes the entry
+// re-checkable without a fixture file of its own.
+type LedgerBatchEntry struct {
+	// Sequence is the ledger number.
+	Sequence uint32 `json:"sequence"`
+	// Hash is the ledger's hash, as the header records it.
+	Hash string `json:"hash"`
+	// CloseTime is the ledger close time, in seconds since the Unix epoch.
+	CloseTime int64 `json:"closeTime"`
+	// ProtocolVersion is the protocol the ledger closed under.
+	ProtocolVersion uint32 `json:"protocolVersion"`
+	// Type is the XDR type of XDR, always LedgerHeaderHistoryEntry.
+	Type string `json:"type"`
+	// XDR is the base64 LedgerHeaderHistoryEntry.
+	XDR string `json:"xdr"`
+}
+
+// LedgerBatchBundle is the manifest of a consecutive multi-ledger capture.
+//
+// Unlike Bundle, which indexes separate fixture files, a ledger batch is one
+// self-contained document: a run of headers is small, and keeping them
+// together preserves the thing being tested — that the ledgers are
+// consecutive and in order.
+type LedgerBatchBundle struct {
+	// Format identifies the layout version.
+	Format string `json:"format"`
+	// Network and Endpoint record where the batch came from.
+	Network  string `json:"network"`
+	Endpoint string `json:"endpoint"`
+	// Start and End are the requested range, inclusive.
+	Start uint32 `json:"start"`
+	End   uint32 `json:"end"`
+	// CapturedAt is the RFC3339 time the batch was captured.
+	CapturedAt string `json:"capturedAt"`
+	// Ledgers are the captured headers, in ascending sequence order.
+	Ledgers []LedgerBatchEntry `json:"ledgers"`
+}
+
+// Save writes the batch manifest to path.
+func (b *LedgerBatchBundle) Save(path string) error {
+	data, err := json.MarshalIndent(b, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding ledger batch manifest: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing ledger batch manifest %s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadLedgerBatchBundle reads a multi-ledger manifest from disk.
+func LoadLedgerBatchBundle(path string) (*LedgerBatchBundle, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading ledger batch manifest %s: %w", path, err)
+	}
+	var b LedgerBatchBundle
+	if err := json.Unmarshal(data, &b); err != nil {
+		return nil, fmt.Errorf("parsing ledger batch manifest %s: %w", path, err)
+	}
+	if b.Format != LedgerBatchFormat {
+		return nil, fmt.Errorf(
+			"ledger batch manifest %s has format %q, want %q", path, b.Format, LedgerBatchFormat)
+	}
+	return &b, nil
+}
+
+// VerifyLedgerBatch re-fetches every ledger in the batch and reports which
+// ones still match. Results are returned in manifest order.
+//
+// A ledger the source no longer serves is an error rather than a mismatch:
+// a pruned ledger cannot be compared, and saying so is more useful than a
+// diff against nothing.
+func VerifyLedgerBatch(ctx context.Context, src Source, b *LedgerBatchBundle) []VerifyResult {
+	headerSource, ok := src.(LedgerHeaderSource)
+	if !ok {
+		return []VerifyResult{{Err: fmt.Errorf("%s cannot fetch ledger %d: it is not a LedgerHeaderSource",
+			src.Name(), b.Start)}}
+	}
+
+	results := make([]VerifyResult, 0, len(b.Ledgers))
+	for _, entry := range b.Ledgers {
+		result := VerifyResult{Path: fmt.Sprintf("ledger %d", entry.Sequence)}
+		record, err := headerSource.LedgerHeaderAt(ctx, entry.Sequence)
+		if err != nil {
+			result.Err = fmt.Errorf("re-fetching ledger %d: %w", entry.Sequence, err)
+			results = append(results, result)
+			continue
+		}
+		if record.XDR == entry.XDR {
+			result.Match = true
+			results = append(results, result)
+			continue
+		}
+
+		stored, sErr := lens.DecodeAs(entry.XDR, entry.Type)
+		fresh, fErr := lens.DecodeAs(record.XDR, record.Type)
+		if sErr == nil && fErr == nil {
+			if diff, dErr := lens.Diff(stored, fresh); dErr == nil {
+				result.Diff = diff
+			}
+		}
+		results = append(results, result)
+	}
+	return results
+}
+
 // BundleGone counts the results whose fixture is gone from the network —
 // the condition worth distinguishing from drift when a bundle is re-checked
 // in CI.
@@ -250,4 +367,23 @@ func BundleGone(results []VerifyResult) int {
 		}
 	}
 	return n
+}
+
+// ExportCIWorkflow writes the GitHub Actions workflow that verifies this
+// bundle's fixtures into dir/.github/workflows/focus-verify.yml and returns
+// the path it was written to. A missing directory is created; an existing
+// workflow file is overwritten, since the manifest is the source of truth
+// for what the workflow checks.
+func ExportCIWorkflow(dir string, bundle *Bundle) (string, error) {
+	if dir == "" {
+		dir = "."
+	}
+	path := filepath.Join(dir, GitHubActionsWorkflowPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", fmt.Errorf("creating workflow directory %s: %w", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(GenerateGitHubActionWorkflow(bundle)), 0o644); err != nil {
+		return "", fmt.Errorf("writing GitHub Actions workflow %s: %w", path, err)
+	}
+	return path, nil
 }
