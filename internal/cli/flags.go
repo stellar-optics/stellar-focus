@@ -65,6 +65,7 @@ const (
 	keyFileSrc     = "file-source"
 	keySanit       = "sanitize"
 	keyMemo        = "mask-memo"
+	keyMemoAlias   = "sanitize-memos"
 	keyData        = "scrub-data"
 	keyKeys        = "scrub-keys"
 	keyArchive     = "archive-url"
@@ -202,6 +203,8 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 		"mask sensitive data: the same as --mask-memo --scrub-data --scrub-keys")
 	flags.Bool(keyMemo, false,
 		"replace text memos with "+capture.RedactedMemo)
+	flags.Bool(keyMemoAlias, false,
+		"replace text memos with "+capture.RedactedMemo+" (the same as --mask-memo)")
 	flags.Bool(keyData, false,
 		"replace data entry values with "+capture.RedactedData)
 	flags.Bool(keyKeys, false,
@@ -213,6 +216,7 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyMask)
 	c.bind(flags, keySanit)
 	c.bind(flags, keyMemo)
+	c.bind(flags, keyMemoAlias)
 	c.bind(flags, keyData)
 	c.bind(flags, keyKeys)
 }
@@ -549,7 +553,7 @@ func (c *config) encodeDescription() string {
 func (c *config) sanitizer() capture.Sanitizer {
 	all := c.v.GetBool(keySanit)
 	return capture.Sanitizer{
-		MaskMemo:  all || c.v.GetBool(keyMemo),
+		MaskMemo:  all || c.v.GetBool(keyMemo) || c.v.GetBool(keyMemoAlias),
 		ScrubData: all || c.v.GetBool(keyData),
 		ScrubKeys: all || c.v.GetBool(keyKeys),
 	}

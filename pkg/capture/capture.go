@@ -8,12 +8,17 @@
 package capture
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
@@ -269,6 +274,197 @@ func Verify(ctx context.Context, src Source, path string, f *golden.Fixture) Ver
 	result.Err = fmt.Errorf("the network no longer returns a %s for transaction %s",
 		f.Type, f.Captured.TxHash)
 	return result
+}
+
+// LedgerHeaderSource serves the header of one ledger by sequence.
+//
+// It is the seam CaptureLedgerRange needs: RPC, Horizon and history archives
+// all provide it, and a test supplies a canned map of ledgers so a range
+// capture stays offline.
+type LedgerHeaderSource interface {
+	// LedgerHeaderAt fetches the header of one ledger as a
+	// LedgerHeaderHistoryEntry record.
+	LedgerHeaderAt(ctx context.Context, sequence uint32) (Record, error)
+}
+
+// LedgerRangeOptions tunes a multi-ledger capture.
+//
+// The zero value means "use the defaults": a short pause between requests
+// and a few retries with exponential backoff. Retries are counted after the
+// first attempt, so Retries: 2 makes at most three requests per ledger.
+type LedgerRangeOptions struct {
+	// Interval is the minimum time between two requests. Zero uses 100ms.
+	Interval time.Duration
+	// Retries is how many times a failed ledger is retried. Zero uses 3.
+	Retries int
+	// Backoff is the wait before the first retry; it doubles each time.
+	// Zero uses 250ms.
+	Backoff time.Duration
+}
+
+// defaultLedgerRangeOptions is the rate limit and retry policy a caller gets
+// when it does not ask for one, chosen to be kind to a public endpoint.
+func defaultLedgerRangeOptions() LedgerRangeOptions {
+	return LedgerRangeOptions{
+		Interval: 100 * time.Millisecond,
+		Retries:  3,
+		Backoff:  250 * time.Millisecond,
+	}
+}
+
+// CaptureLedgerRange captures a consecutive run of ledgers — start through
+// end, inclusive — as one verifiable ledger batch.
+//
+// It is the multi-ledger counterpart to a single transaction capture: each
+// ledger's close metadata and header are recorded in order, so a test can
+// reason about a re-org, a fee change, or state archival across the run
+// rather than one ledger at a time. Requests are spaced out and retried with
+// backoff, and the context cancels the whole capture between attempts.
+//
+//nolint:revive // the name follows the documented capture API.
+func CaptureLedgerRange(ctx context.Context, src Source, start, end uint32) (*LedgerBatchBundle, error) {
+	return CaptureLedgerRangeWithOptions(ctx, src, start, end, LedgerRangeOptions{})
+}
+
+// CaptureLedgerRangeWithOptions is CaptureLedgerRange with an explicit rate
+// limit and retry policy.
+//
+//nolint:revive // the name follows the documented capture API.
+func CaptureLedgerRangeWithOptions(
+	ctx context.Context,
+	src Source,
+	start, end uint32,
+	opts LedgerRangeOptions,
+) (*LedgerBatchBundle, error) {
+	if start == 0 {
+		return nil, fmt.Errorf("a ledger range needs a first ledger of at least 1")
+	}
+	if end < start {
+		return nil, fmt.Errorf("ledger range end %d is before start %d", end, start)
+	}
+	headerSource, ok := src.(LedgerHeaderSource)
+	if !ok {
+		return nil, fmt.Errorf("source %q cannot capture a ledger range: it does not serve ledger headers", src.Name())
+	}
+
+	defaults := defaultLedgerRangeOptions()
+	if opts.Interval <= 0 {
+		opts.Interval = defaults.Interval
+	}
+	if opts.Retries <= 0 {
+		opts.Retries = defaults.Retries
+	}
+	if opts.Backoff <= 0 {
+		opts.Backoff = defaults.Backoff
+	}
+
+	bundle := &LedgerBatchBundle{
+		Format:     LedgerBatchFormat,
+		Network:    src.Network(),
+		Endpoint:   src.Endpoint(),
+		Start:      start,
+		End:        end,
+		CapturedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	for sequence := start; ; sequence++ {
+		if sequence > start {
+			if err := wait(ctx, opts.Interval); err != nil {
+				return nil, err
+			}
+		}
+
+		record, err := fetchLedgerHeader(ctx, headerSource, sequence, opts)
+		if err != nil {
+			return nil, fmt.Errorf("capturing ledger %d: %w", sequence, err)
+		}
+		entry, err := ledgerBatchEntry(record, sequence)
+		if err != nil {
+			return nil, fmt.Errorf("capturing ledger %d: %w", sequence, err)
+		}
+		bundle.Ledgers = append(bundle.Ledgers, entry)
+
+		if sequence == end || sequence == math.MaxUint32 {
+			break
+		}
+	}
+	return bundle, nil
+}
+
+// fetchLedgerHeader fetches one header, retrying with exponential backoff. A
+// cancelled context stops immediately rather than sleeping out the policy.
+func fetchLedgerHeader(
+	ctx context.Context,
+	src LedgerHeaderSource,
+	sequence uint32,
+	opts LedgerRangeOptions,
+) (Record, error) {
+	var lastErr error
+	for attempt := 0; attempt <= opts.Retries; attempt++ {
+		if attempt > 0 {
+			backoff := opts.Backoff
+			for i := 1; i < attempt; i++ {
+				backoff *= 2
+			}
+			if err := wait(ctx, backoff); err != nil {
+				return Record{}, err
+			}
+		}
+
+		record, err := src.LedgerHeaderAt(ctx, sequence)
+		if err == nil {
+			return record, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return Record{}, ctx.Err()
+		}
+	}
+	return Record{}, lastErr
+}
+
+// wait sleeps for d, or returns early when the context is cancelled.
+func wait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// ledgerBatchEntry turns a header record into the close metadata a ledger
+// batch stores, decoding the header to name the ledger precisely.
+func ledgerBatchEntry(record Record, sequence uint32) (LedgerBatchEntry, error) {
+	raw, err := base64.StdEncoding.DecodeString(record.XDR)
+	if err != nil {
+		return LedgerBatchEntry{}, fmt.Errorf("header XDR is not base64: %w", err)
+	}
+	var header xdr.LedgerHeaderHistoryEntry
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &header); err != nil {
+		return LedgerBatchEntry{}, fmt.Errorf("parsing header: %w", err)
+	}
+	if got := uint32(header.Header.LedgerSeq); got != sequence {
+		return LedgerBatchEntry{}, fmt.Errorf("source returned the header of ledger %d, want %d", got, sequence)
+	}
+
+	entryType := record.Type
+	if entryType == "" {
+		entryType = "LedgerHeaderHistoryEntry"
+	}
+	return LedgerBatchEntry{
+		Sequence:        sequence,
+		Hash:            hex.EncodeToString(header.Hash[:]),
+		CloseTime:       int64(header.Header.ScpValue.CloseTime),
+		ProtocolVersion: uint32(header.Header.LedgerVersion),
+		Type:            entryType,
+		XDR:             record.XDR,
+	}, nil
 }
 
 // ResolveEndpoint picks the URL for a network, honouring an explicit

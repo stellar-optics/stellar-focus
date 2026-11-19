@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 type addressGetter interface {
@@ -23,6 +24,13 @@ type addressSetter interface {
 // deterministic, valid mock Stellar accounts. Equal addresses map to the
 // same mock account across all records. Non-address signer keys are unchanged.
 func Anonymize(records []Record) ([]Record, error) {
+	return AnonymizeWithSeed(records, 0)
+}
+
+// AnonymizeWithSeed is Anonymize with a seed mixed into the pseudonym
+// derivation, so the same real address maps to a different fake one under a
+// different seed while staying stable within one seed.
+func AnonymizeWithSeed(records []Record, seed int64) ([]Record, error) {
 	out := append([]Record(nil), records...)
 	mappings := make(map[string]string)
 	for i := range out {
@@ -30,7 +38,7 @@ func Anonymize(records []Record) ([]Record, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decoding %s for anonymization: %w", out[i].Type, err)
 		}
-		if err := anonymizeValue(reflect.ValueOf(value.Raw), mappings); err != nil {
+		if err := anonymizeValue(reflect.ValueOf(value.Raw), mappings, seed); err != nil {
 			return nil, fmt.Errorf("masking addresses in %s: %w", out[i].Type, err)
 		}
 		marshaler, ok := value.Raw.(encoding.BinaryMarshaler)
@@ -46,7 +54,42 @@ func Anonymize(records []Record) ([]Record, error) {
 	return out, nil
 }
 
-func anonymizeValue(value reflect.Value, mappings map[string]string) error {
+// AnonymizeEnvelope replaces every account address in env with a
+// deterministic, valid Stellar Ed25519 public key derived from seed and the
+// original address.
+//
+// The derivation is a pure function of the two, so the same real account maps
+// to the same pseudonym in every envelope and result — a payment's source and
+// destination, an operation source, a fee-bump payer — without the caller
+// having to carry a mapping table between calls. The input envelope is not
+// modified.
+func AnonymizeEnvelope(env *xdr.TransactionEnvelope, seed int64) *xdr.TransactionEnvelope {
+	if env == nil {
+		return nil
+	}
+	raw, err := env.MarshalBinary()
+	if err != nil {
+		return env
+	}
+	var out xdr.TransactionEnvelope
+	if err := out.UnmarshalBinary(raw); err != nil {
+		return env
+	}
+	// The pointer makes every field addressable, so the walk can set the
+	// union arms it finds.
+	root := reflect.New(reflect.TypeOf(out))
+	root.Elem().Set(reflect.ValueOf(out))
+	if err := anonymizeValue(root.Elem(), make(map[string]string), seed); err != nil {
+		return env
+	}
+	anonymized, ok := root.Elem().Interface().(xdr.TransactionEnvelope)
+	if !ok {
+		return env
+	}
+	return &anonymized
+}
+
+func anonymizeValue(value reflect.Value, mappings map[string]string, seed int64) error {
 	if !value.IsValid() {
 		return nil
 	}
@@ -55,31 +98,31 @@ func anonymizeValue(value reflect.Value, mappings map[string]string) error {
 			return nil
 		}
 		if value.Kind() == reflect.Pointer && value.CanInterface() {
-			if err := anonymizeAddressUnion(value, mappings); err != nil {
+			if err := anonymizeAddressUnion(value, mappings, seed); err != nil {
 				return err
 			}
 			if isAddressUnion(value.Type().Elem()) {
 				return nil
 			}
 		}
-		return anonymizeValue(value.Elem(), mappings)
+		return anonymizeValue(value.Elem(), mappings, seed)
 	}
 	switch value.Kind() {
 	case reflect.Struct:
 		if isAddressUnion(value.Type()) && value.CanAddr() {
-			if err := anonymizeAddressUnion(value.Addr(), mappings); err != nil {
+			if err := anonymizeAddressUnion(value.Addr(), mappings, seed); err != nil {
 				return err
 			}
 			return nil
 		}
 		for i := 0; i < value.NumField(); i++ {
-			if err := anonymizeValue(value.Field(i), mappings); err != nil {
+			if err := anonymizeValue(value.Field(i), mappings, seed); err != nil {
 				return err
 			}
 		}
 	case reflect.Array, reflect.Slice:
 		for i := 0; i < value.Len(); i++ {
-			if err := anonymizeValue(value.Index(i), mappings); err != nil {
+			if err := anonymizeValue(value.Index(i), mappings, seed); err != nil {
 				return err
 			}
 		}
@@ -88,7 +131,7 @@ func anonymizeValue(value reflect.Value, mappings map[string]string) error {
 		for iter.Next() {
 			mapValue := reflect.New(value.Type().Elem()).Elem()
 			mapValue.Set(iter.Value())
-			if err := anonymizeValue(mapValue, mappings); err != nil {
+			if err := anonymizeValue(mapValue, mappings, seed); err != nil {
 				return err
 			}
 			value.SetMapIndex(iter.Key(), mapValue)
@@ -109,7 +152,7 @@ func isAddressUnion(valueType reflect.Type) bool {
 	}
 }
 
-func anonymizeAddressUnion(value reflect.Value, mappings map[string]string) error {
+func anonymizeAddressUnion(value reflect.Value, mappings map[string]string, seed int64) error {
 	if !isAddressUnion(value.Type().Elem()) || !value.Elem().CanAddr() {
 		return nil
 	}
@@ -124,16 +167,16 @@ func anonymizeAddressUnion(value reflect.Value, mappings map[string]string) erro
 	// record; the address is only mocked when it could actually be read.
 	address, err := getter.GetAddress()
 	if err == nil && address != "" {
-		return setMockedAddress(value, union, address, mappings)
+		return setMockedAddress(value, union, address, mappings, seed)
 	}
 	return nil
 }
 
-func setMockedAddress(value reflect.Value, union any, address string, mappings map[string]string) error {
+func setMockedAddress(value reflect.Value, union any, address string, mappings map[string]string, seed int64) error {
 	mockAddress, ok := mappings[address]
 	if !ok {
 		var err error
-		mockAddress, err = mockAccount(address)
+		mockAddress, err = mockAccount(address, seed)
 		if err != nil {
 			return err
 		}
@@ -150,9 +193,10 @@ func setMockedAddress(value reflect.Value, union any, address string, mappings m
 	return setter.SetAddress(mockAddress)
 }
 
-func mockAccount(address string) (string, error) {
-	seed := sha256.Sum256([]byte("stellar-focus-masked-account:" + address))
-	mock, err := strkey.Encode(strkey.VersionByteAccountID, seed[:])
+func mockAccount(address string, seed int64) (string, error) {
+	input := fmt.Sprintf("stellar-focus-masked-account:%d:%s", seed, address)
+	digest := sha256.Sum256([]byte(input))
+	mock, err := strkey.Encode(strkey.VersionByteAccountID, digest[:])
 	if err != nil {
 		return "", fmt.Errorf("encoding mock account: %w", err)
 	}

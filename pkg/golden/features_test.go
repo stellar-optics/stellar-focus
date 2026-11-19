@@ -1,11 +1,14 @@
 package golden_test
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -200,11 +203,12 @@ func TestRunExecutesOneAssertionPerFixture(t *testing.T) {
 	}
 }
 
-func TestExportFuzzSeedsWritesGoCorpusFiles(t *testing.T) {
+func TestExportToFuzzCorpusWritesDeterministicGoSeedFiles(t *testing.T) {
 	t.Parallel()
 
 	fixtureDir := t.TempDir()
 	corpusDir := filepath.Join(t.TempDir(), "testdata", "fuzz", "FuzzEnvelope")
+	payloads := make(map[string][]byte)
 	for _, name := range []string{"z", filepath.Join("nested", "a")} {
 		fixture, err := golden.Build(buildEnvelope(t, int64(len(name))), "TransactionEnvelope", "", nil)
 		if err != nil {
@@ -213,23 +217,36 @@ func TestExportFuzzSeedsWritesGoCorpusFiles(t *testing.T) {
 		if err := golden.Save(filepath.Join(fixtureDir, name+".golden.json"), fixture); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := golden.ExportFuzzSeeds(fixtureDir, corpusDir); err != nil {
-		t.Fatalf("ExportFuzzSeeds() error = %v", err)
-	}
-	for index, name := range []string{"nested/a", "z"} {
-		fixture, err := golden.Load(filepath.Join(fixtureDir, name+".golden.json"))
+		raw, err := base64.StdEncoding.DecodeString(fixture.XDR)
 		if err != nil {
 			t.Fatal(err)
 		}
-		path := filepath.Join(corpusDir, fmt.Sprintf("seed_%06d", index))
+		payloads[name] = raw
+	}
+
+	count, err := golden.ExportToFuzzCorpus(fixtureDir, corpusDir)
+	if err != nil {
+		t.Fatalf("ExportToFuzzCorpus() error = %v", err)
+	}
+	if count != len(payloads) {
+		t.Fatalf("ExportToFuzzCorpus() wrote %d seeds, want %d", count, len(payloads))
+	}
+
+	for _, raw := range payloads {
+		sum := sha256.Sum256(raw)
+		path := filepath.Join(corpusDir, hex.EncodeToString(sum[:]))
 		data, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("reading fuzz seed %s: %v", path, err)
 		}
-		want := "go test fuzz v1\nstring(" + fmt.Sprintf("%q", fixture.XDR) + ")\n"
+		want := "go test fuzz v1\n[]byte(" + strconv.Quote(string(raw)) + ")\n"
 		if string(data) != want {
 			t.Errorf("seed %s = %q, want %q", path, data, want)
 		}
+	}
+
+	// A second export is idempotent: the same payloads produce the same names.
+	if count, err := golden.ExportToFuzzCorpus(fixtureDir, corpusDir); err != nil || count != len(payloads) {
+		t.Fatalf("second ExportToFuzzCorpus() = %d, %v; want %d, nil", count, err, len(payloads))
 	}
 }
