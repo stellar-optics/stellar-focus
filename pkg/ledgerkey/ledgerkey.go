@@ -5,6 +5,20 @@
 // in nested union arms and pointers for each entry kind. These helpers take
 // the values a test already has — an address, an asset, a contract id — and
 // return the canonical key string.
+//
+// ConfigSetting covers the network's upgradeable values, the ConfigSettingEntry
+// records a protocol upgrade writes: a cost model, the state archival
+// parameters, the eviction cursor. The key names the setting by its
+// ConfigSettingID alone, because the id is what identifies the entry:
+//
+//	key := ledgerkey.ConfigSetting(xdr.ConfigSettingIdConfigSettingStateArchival)
+//
+// The state-eviction cursor is one of those settings rather than an entry of
+// its own, so EvictionIterator is the shortcut for its key:
+//
+//	cursor := ledgerkey.EvictionIterator()
+//
+// Both return base64 XDR, ready for capture.Source or AssertLedgerKeyEqual.
 package ledgerkey
 
 import (
@@ -90,6 +104,42 @@ func ContractCode(hash [32]byte) (string, error) {
 		return "", fmt.Errorf("build contract code ledger key: %w", err)
 	}
 	return encode(key)
+}
+
+// ConfigSetting returns the LedgerKey for the network configuration setting
+// identified by settingID, as base64 XDR.
+//
+// A configuration setting is the entry a protocol upgrade writes to change a
+// network-wide value, so a test that exercises an upgrade — or reads back what
+// the upgrade left — names the setting by its id and no other field.
+//
+// Every id in the ConfigSettingID enum builds a key. An id the enum does not
+// define is not a setting the protocol can hold, so there is no entry to
+// address and the builder returns the empty string; a caller that has an id of
+// unknown provenance can check for it with ValidEnum first.
+func ConfigSetting(settingID xdr.ConfigSettingId) string {
+	key := xdr.LedgerKey{
+		Type:          xdr.LedgerEntryTypeConfigSetting,
+		ConfigSetting: &xdr.LedgerKeyConfigSetting{ConfigSettingId: settingID},
+	}
+	encoded, err := encode(key)
+	if err != nil {
+		// The only key that does not encode is one whose id falls outside the
+		// enum, which this builder's signature has no error to report.
+		return ""
+	}
+	return encoded
+}
+
+// EvictionIterator returns the LedgerKey for the state-eviction cursor, as
+// base64 XDR.
+//
+// The cursor is not an entry of its own: the protocol keeps an
+// xdr.EvictionIterator — the bucket list level, bucket and offset where the
+// eviction scan stopped — in the CONFIG_SETTING_EVICTION_ITERATOR setting. Its
+// key is that setting's ConfigSetting key, which is what this returns.
+func EvictionIterator() string {
+	return ConfigSetting(xdr.ConfigSettingIdConfigSettingEvictionIterator)
 }
 
 // contractAddress decodes a strkey contract id into the ScAddress a contract
