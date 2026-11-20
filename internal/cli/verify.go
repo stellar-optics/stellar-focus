@@ -540,3 +540,77 @@ func writeVerifyReport(w io.Writer, report *VerifyReport) error {
 	}
 	return nil
 }
+
+// newLintCmd builds the command that checks fixtures for corruption.
+//
+// The check is static: no network, no chain, no test run. A fixture that
+// was hand-edited, or merged badly, should be caught while it is being
+// written rather than when a test fails weeks later.
+func newLintCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "lint [paths...]",
+		Short: "Check golden fixtures for corruption",
+		Long: `Check every fixture for the problems that would otherwise surface only
+when a test fails.
+
+The checks are static: nothing is fetched, nothing is run and no test is
+executed. A fixture is checked for valid JSON, for fields a fixture has and
+no others, for the format this version reads, for an XDR that is valid
+base64 and decodes as the type the fixture claims, and for a capture
+timestamp that is RFC3339.
+
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are checked too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is checked.
+
+Exit status is 0 when every fixture is clean and 1 when at least one has a
+problem, so the command can be a step in CI.`,
+		Example: `  focus lint testdata/
+  focus lint testdata/envelope.golden.json
+  focus lint 'testdata/**/*.golden.json'`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{defaultVerifyDir}
+			}
+
+			paths, err := collectFixtures(args)
+			if err != nil {
+				return failureErrorf("%v", err)
+			}
+			if len(paths) == 0 {
+				return failureErrorf("no fixture files found in %s", strings.Join(args, ", "))
+			}
+
+			var clean, broken, problems int
+			for _, path := range paths {
+				found := golden.Lint(path)
+				if len(found) == 0 {
+					fmt.Fprintf(stdout, "%-40s ok\n", path)
+					clean++
+					continue
+				}
+				for _, problem := range found {
+					fmt.Fprintf(stderr, "%-40s %v\n", path, problem)
+					problems++
+				}
+				broken++
+			}
+
+			fmt.Fprintf(stdout, "\n%d checked: %d clean", len(paths), clean)
+			if broken > 0 {
+				fmt.Fprintf(stdout, ", %d with problems", broken)
+			}
+			fmt.Fprintln(stdout)
+
+			if problems > 0 {
+				return failureErrorf("%d problem(s) in %d fixture(s)", problems, broken)
+			}
+			return nil
+		},
+	}
+}
