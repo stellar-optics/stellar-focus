@@ -14,7 +14,6 @@ package cli
 // the directories to leave out.
 
 import (
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -37,9 +36,6 @@ var fixtureSuffixes = []string{
 	golden.Text.DefaultSuffix(),
 	".golden.yml",
 }
-
-// ignoreFileName is the file listing the paths a scan should skip.
-const ignoreFileName = ".focusignore"
 
 // collectFixtures expands files, directories and patterns into the list of
 // fixture paths to check.
@@ -80,7 +76,7 @@ func collectArg(arg string) ([]string, error) {
 // scratch, never fixtures. The .focusignore rules are applied on top, so a
 // suite can exclude a directory of benchmarks or throwaway captures.
 func walkFixtures(dir string) ([]string, error) {
-	ignores, err := loadIgnores(dir)
+	ignores, err := golden.LoadIgnore(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -94,12 +90,12 @@ func walkFixtures(dir string) ([]string, error) {
 			if path == dir {
 				return nil
 			}
-			if isHidden(entry.Name()) || ignores.matches(path) {
+			if isHidden(entry.Name()) || ignores.Matches(path) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !isFixtureName(entry.Name()) || ignores.matches(path) {
+		if !isFixtureName(entry.Name()) || ignores.Matches(path) {
 			return nil
 		}
 		out = append(out, path)
@@ -131,7 +127,7 @@ func globFixtures(pattern string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("scanning %s: %w", pattern, err)
 	}
-	ignores, err := loadIgnores(base)
+	ignores, err := golden.LoadIgnore(base)
 	if err != nil {
 		return nil, err
 	}
@@ -145,12 +141,12 @@ func globFixtures(pattern string) ([]string, error) {
 			if path == base {
 				return nil
 			}
-			if isHidden(entry.Name()) || ignores.matches(path) {
+			if isHidden(entry.Name()) || ignores.Matches(path) {
 				return fs.SkipDir
 			}
 			return nil
 		}
-		if !isFixtureName(entry.Name()) || ignores.matches(path) {
+		if !isFixtureName(entry.Name()) || ignores.Matches(path) {
 			return nil
 		}
 		rel, relErr := filepath.Rel(base, path)
@@ -309,124 +305,4 @@ func characterClass(pattern string) (string, int, bool) {
 		class = "[^" + class[2:]
 	}
 	return class, i + 1, true
-}
-
-// ignores are the paths a scan skips.
-type ignores struct {
-	rules []ignoreRule
-}
-
-// ignoreRule is one line of a .focusignore file.
-type ignoreRule struct {
-	// base is the directory the rule is relative to.
-	base string
-	// pattern is the rule as written.
-	pattern string
-	// matcher, when set, matches a path relative to base.
-	matcher func(string) bool
-}
-
-// loadIgnores reads the .focusignore files that apply to a scan.
-//
-// The file in the directory being scanned applies to that directory; the
-// file in the working directory applies to every scan, because a project
-// usually keeps one at its root.
-func loadIgnores(dir string) (*ignores, error) {
-	out := &ignores{}
-
-	working, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("reading the working directory: %w", err)
-	}
-	if err := out.add(working); err != nil {
-		return nil, err
-	}
-	if dir != working {
-		if err := out.add(dir); err != nil {
-			return nil, err
-		}
-	}
-	return out, nil
-}
-
-// add reads the .focusignore file in a directory, if it has one.
-//
-// A missing file is not an error: most projects have no ignore file at all.
-func (i *ignores) add(dir string) error {
-	path := filepath.Join(dir, ignoreFileName)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("reading %s: %w", path, err)
-	}
-
-	for _, line := range strings.Split(string(data), "\n") {
-		rule := strings.TrimSpace(line)
-		if rule == "" || strings.HasPrefix(rule, "#") {
-			continue
-		}
-		rule = strings.TrimSuffix(rule, "/")
-
-		r := ignoreRule{base: dir, pattern: rule}
-		if hasGlobMeta(rule) {
-			matcher, err := globMatcher(rule)
-			if err != nil {
-				return fmt.Errorf("reading %s: %w", path, err)
-			}
-			r.matcher = matcher
-		}
-		i.rules = append(i.rules, r)
-	}
-	return nil
-}
-
-// matches reports whether a path is excluded by a rule.
-//
-// A rule without wildcards names a path, and excludes everything beneath it;
-// a rule with wildcards is matched against the path relative to the
-// .focusignore file that carried it.
-func (i *ignores) matches(path string) bool {
-	for _, rule := range i.rules {
-		rel, err := relativeTo(rule.base, path)
-		if err != nil {
-			continue
-		}
-
-		if rule.matcher != nil {
-			if rule.matcher(rel) {
-				return true
-			}
-			continue
-		}
-		if rel == rule.pattern || strings.HasPrefix(rel, rule.pattern+"/") {
-			return true
-		}
-	}
-	return false
-}
-
-// relativeTo returns a path relative to a base, both resolved to absolute
-// paths first.
-//
-// A scan is often given a relative path while the directory holding the
-// .focusignore rules is absolute, and the two have to be brought onto the
-// same footing before either can be subtracted from the other.
-func relativeTo(base, path string) (string, error) {
-	absBase, err := filepath.Abs(base)
-	if err != nil {
-		return "", err
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-
-	rel, err := filepath.Rel(absBase, absPath)
-	if err != nil {
-		return "", err
-	}
-	return filepath.ToSlash(rel), nil
 }
