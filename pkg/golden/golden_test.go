@@ -508,6 +508,64 @@ func TestAssertAllReportsAMissingFixturePerCase(t *testing.T) {
 	}
 }
 
+// TestAssertAllSkipsFocusignoredFixtures checks that a fixture still being
+// worked on can sit beside the real ones without being verified: the fixture
+// root's .focusignore lists it, and the table leaves it out.
+func TestAssertAllSkipsFocusignoredFixtures(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, filepath.Join(dir, "records"), "payment_draft", buildEnvelope(t, 100))
+	writeGolden(t, filepath.Join(dir, "experimental"), "payment_v3", buildEnvelope(t, 100))
+
+	// A literal rule, a wildcard that has to match a name at any depth, and a
+	// path rule reaching into a directory.
+	ignores := "# fixtures not ready for CI\n" +
+		"payment_v2.golden.json\n" +
+		"*_draft.golden.json\n" +
+		"experimental/**\n"
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"), []byte(ignores), 0o600); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	// Every ignored fixture would fail if it were checked, so a table that
+	// passes is a table that left them out.
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+	if !g.AssertAll([]golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100)},
+		{Name: "payment_v2", Value: buildEnvelope(t, 900)},
+		{Name: "records/payment_draft", Value: buildEnvelope(t, 900)},
+		{Name: "experimental/payment_v3", Value: buildEnvelope(t, 900)},
+	}) {
+		t.Fatalf("AssertAll() checked a fixture listed in .focusignore:\n%s", tb.Output())
+	}
+	if out := tb.Output(); strings.Contains(out, "payment_v2") ||
+		strings.Contains(out, "payment_draft") || strings.Contains(out, "payment_v3") {
+		t.Errorf("an ignored fixture was checked:\n%s", out)
+	}
+
+	// The fixtures that are not ignored are still verified, and the ignored
+	// ones do not even take up a place in the table's summary.
+	tb = faketb.New()
+	g = golden.New(tb, golden.WithDir(dir))
+	if g.AssertAll([]golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 200)},
+		{Name: "experimental/payment_v3", Value: buildEnvelope(t, 900)},
+	}) {
+		t.Fatal("AssertAll() passed with a drifted fixture that is not ignored")
+	}
+	out := tb.Output()
+	if !strings.Contains(out, "[1/1] payment_v1: DRIFTED") {
+		t.Errorf("the non-ignored fixture was not verified on its own:\n%s", out)
+	}
+	if strings.Contains(out, "payment_v3") {
+		t.Errorf("the ignored case was still counted in the table:\n%s", out)
+	}
+}
+
 // TestAssertAllOnAnEmptyTable checks that an empty table is a pass, not a
 // failure: there is nothing to be wrong with.
 func TestAssertAllOnAnEmptyTable(t *testing.T) {

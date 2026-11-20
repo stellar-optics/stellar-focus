@@ -380,8 +380,24 @@ type Case struct {
 //
 // and each failure is repeated with the entry's index, name and description
 // attached, so the diff that follows says which entry it belongs to.
+//
+// A case whose fixture the .focusignore file at the fixture root excludes is
+// left out of the table entirely, in update mode as well as when comparing: a
+// draft that is not ready to be verified should neither fail the suite nor be
+// re-recorded by -focus.update.
 func (g *Golden) AssertAll(cases []Case) bool {
 	g.t.Helper()
+
+	ignores, err := LoadIgnore(g.dir)
+	if err != nil {
+		g.t.Errorf("golden: %v", err)
+		return false
+	}
+	cases, skipped := g.unignored(cases, ignores)
+	if skipped > 0 {
+		g.logf("golden: %d of %d case(s) skipped by %s",
+			skipped, skipped+len(cases), IgnoreFileName)
+	}
 
 	results := make([]caseResult, 0, len(cases))
 	failed := 0
@@ -406,6 +422,21 @@ func (g *Golden) AssertAll(cases []Case) bool {
 		}
 	}
 	return false
+}
+
+// unignored drops the cases whose fixture .focusignore excludes, and reports
+// how many were dropped.
+func (g *Golden) unignored(cases []Case, ignores *Ignore) ([]Case, int) {
+	kept := make([]Case, 0, len(cases))
+	skipped := 0
+	for _, c := range cases {
+		if ignores.Matches(g.Path(c.Name)) {
+			skipped++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, skipped
 }
 
 // runCase runs one case of a table and collects what it reported.
