@@ -34,6 +34,8 @@ import (
 // needs: the name that becomes the test function, and the path the generated
 // file should load the fixture from. Keeping them together means the call site
 // does not have to repeat the fixture's contents in its own arguments.
+//
+//nolint:revive // The public name is fixed by issue #240.
 type CaptureFixture struct {
 	// Name identifies the fixture and becomes TestReplay_<Name>. When empty it
 	// is derived from FixturePath, then from the fixture type.

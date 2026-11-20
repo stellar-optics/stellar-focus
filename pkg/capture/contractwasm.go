@@ -235,6 +235,8 @@ type WASMCapture struct {
 
 // CaptureContractWASM fetches a deployed contract's WASM, verifies its code
 // hash, extracts its specification and returns a capture ready to save.
+//
+//nolint:revive // The public name is fixed by issue #239.
 func CaptureContractWASM(ctx context.Context, src ContractWASMSource, contractID string) (*WASMCapture, error) {
 	return captureContractWASM(ctx, src, contractID, nil)
 }
@@ -245,6 +247,8 @@ func CaptureContractWASM(ctx context.Context, src ContractWASMSource, contractID
 // It is for callers that have already fetched the contract instance. The code
 // hash stored on the code entry is always checked; this adds the second check
 // that the bytes are the ones the instance points at.
+//
+//nolint:revive // The public name is fixed by issue #239.
 func CaptureContractWASMWithExecutable(
 	ctx context.Context,
 	src ContractWASMSource,

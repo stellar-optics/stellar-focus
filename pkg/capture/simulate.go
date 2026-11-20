@@ -59,6 +59,8 @@ type Simulation struct {
 
 // CaptureSimulation is the explicit name for a recorded simulation. The two
 // names are interchangeable so existing callers can keep using Simulation.
+//
+//nolint:revive // The public name is fixed by issue #238.
 type CaptureSimulation = Simulation
 
 // AuthTree is the authorization entries recorded for one host function result.

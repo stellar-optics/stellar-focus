@@ -224,6 +224,8 @@ func MutateRecord(record Record, seed int64, mutationType MutationType) (Record,
 //
 // It is the whole capture workflow in one call, returning the capture and the
 // two paths written so a caller can report them.
+//
+//nolint:revive // The public name is fixed by issue #239.
 func CaptureWASM(ctx context.Context, src ContractWASMSource, contractID, dir string) (*WASMCapture, string, string, error) {
 	capture, err := CaptureContractWASM(ctx, src, contractID)
 	if err != nil {
