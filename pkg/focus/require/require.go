@@ -673,3 +673,8 @@ func FailureSnapshot(t focus.TB, name string, fn func(focus.TB), opts ...focus.S
 	t.Helper()
 	focus.AssertFailureSnapshot(fatal(t), name, fn, opts...)
 }
+
+// AssertLedgerHeader is focus.AssertLedgerHeader, stopping the test on failure.
+func AssertLedgerHeader(t focus.TB, got focus.Value, wantSeq uint32, wantBaseFee uint32, wantBaseReserve uint32) {
+	focus.AssertLedgerHeader(fatal(t), got, wantSeq, wantBaseFee, wantBaseReserve)
+}

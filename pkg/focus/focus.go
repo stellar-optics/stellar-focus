@@ -232,3 +232,32 @@ func LensDecodeForBenchmark(payload string) (*lens.Value, error) {
 func LensDiffForBenchmark(want, got *lens.Value) (*lens.DiffResult, error) {
 	return lens.Diff(want, got)
 }
+
+// AssertLedgerHeader checks the ledger header fields captured from a fixture.
+// It verifies that the ledger's sequence number, base fee, and base reserve
+// match the expected values, reporting differences in stroops and XLM.
+func AssertLedgerHeader(t TB, got Value, wantSeq uint32, wantBaseFee uint32, wantBaseReserve uint32) bool {
+	t.Helper()
+
+	h, ok := resolveLedgerHeader(t, "AssertLedgerHeader", got)
+	if !ok {
+		return false
+	}
+
+	seqMatch := uint32(h.LedgerSeq) == wantSeq
+	if !seqMatch {
+		t.Errorf("AssertLedgerHeader: ledger sequence is %d, want %d", h.LedgerSeq, wantSeq)
+	}
+
+	baseFeeMatch := uint32(h.BaseFee) == wantBaseFee
+	if !baseFeeMatch {
+		t.Errorf("AssertLedgerHeader: base fee is %s, want %s", stroops(int64(h.BaseFee)), stroops(int64(wantBaseFee)))
+	}
+
+	baseReserveMatch := uint32(h.BaseReserve) == wantBaseReserve
+	if !baseReserveMatch {
+		t.Errorf("AssertLedgerHeader: base reserve is %s, want %s", stroops(int64(h.BaseReserve)), stroops(int64(wantBaseReserve)))
+	}
+
+	return seqMatch && baseFeeMatch && baseReserveMatch
+}

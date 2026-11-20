@@ -2,7 +2,6 @@ package capture
 
 // Deterministic generation of standalone replay tests from captured
 // fixtures.
-//
 // A capture records a payload as it was on the chain at capture time. The
 // generator turns that record into a _test.go file which, on every later
 // run, re-checks the fixture file against the payload that was captured —
@@ -43,7 +42,6 @@ type CodegenOptions struct {
 }
 
 // GenerateTest renders a standalone replay test for one captured fixture.
-//
 // The returned source is gofmt-formatted and ready to write to a _test.go
 // file next to the fixtures it references.
 func GenerateTest(name string, f *golden.Fixture, opts CodegenOptions) ([]byte, error) {
@@ -71,8 +69,7 @@ func GenerateTest(name string, f *golden.Fixture, opts CodegenOptions) ([]byte, 
 	ident := exportIdent(name)
 	if opts.FuncName != "" {
 		if !token.IsIdentifier(opts.FuncName) {
-			return nil, fmt.Errorf("generating replay test for %q: %q is not a valid Go identifier",
-				name, opts.FuncName)
+			return nil, fmt.Errorf("generating replay test for %q: %q is not a valid Go identifier", name, opts.FuncName)
 		}
 		ident = opts.FuncName
 	}
@@ -103,10 +100,17 @@ func GenerateTest(name string, f *golden.Fixture, opts CodegenOptions) ([]byte, 
 	fmt.Fprintf(&b, "func %s(t *testing.T) {\n", ident)
 	fmt.Fprintf(&b, "\tf, err := golden.Load(%s)\n", quote(filepath.ToSlash(opts.FixturePath)))
 	fmt.Fprintf(&b, "\tif err != nil {\n")
-	fmt.Fprintf(&b, "\t\tt.Fatalf(\"loading fixture: %%v\", err)\n")
+	fmt.Fprintf(&b, "\t\ttt.Fatalf(\"loading fixture: %%v\", err)\n")
 	fmt.Fprintf(&b, "\t}\n")
 	fmt.Fprintf(&b, "\tfocus.AssertEqualAs(t, %s, %s, f.XDR)\n", quote(f.Type), constName)
-	fmt.Fprintf(&b, "}\n")
+
+	// If this fixture is a LedgerHeaderHistoryEntry, also assert on the header fields.
+	if strings.EqualFold(f.Type, "LedgerHeaderHistoryEntry") {
+		fmt.Fprintf(&b, "\t// Check ledger header fields: sequence, base fee, base reserve.\n")
+		fmt.Fprintf(&b, "\tfocus.AssertLedgerHeader(t, %s, %d, %d, %d)\n", constName, 0, 0, 0)
+	}
+
+	fmt.Fprintf(&b, "}\n\n")
 
 	src, err := format.Source([]byte(b.String()))
 	if err != nil {
@@ -116,7 +120,6 @@ func GenerateTest(name string, f *golden.Fixture, opts CodegenOptions) ([]byte, 
 }
 
 // GenerateTestFile loads a fixture and writes its replay test to outPath.
-//
 // The generated file references the fixture by its own path relative to the
 // generated file's directory, so moving or renaming the pair must move or
 // rename both — which is exactly what regenerating does.

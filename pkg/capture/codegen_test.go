@@ -254,3 +254,147 @@ func TestGenerateTestFileReportsAMissingFixture(t *testing.T) {
 		t.Fatal("missing fixture generated a test")
 	}
 }
+
+// TestGenerateTestGeneratesLedgerHeaderAssertion generates a replay test for
+// a LedgerHeaderHistoryEntry fixture that emits focus.AssertLedgerHeader.
+func TestGenerateTestGeneratesLedgerHeaderAssertion(t *testing.T) {
+	t.Parallel()
+
+	// Build a ledger header fixture.
+	f := &golden.Fixture{
+		Type:        "LedgerHeaderHistoryEntry",
+		XDR:         "AAAAAH5vbWl0aWNyYmVscy1obWFjAAAEW19zdG9yZWRGaWxlAAABcHJvY2Vzc29yS2V5AAABMQAAAAIHOmFtYXAQMAE=",
+		Description: "ledger header test fixture",
+	}
+
+	src, err := capture.GenerateTest("ledger_header", f, capture.CodegenOptions{
+		FixturePath: "testdata/ledger_header.golden.json",
+	})
+	if err != nil {
+		t.Fatalf("GenerateTest: %v", err)
+	}
+
+	out := string(src)
+
+	// Verify the generated test contains the expected structures.
+	checks := []struct {
+		want string
+	}{
+		{"package fixtures_test"},
+		{`golden.Load("testdata/ledger_header.golden.json")`},
+		{`focus.AssertEqualAs(t, "LedgerHeaderHistoryEntry"`},
+		{`func TestLedgerHeaderReplay(t *testing.T)`},
+		{`focus.AssertLedgerHeader(t,`},
+	}
+
+	for _, tc := range checks {
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("generated test is missing %q:\\n%s", tc.want, out)
+		}
+	}
+}
+
+// TestGenerateTestIsDeterministicWithLedgerHeader verifies deterministic
+// output when generating the same ledger header fixture twice.
+func TestGenerateTestIsDeterministicWithLedgerHeader(t *testing.T) {
+	t.Parallel()
+
+	// Build a ledger header fixture.
+	f := &golden.Fixture{
+		Type:        "LedgerHeaderHistoryEntry",
+		XDR:         "AAAAAH5vbWl0aWNyYmVscy1obWFjAAAEW19zdG9yZWRGaWxlAAABcHJvY2Vzc29yS2V5AAABMQAAAAIHOmFtYXAQMAE=",
+		Description: "ledger header test fixture",
+	}
+
+	opts := capture.CodegenOptions{FixturePath: "testdata/ledger_header.golden.json"}
+	first, err := capture.GenerateTest("ledger_header", f, opts)
+	if err != nil {
+		t.Fatalf("GenerateTest: %v", err)
+	}
+	second, err := capture.GenerateTest("ledger_header", f, opts)
+	if err != nil {
+		t.Fatalf("GenerateTest (second run): %v", err)
+	}
+	if string(first) != string(second) {
+		t.Errorf("generation is not deterministic:\\n--- first ---\\n%s\\n--- second ---\\n%s", first, second)
+	}
+}
+
+// TestGenerateTestHonoursOptionsWithLedgerHeader verifies that the
+// CodegenOptions are honoured when generating a ledger header test.
+func TestGenerateTestHonoursOptionsWithLedgerHeader(t *testing.T) {
+	t.Parallel()
+
+	// Build a ledger header fixture.
+	f := &golden.Fixture{
+		Type:        "LedgerHeaderHistoryEntry",
+		XDR:         "AAAAAH5vbWl0aWNyYmVscy1obWFjAAAEW19zdG9yZWRGaWxlAAABcHJvY2Vzc29yS2V5AAABMQAAAAIHOmFtYXAQMAE=",
+		Description: "ledger header test fixture",
+	}
+
+	src, err := capture.GenerateTest("ledger_header", f, capture.CodegenOptions{
+		Package:     "myfixtures",
+		FuncName:    "TestMyLedgerHeader",
+		FixturePath: "../fixtures/ledger_header.golden.json",
+	})
+	if err != nil {
+		t.Fatalf("GenerateTest: %v", err)
+	}
+
+	out := string(src)
+	if !strings.Contains(out, "package myfixtures") {
+		t.Errorf("package clause not honoured:\\n%s", out)
+	}
+	if !strings.Contains(out, "func TestMyLedgerHeader(") {
+		t.Errorf("function name not honoured:\\n%s", out)
+	}
+	if !strings.Contains(out, "focus.AssertLedgerHeader(t,") {
+		t.Errorf("AssertLedgerHeader not present with custom options:\\n%s", out)
+	}
+}
+
+// TestGenerateTestRejectsLedgerHeaderBadInput tests that bad inputs are
+// rejected even for LedgerHeaderHistoryEntry type.
+func TestGenerateTestRejectsLedgerHeaderBadInput(t *testing.T) {
+	t.Parallel()
+
+	f := &golden.Fixture{}
+
+	opts := capture.CodegenOptions{FixturePath: "x.golden.json"}
+
+	for _, tc := range []struct {
+		name string
+		fn   func() error
+	}{
+		{"empty name", func() error {
+			_, err := capture.GenerateTest("  ", f, opts)
+			return err
+		}},
+		{"nil fixture", func() error {
+			_, err := capture.GenerateTest("envelope", nil, opts)
+			return err
+		}},
+		{"empty XDR", func() error {
+			_, err := capture.GenerateTest("envelope", &golden.Fixture{
+				Type: "LedgerHeaderHistoryEntry",
+				XDR:  "",
+			}, opts)
+			return err
+		}},
+		{"empty type", func() error {
+			_, err := capture.GenerateTest("envelope", &golden.Fixture{
+				Type: "",
+				XDR:  "AAAA",
+			}, opts)
+			return err
+		}},
+		{"missing fixture path", func() error {
+			_, err := capture.GenerateTest("envelope", f, capture.CodegenOptions{})
+			return err
+		}},
+	} {
+		if err := tc.fn(); err == nil {
+			t.Errorf("%s: generation succeeded", tc.name)
+		}
+	}
+}
