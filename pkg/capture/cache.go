@@ -117,7 +117,10 @@ func (c *Cache) Get(key string) ([]Record, bool) {
 	// rewrite the timestamp must not turn a valid cache hit into a miss;
 	// the cache is a speed-up, not a source of truth.
 	entry.LastAccessedAt = now.UTC().Format(time.RFC3339)
-	_ = c.writeEntry(key, entry)
+	if err := c.writeEntry(key, entry); err != nil {
+		// Best effort: the records returned below are still valid.
+		return entry.Records, true
+	}
 
 	return entry.Records, true
 }
