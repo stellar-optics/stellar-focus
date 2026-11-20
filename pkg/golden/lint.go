@@ -1,16 +1,23 @@
 package golden
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
+
+// secretKeyPattern matches a StrKey secret seed: an S followed by 55 more
+// base32 characters, the same shape capture.Sanitizer redacts. A fixture
+// carrying one was not sanitized before it was committed.
+var secretKeyPattern = regexp.MustCompile(`S[A-Z0-9]{55}`)
 
 // LintError is one problem found in a fixture file.
 //
@@ -79,7 +86,42 @@ func Lint(path string) []LintError {
 		return []LintError{{Message: fmt.Sprintf("reading the file: %v", err)}}
 	}
 
-	fixture, problems := parseForLint(path, raw)
+	var problems []LintError
+
+	// CRLF (or lone CR) line endings are a checkout artefact, not content:
+	// they make a fixture differ from byte to byte across platforms.
+	if idx := bytes.IndexByte(raw, '\r'); idx >= 0 {
+		line := 1
+		for i := 0; i < idx; i++ {
+			if raw[i] == '\n' {
+				line++
+			}
+		}
+		problems = append(problems, LintError{
+			Field:   "",
+			Message: "contains CRLF line endings",
+			Line:    line,
+		})
+	}
+
+	// A secret key that survived into a committed fixture is a leak, and a
+	// volatile value that was never masked.
+	if loc := secretKeyPattern.FindIndex(raw); loc != nil {
+		line := 1
+		for i := 0; i < loc[0]; i++ {
+			if raw[i] == '\n' {
+				line++
+			}
+		}
+		problems = append(problems, LintError{
+			Field:   "xdr",
+			Message: "contains an unmasked secret key (volatile token)",
+			Line:    line,
+		})
+	}
+
+	fixture, more := parseForLint(path, raw)
+	problems = append(problems, more...)
 	if fixture == nil {
 		return problems
 	}
