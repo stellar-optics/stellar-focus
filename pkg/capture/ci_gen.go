@@ -2,9 +2,90 @@ package capture
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// GeneratedReplayTest is one replay test produced by batch code generation.
+type GeneratedReplayTest struct {
+	// FixturePath is the fixture the test replays, as given.
+	FixturePath string
+	// OutPath is the file the generated test is written to.
+	OutPath string
+	// Source is the formatted Go source.
+	Source string
+}
+
+// GenerateReplayTestBatch renders replay tests for many captured fixtures.
+//
+// Every fixture is checked before any source is generated, so a bad entry
+// fails the batch rather than leaving half a directory of tests behind. The
+// fixture path written into each test is relative to outputDir, which is where
+// the generated files will live.
+func GenerateReplayTestBatch(fixtures []*CaptureFixture, outputDir string) ([]GeneratedReplayTest, error) {
+	if outputDir == "" {
+		return nil, fmt.Errorf("batch code generation: an output directory is required")
+	}
+
+	out := make([]GeneratedReplayTest, 0, len(fixtures))
+	for i, fixture := range fixtures {
+		if fixture == nil {
+			return nil, fmt.Errorf("batch code generation: fixture %d is nil", i)
+		}
+
+		fixturePath := fixture.FixturePath
+		if fixturePath == "" {
+			return nil, fmt.Errorf("batch code generation: fixture %d has no path", i)
+		}
+		rel, err := filepath.Rel(outputDir, fixturePath)
+		if err != nil {
+			return nil, fmt.Errorf("batch code generation: relating %s to %s: %w", fixturePath, outputDir, err)
+		}
+
+		generated := *fixture
+		generated.FixturePath = rel
+		source, err := GenerateReplayTest(&generated)
+		if err != nil {
+			return nil, fmt.Errorf("batch code generation for %s: %w", fixturePath, err)
+		}
+
+		name := generated.Name
+		if name == "" {
+			name = fixtureNameFromPath(fixturePath)
+		}
+		outPath := filepath.Join(outputDir, name+"_test.go")
+		out = append(out, GeneratedReplayTest{
+			FixturePath: fixturePath,
+			OutPath:     outPath,
+			Source:      source,
+		})
+	}
+	return out, nil
+}
+
+// WriteReplayTests generates replay tests for many fixtures and writes them to
+// outputDir, creating the directory if needed. It returns the paths written, in
+// the same order as the fixtures.
+func WriteReplayTests(fixtures []*CaptureFixture, outputDir string) ([]string, error) {
+	generated, err := GenerateReplayTestBatch(fixtures, outputDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating %s: %w", outputDir, err)
+	}
+
+	paths := make([]string, len(generated))
+	for i, test := range generated {
+		if err := os.WriteFile(test.OutPath, []byte(test.Source), 0o644); err != nil {
+			return nil, fmt.Errorf("writing %s: %w", test.OutPath, err)
+		}
+		paths[i] = test.OutPath
+	}
+	return paths, nil
+}
 
 // CIWorkflowOptions configures a generated GitHub Actions verification job.
 type CIWorkflowOptions struct {

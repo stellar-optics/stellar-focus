@@ -5,7 +5,244 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
+
+// MutationType names one corruption the byte-level mutator can apply.
+//
+// The mutator works on raw XDR bytes rather than on a decoded value, because
+// the point is to produce the malformed input a parser must survive. The four
+// shapes cover the cases that actually break a decoder: a single bit that
+// changes a union discriminant, a record cut short, a field overwritten, and
+// an operation duplicated where the protocol forbids it.
+type MutationType string
+
+const (
+	// BitFlip flips one bit at a seeded offset.
+	BitFlip MutationType = "bit_flip"
+	// Truncate cuts the payload at a seeded offset, giving a short record.
+	Truncate MutationType = "truncate"
+	// RandomizeField overwrites a short run of bytes at a seeded offset.
+	RandomizeField MutationType = "randomize_field"
+	// DuplicateOp duplicates one operation of a transaction envelope. When
+	// the payload is not a transaction envelope it falls back to duplicating a
+	// short run of bytes, so the mutation still applies deterministically.
+	DuplicateOp MutationType = "duplicate_op"
+)
+
+// String makes a mutation type readable in a fixture name and a report.
+func (m MutationType) String() string { return string(m) }
+
+// MutationReport describes exactly what MutateXDR did.
+//
+// Offset and Length locate the corruption in the original payload. MutatedLength
+// differs from OriginalLength when the mutation changed the size — a truncation
+// or a duplicated operation — so a caller can tell a same-size edit from a
+// structural one without diffing the bytes itself.
+type MutationReport struct {
+	Type           MutationType `json:"type"`
+	Offset         int          `json:"offset"`
+	Length         int          `json:"length"`
+	OriginalLength int          `json:"originalLength"`
+	MutatedLength  int          `json:"mutatedLength"`
+	Applied        bool         `json:"applied"`
+	Description    string       `json:"description"`
+}
+
+// MutateXDR applies one deterministic mutation to a raw XDR payload.
+//
+// The same raw bytes, seed and mutation type always produce byte-identical
+// output, which is what makes a negative fixture reproducible without storing
+// the mutant itself. raw is never modified: the returned slice is always a
+// fresh copy.
+//
+// The function has no error return on purpose: a mutator that refuses input is
+// less useful than one that reports what it managed to do. An empty payload or
+// an unrecognised mutation type leaves the bytes unchanged and is visible in
+// the report's Applied and Description fields.
+func MutateXDR(raw []byte, seed int64, mutationType MutationType) ([]byte, MutationReport) {
+	out := append([]byte(nil), raw...)
+	report := MutationReport{
+		Type:           mutationType,
+		Offset:         -1,
+		OriginalLength: len(raw),
+		MutatedLength:  len(raw),
+	}
+
+	if len(raw) == 0 {
+		report.Description = "nothing to mutate: the payload is empty"
+		return out, report
+	}
+
+	stream := mutationStream(seed, mutationType)
+	switch mutationType {
+	case BitFlip:
+		offset := int(binary.BigEndian.Uint64(stream[0:8]) % uint64(len(out)))
+		bit := uint(stream[8] % 8)
+		out[offset] ^= 1 << bit
+		report.Offset = offset
+		report.Length = 1
+		report.Applied = true
+		report.Description = fmt.Sprintf("flipped bit %d at byte offset %d", bit, offset)
+
+	case Truncate:
+		n := int(binary.BigEndian.Uint64(stream[0:8]) % uint64(len(out)))
+		out = out[:n]
+		report.Offset = n
+		report.Length = len(raw) - n
+		report.Applied = true
+		report.Description = fmt.Sprintf("truncated at byte offset %d (%d bytes removed)", n, len(raw)-n)
+
+	case RandomizeField:
+		offset := int(binary.BigEndian.Uint64(stream[0:8]) % uint64(len(out)))
+		remaining := len(out) - offset
+		maxLength := remaining
+		if maxLength > 8 {
+			maxLength = 8
+		}
+		length := 1 + int(uint64(stream[8])%uint64(maxLength))
+		for i := 0; i < length; i++ {
+			out[offset+i] = randomByte(stream, i)
+		}
+		report.Offset = offset
+		report.Length = length
+		report.Applied = true
+		report.Description = fmt.Sprintf("randomized %d byte(s) at byte offset %d", length, offset)
+
+	case DuplicateOp:
+		if mutated, index, ok := duplicateOperation(out, stream); ok {
+			offset := commonPrefix(out, mutated)
+			out = mutated
+			report.Offset = offset
+			report.Applied = true
+			report.Description = fmt.Sprintf("duplicated operation %d; payload diverges at byte offset %d", index, offset)
+		} else {
+			offset, length := duplicateByteRange(&out, stream)
+			report.Offset = offset
+			report.Length = length
+			report.Applied = true
+			report.Description = fmt.Sprintf("duplicated %d byte(s) at byte offset %d (payload is not a transaction envelope)", length, offset)
+		}
+
+	default:
+		report.Description = fmt.Sprintf("unknown mutation type %q; payload left unchanged", mutationType)
+		return out, report
+	}
+
+	report.MutatedLength = len(out)
+	return out, report
+}
+
+// mutationStream derives a deterministic byte stream from a seed and a
+// mutation type. Including the type means a BitFlip and a Truncate from the
+// same seed do not land on the same offset by accident.
+func mutationStream(seed int64, mutationType MutationType) [32]byte {
+	h := sha256.New()
+	seedBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(seedBytes, uint64(seed))
+	_, _ = h.Write(seedBytes)
+	_, _ = h.Write([]byte(mutationType))
+	sum := h.Sum(nil)
+	var stream [32]byte
+	copy(stream[:], sum)
+	return stream
+}
+
+// randomByte derives the i-th replacement byte without consuming shared
+// state, so a mutation's bytes depend only on the seed, the type and the
+// position within the field.
+func randomByte(stream [32]byte, i int) byte {
+	h := sha256.New()
+	_, _ = h.Write(stream[:])
+	_, _ = h.Write([]byte{byte(i)})
+	return h.Sum(nil)[0]
+}
+
+// duplicateOperation duplicates one operation of a transaction envelope and
+// re-encodes it. It reports the duplicated index so the report can name what
+// changed.
+func duplicateOperation(raw []byte, stream [32]byte) ([]byte, int, bool) {
+	var envelope xdr.TransactionEnvelope
+	if err := envelope.UnmarshalBinary(raw); err != nil {
+		return nil, 0, false
+	}
+
+	var operations *[]xdr.Operation
+	switch envelope.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if envelope.V1 == nil {
+			return nil, 0, false
+		}
+		operations = &envelope.V1.Tx.Operations
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		if envelope.V0 == nil {
+			return nil, 0, false
+		}
+		operations = &envelope.V0.Tx.Operations
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if envelope.FeeBump == nil || envelope.FeeBump.Tx.InnerTx.V1 == nil {
+			return nil, 0, false
+		}
+		operations = &envelope.FeeBump.Tx.InnerTx.V1.Tx.Operations
+	default:
+		return nil, 0, false
+	}
+
+	ops := *operations
+	if len(ops) == 0 {
+		return nil, 0, false
+	}
+	index := int(binary.BigEndian.Uint64(stream[0:8]) % uint64(len(ops)))
+
+	duplicated := make([]xdr.Operation, 0, len(ops)+1)
+	duplicated = append(duplicated, ops[:index+1]...)
+	duplicated = append(duplicated, ops[index])
+	duplicated = append(duplicated, ops[index+1:]...)
+	*operations = duplicated
+
+	mutated, err := envelope.MarshalBinary()
+	if err != nil {
+		return nil, 0, false
+	}
+	return mutated, index, true
+}
+
+// duplicateByteRange duplicates a seeded run of bytes, the fallback shape of
+// DuplicateOp for payloads that are not transaction envelopes.
+func duplicateByteRange(data *[]byte, stream [32]byte) (offset, length int) {
+	payload := *data
+	offset = int(binary.BigEndian.Uint64(stream[0:8]) % uint64(len(payload)))
+	remaining := len(payload) - offset
+	maxLength := remaining
+	if maxLength > 8 {
+		maxLength = 8
+	}
+	length = 1 + int(uint64(stream[8])%uint64(maxLength))
+
+	run := append([]byte(nil), payload[offset:offset+length]...)
+	out := make([]byte, 0, len(payload)+length)
+	out = append(out, payload[:offset+length]...)
+	out = append(out, run...)
+	out = append(out, payload[offset+length:]...)
+	*data = out
+	return offset + length, length
+}
+
+// commonPrefix returns the length of the longest shared prefix, which is the
+// first byte a structural mutation changed.
+func commonPrefix(a, b []byte) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
+}
 
 // Mutation is one corruption applied to captured bytes. The four shapes are
 // the ones a fixture parser meets most: a bit flip somewhere, a byte zeroed,

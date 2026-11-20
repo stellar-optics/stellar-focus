@@ -2,8 +2,14 @@ package capture
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
@@ -28,11 +34,159 @@ type SimulationSource interface {
 // preflight wants to know.
 var ErrSimulationFailed = errors.New("simulation failed")
 
+// SimulationFormat identifies the JSON layout written by Save.
+const SimulationFormat = "focus/simulation/v1"
+
 // Simulation is one captured simulateTransaction response.
+//
+// The full RPC response is kept, because the point of a simulation capture is
+// to replay it offline: the return value, diagnostic events, authorization
+// trees and resource footprint are all in there, and projecting them into a
+// smaller struct would lose the parts a later assertion needs. Network,
+// Endpoint and Request record the context that produced it.
 type Simulation struct {
+	// Format identifies the serialized layout.
+	Format string `json:"format,omitempty"`
+	// Network and Endpoint locate the source the simulation ran against.
+	Network  string `json:"network,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
+	// Request is the simulateTransaction request that was sent.
+	Request *protocol.SimulateTransactionRequest `json:"request,omitempty"`
 	// Resp is the RPC's own response, unmodified, including its error field
 	// when Simulate passed it through for inspection.
-	Resp *protocol.SimulateTransactionResponse
+	Resp *protocol.SimulateTransactionResponse `json:"response"`
+}
+
+// CaptureSimulation is the explicit name for a recorded simulation. The two
+// names are interchangeable so existing callers can keep using Simulation.
+type CaptureSimulation = Simulation
+
+// AuthTree is the authorization entries recorded for one host function result.
+//
+// The RPC returns one list per result, which is the authorization "tree" as it
+// appears on the wire: each entry is a base64 ContractAuth a replay can decode.
+type AuthTree struct {
+	Operation int      `json:"operation"`
+	Entries   []string `json:"entries"`
+}
+
+// AuthTrees returns the authorization trees recorded in the response, one per
+// host function result that carried any.
+func (s *Simulation) AuthTrees() []AuthTree {
+	if s == nil || s.Resp == nil {
+		return nil
+	}
+	var out []AuthTree
+	for i, result := range s.Resp.Results {
+		if result.AuthXDR == nil || len(*result.AuthXDR) == 0 {
+			continue
+		}
+		entries := append([]string(nil), (*result.AuthXDR)...)
+		out = append(out, AuthTree{Operation: i, Entries: entries})
+	}
+	return out
+}
+
+// ResourceFootprint is the resource allocation a simulation reported, decoded
+// from its SorobanTransactionData.
+type ResourceFootprint struct {
+	Instructions  uint32   `json:"instructions"`
+	DiskReadBytes uint32   `json:"diskReadBytes"`
+	WriteBytes    uint32   `json:"writeBytes"`
+	ResourceFee   int64    `json:"resourceFee"`
+	ReadOnly      []string `json:"readOnly,omitempty"`
+	ReadWrite     []string `json:"readWrite,omitempty"`
+}
+
+// ResourceFootprint decodes the transactionData allocation the simulation
+// reported. A response without transaction data has no footprint and returns
+// nil rather than an error, because a failed simulation legitimately has none.
+func (s *Simulation) ResourceFootprint() (*ResourceFootprint, error) {
+	if s == nil || s.Resp == nil || s.Resp.TransactionDataXDR == "" {
+		return nil, nil
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(s.Resp.TransactionDataXDR)
+	if err != nil {
+		return nil, fmt.Errorf("decoding simulation transaction data: %w", err)
+	}
+
+	var data xdr.SorobanTransactionData
+	if err := xdr.SafeUnmarshal(raw, &data); err != nil {
+		return nil, fmt.Errorf("parsing simulation transaction data: %w", err)
+	}
+
+	footprint := &ResourceFootprint{
+		Instructions:  uint32(data.Resources.Instructions),
+		DiskReadBytes: uint32(data.Resources.DiskReadBytes),
+		WriteBytes:    uint32(data.Resources.WriteBytes),
+		ResourceFee:   int64(data.ResourceFee),
+	}
+	footprint.ReadOnly, err = encodeLedgerKeys(data.Resources.Footprint.ReadOnly)
+	if err != nil {
+		return nil, err
+	}
+	footprint.ReadWrite, err = encodeLedgerKeys(data.Resources.Footprint.ReadWrite)
+	if err != nil {
+		return nil, err
+	}
+	return footprint, nil
+}
+
+// encodeLedgerKeys renders footprint keys as base64, the form a replay hands
+// back to getLedgerEntries.
+func encodeLedgerKeys(keys []xdr.LedgerKey) ([]string, error) {
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		raw, err := key.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("encoding footprint ledger key: %w", err)
+		}
+		out = append(out, base64.StdEncoding.EncodeToString(raw))
+	}
+	return out, nil
+}
+
+// Save writes the captured simulation as JSON so it can be replayed without a
+// network. The source context and the full response travel with it.
+func (s *Simulation) Save(path string) error {
+	if s == nil || s.Resp == nil {
+		return fmt.Errorf("saving simulation capture: no response to write")
+	}
+	capture := *s
+	if capture.Format == "" {
+		capture.Format = SimulationFormat
+	}
+	data, err := json.MarshalIndent(&capture, "", "  ")
+	if err != nil {
+		return fmt.Errorf("rendering simulation capture: %w", err)
+	}
+	data = append(data, '\n')
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("creating %s: %w", dir, err)
+		}
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// LoadCaptureSimulation reads a simulation capture written by Save.
+func LoadCaptureSimulation(path string) (*CaptureSimulation, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	var capture CaptureSimulation
+	if err := json.Unmarshal(data, &capture); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if capture.Resp == nil {
+		return nil, fmt.Errorf("parsing %s: capture has no response", path)
+	}
+	return &capture, nil
 }
 
 // Simulate runs one preflight simulation and records it.
@@ -50,10 +204,18 @@ func Simulate(ctx context.Context, src SimulationSource, req protocol.SimulateTr
 	if resp == nil {
 		return nil, fmt.Errorf("simulateTransaction: endpoint returned no response")
 	}
-	if resp.Error != "" {
-		return &Simulation{Resp: resp}, fmt.Errorf("simulateTransaction: %w: %s", ErrSimulationFailed, resp.Error)
+
+	simulation := &Simulation{
+		Format:   SimulationFormat,
+		Network:  src.Network(),
+		Endpoint: src.Endpoint(),
+		Request:  &req,
+		Resp:     resp,
 	}
-	return &Simulation{Resp: resp}, nil
+	if resp.Error != "" {
+		return simulation, fmt.Errorf("simulateTransaction: %w: %s", ErrSimulationFailed, resp.Error)
+	}
+	return simulation, nil
 }
 
 // Records splits the response into capture records, one per XDR payload, so

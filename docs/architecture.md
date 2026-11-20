@@ -961,7 +961,7 @@ rule holds:
   same corruptions (bit flips, zeroed bytes, `0xFF` fills, truncation) always
   produce the same mutant, and `Mutations` reports exactly which offsets were
   touched so a resilience test can name what it exercised.
-- `capture.ContractWASMSource` (`pkg/capture/contract_wasm.go`) serves
+- `capture.ContractWASMSource` (`pkg/capture/contractwasm.go`) serves
   deployed contract code. `ContractCodeKey` turns a contract id into the
   base64 `LedgerKey` that names its WASM, and refuses an id that is not 32
   hex bytes rather than sending a malformed key that would come back "not

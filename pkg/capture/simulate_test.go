@@ -2,9 +2,13 @@ package capture
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 )
@@ -108,6 +112,97 @@ func TestCaptureSimulationFailedReportsHostError(t *testing.T) {
 	}
 	if got := sim.Records(); len(got) != 0 {
 		t.Errorf("failed simulation must produce no records, got %+v", got)
+	}
+}
+
+func TestCaptureSimulationRecordsAuthTreesAndFootprint(t *testing.T) {
+	auth := []string{"authEntryA", "authEntryB"}
+	transactionData := xdr.SorobanTransactionData{
+		Ext: xdr.SorobanTransactionDataExt{V: 0},
+		Resources: xdr.SorobanResources{
+			Instructions:  1_000_000,
+			DiskReadBytes: 4096,
+			WriteBytes:    1024,
+		},
+		ResourceFee: 54321,
+	}
+	raw, err := transactionData.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshalling transaction data: %v", err)
+	}
+
+	sim := &Simulation{
+		Resp: &protocol.SimulateTransactionResponse{
+			TransactionDataXDR: base64.StdEncoding.EncodeToString(raw),
+			Results: []protocol.SimulateHostFunctionResult{
+				{AuthXDR: &auth},
+			},
+		},
+	}
+
+	trees := sim.AuthTrees()
+	if len(trees) != 1 {
+		t.Fatalf("want one auth tree, got %+v", trees)
+	}
+	if trees[0].Operation != 0 || len(trees[0].Entries) != 2 || trees[0].Entries[1] != "authEntryB" {
+		t.Errorf("auth tree is incomplete: %+v", trees[0])
+	}
+
+	footprint, err := sim.ResourceFootprint()
+	if err != nil {
+		t.Fatalf("ResourceFootprint: %v", err)
+	}
+	if footprint == nil {
+		t.Fatal("ResourceFootprint returned nothing for a response with transaction data")
+	}
+	if footprint.Instructions != 1_000_000 || footprint.DiskReadBytes != 4096 || footprint.WriteBytes != 1024 {
+		t.Errorf("resource allocations were not decoded: %+v", footprint)
+	}
+	if footprint.ResourceFee != 54321 {
+		t.Errorf("resource fee = %d, want 54321", footprint.ResourceFee)
+	}
+}
+
+func TestCaptureSimulationJSONRoundTrip(t *testing.T) {
+	auth := []string{"authEntryA"}
+	returnValue := "returnValueXDR"
+	src := &fakeSimulationSource{network: NetworkTestnet, endpoint: "https://rpc.example"}
+	resp := &protocol.SimulateTransactionResponse{
+		LatestLedger:   900,
+		MinResourceFee: 77,
+		Results: []protocol.SimulateHostFunctionResult{
+			{AuthXDR: &auth, ReturnValueXDR: &returnValue},
+		},
+	}
+
+	sim := &Simulation{
+		Format:   SimulationFormat,
+		Network:  src.Network(),
+		Endpoint: src.Endpoint(),
+		Request:  &protocol.SimulateTransactionRequest{Transaction: "envelopeXDR"},
+		Resp:     resp,
+	}
+
+	path := filepath.Join(t.TempDir(), "simulation.json")
+	if err := sim.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := LoadCaptureSimulation(path)
+	if err != nil {
+		t.Fatalf("LoadCaptureSimulation: %v", err)
+	}
+	if loaded.Format != SimulationFormat || loaded.Network != NetworkTestnet || loaded.Endpoint != "https://rpc.example" {
+		t.Errorf("source context did not survive the round trip: %+v", loaded)
+	}
+	if loaded.Resp == nil || loaded.Resp.LatestLedger != 900 || loaded.Resp.MinResourceFee != 77 {
+		t.Errorf("response did not survive the round trip: %+v", loaded.Resp)
+	}
+	if loaded.Request == nil || loaded.Request.Transaction != "envelopeXDR" {
+		t.Errorf("request did not survive the round trip: %+v", loaded.Request)
+	}
+	if trees := loaded.AuthTrees(); len(trees) != 1 || trees[0].Entries[0] != "authEntryA" {
+		t.Errorf("auth tree did not survive the round trip: %+v", trees)
 	}
 }
 
