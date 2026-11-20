@@ -134,6 +134,7 @@ precedence.`,
 		newLedgerKeyCmd(stdout),
 		newVerifyCmd(cfg, stdout, stderr),
 		newRefreshCmd(stdout, stderr),
+		newFmtCmd(stdout, stderr),
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
 	)
@@ -855,4 +856,143 @@ func changedLinesLineByLine(oldLines, newLines []string) []diffLine {
 		}
 	}
 	return out
+}
+// newFmtCmd builds the command that reformats golden fixtures in place.
+func newFmtCmd(stdout, stderr io.Writer) *cobra.Command {
+	var check bool
+
+	cmd := &cobra.Command{
+		Use:   "fmt [paths...]",
+		Short: "Reformat golden fixtures in place",
+		Long: `Reformat and normalize golden fixture files in place.
+
+The command re-serializes every fixture from its stored XDR, applying the
+same canonical rules that the serializer uses: normalized whitespace (LF only,
+trailing whitespace trimmed, blank lines collapsed), sorted keys for YAML
+format, and the default JSON indentation of two spaces.
+
+By default the files are rewritten. With --check the command exits with
+status 1 if any files would change, making it suitable for CI. No files are
+written when --check is used.
+
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are formatted too; a pattern is
+matched like a shell pattern, with "**" standing for any number of directories.
+Hidden directories and the paths listed in a .focusignore file are skipped.
+
+With no path, testdata is reformatted.
+`,
+		Example: `  # Format all fixtures in testdata/
+  focus fmt testdata/
+
+  # Check if any fixtures need formatting (CI-friendly)
+  focus fmt testdata/ --check
+
+  # Format specific files
+  focus fmt testdata/payment.golden.json testdata/ope.golden.json`,
+		Args: cobra.ArbitraryArgs,
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{defaultVerifyDir}
+			}
+
+			paths, err := collectFixtures(args)
+			if err != nil {
+				return failureErrorf("%v", err)
+			}
+			if len(paths) == 0 {
+				return failureErrorf("no fixture files found in %s", strings.Join(args, ", "))
+			}
+
+			var changed, unchanged, errored int
+			for _, path := range paths {
+				canged, _ := fmtFixture(path, check)
+				if err != nil {
+					fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, err)
+					errored++
+					continue
+				}
+				if canged {
+					word := "updated"
+					if check {
+						word = "would change"
+					}
+					fmt.Fprintf(stdout, "%-40s %s\n", path, word)
+					changed++
+					continue
+				}
+				fmt.Fprintf(stdout, "%-40s unchanged\n", path)
+				unchanged++
+			}
+
+			fmt.Fprintf(stdout, "%d checked: %d %s, %d unchanged\n",
+				len(paths), changed, fmtVerb(check), unchanged)
+			if errored > 0 {
+				fmt.Fprintf(stdout, ", %d errored", errored)
+			}
+			fmt.Fprintln(stdout)
+
+			if check && changed > 0 {
+				return failureErrorf("%d fixture(s) would change", changed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&check, "check", false,
+		"exit with code 1 if any files would change (CI-friendly)")
+	cmd.Flags().BoolP("dry-run", "d", false,
+		"deprecated: use --check instead")
+
+	return cmd
+}
+
+// fmtFixture reformats a single fixture file, or in check mode reports whether
+// it would change and writes nothing.
+func fmtFixture(path string, check bool) (bool, error) {
+	if !check {
+		changed, err := golden.Refresh(path)
+		return changed, err
+	}
+
+	// In check mode: read the fixture, re-serialize it canonically, and compare.
+	fixture, err := golden.Load(path)
+	if err != nil {
+		return false, err
+	}
+
+	// Re-serialize using the canonical JSON serializer.
+	serializer, err := golden.SerializerFor(golden.JSON)
+	if err != nil {
+		return false, err
+	}
+
+	newData, err := serializer.Marshal(fixture)
+	if err != nil {
+		return false, err
+	}
+
+	// Normalize both the existing and new data for comparison.
+	existingData, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+
+	existing := golden.NormalizeWhitespace(existingData)
+	newCanonical := golden.NormalizeWhitespace(newData)
+
+	if string(existing) == string(newCanonical) {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+// fmtVerb names what the command did in the summary line.
+func fmtVerb(check bool) string {
+	if check {
+		return "would change"
+	}
+	return "updated"
 }
