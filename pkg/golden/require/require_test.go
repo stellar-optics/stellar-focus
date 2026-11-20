@@ -202,6 +202,30 @@ func TestNewAssertStopsTheTest(t *testing.T) {
 	}
 }
 
+// TestAssertAsNamesTheType covers the explicit-type form: it behaves like
+// Assert, but does not have to detect the XDR type from the payload.
+func TestAssertAsNamesTheType(t *testing.T) {
+	t.Parallel()
+
+	dir := store(t, envelope(t, 100))
+
+	tb := faketb.New()
+	require.AssertAs(tb, "TransactionEnvelope", "env", envelope(t, 200), golden.WithDir(dir))
+
+	if len(tb.Fatals) == 0 {
+		t.Fatalf("AssertAs did not report the mismatch fatally:\n%s", tb.Output())
+	}
+	if !strings.Contains(tb.Output(), "Body.PaymentOp.Amount") {
+		t.Errorf("AssertAs lost the diff:\n%s", tb.Output())
+	}
+
+	tb = faketb.New()
+	require.AssertAs(tb, "TransactionEnvelope", "env", envelope(t, 100), golden.WithDir(dir))
+	if tb.Failed() {
+		t.Errorf("AssertAs reported a failure for a matching fixture:\n%s", tb.Output())
+	}
+}
+
 // TestAssertMarksItselfAsAHelper checks that the failure is reported at the
 // caller's line, not inside the package.
 func TestAssertMarksItselfAsAHelper(t *testing.T) {

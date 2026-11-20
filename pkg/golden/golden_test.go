@@ -288,6 +288,46 @@ func TestAssertSuppressesSequenceNoiseByDefault(t *testing.T) {
 	}
 }
 
+// TestWithDiffContextControlsFailureContext checks that a golden mismatch
+// shows only the requested number of unchanged fields around the difference,
+// and says how many were left out.
+func TestWithDiffContextControlsFailureContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "env", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithDiffContext(1))
+	if g.Assert("env", buildEnvelope(t, 200)) {
+		t.Fatal("Assert() passed against a stale golden file")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "Body.PaymentOp.Asset = native") {
+		t.Errorf("one context line does not show the neighboring asset field:\n%s", out)
+	}
+	if strings.Contains(out, "Body.PaymentOp.Destination =") {
+		t.Errorf("one context line showed a field beyond the window:\n%s", out)
+	}
+	if !strings.Contains(out, "unchanged field(s) omitted") {
+		t.Errorf("the message does not note the omitted context:\n%s", out)
+	}
+
+	tb = faketb.New()
+	g = golden.New(tb, golden.WithDir(dir), golden.WithDiffContext(0))
+	if g.Assert("env", buildEnvelope(t, 200)) {
+		t.Fatal("Assert() passed against a stale golden file")
+	}
+	out = tb.Output()
+	if strings.Contains(out, "Body.PaymentOp.Asset = native") {
+		t.Errorf("zero context lines still showed a neighboring field:\n%s", out)
+	}
+	if !strings.Contains(out, "Body.PaymentOp.Amount") {
+		t.Errorf("zero context lines dropped the difference itself:\n%s", out)
+	}
+}
+
 func TestPath(t *testing.T) {
 	t.Parallel()
 

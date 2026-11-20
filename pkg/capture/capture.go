@@ -52,6 +52,35 @@ var DefaultHorizonEndpoints = map[string]string{
 // has aged out of the endpoint's retention window.
 var ErrNotFound = errors.New("not found on this network")
 
+// CacheOptions configures the on-disk capture cache.
+//
+// The cache lives under .focus/cache by default. TTL ages entries out; a zero
+// TTL uses DefaultCacheTTL. MaxBytes bounds the cache directory, with older
+// and less recently used entries evicted first; a zero or negative MaxBytes
+// leaves the size unbounded.
+type CacheOptions struct {
+	// Dir is the cache root. An empty Dir disables caching.
+	Dir string
+	// TTL is how long an entry stays fresh. Zero uses DefaultCacheTTL.
+	TTL time.Duration
+	// MaxBytes is the size limit in bytes. Zero or less means unbounded.
+	MaxBytes int64
+}
+
+// OpenCache returns a cache configured by opts and prunes it immediately, so
+// a previous session's expired or oversized entries do not linger.
+//
+// It is the single place the capture commands need to construct a cache: the
+// options are validated by the same code that applies them, and a new session
+// starts from a cache already within its configured limits.
+func OpenCache(opts CacheOptions) (*Cache, error) {
+	cache := NewCache(opts.Dir, opts.TTL)
+	if err := cache.Prune(opts.MaxBytes, opts.TTL); err != nil {
+		return nil, err
+	}
+	return cache, nil
+}
+
 // Record is one captured item, before it becomes a fixture file.
 type Record struct {
 	// Name suggests a fixture filename, without a suffix.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -317,6 +318,196 @@ func TestCacheDirReportsItsRoot(t *testing.T) {
 	dir := t.TempDir()
 	if got := capture.NewCache(dir, time.Hour).Dir(); got != dir {
 		t.Errorf("Dir = %q, want %q", got, dir)
+	}
+}
+
+// setAccess rewrites an entry's last-access timestamp, so eviction order can
+// be tested without sleeping.
+func setAccess(t *testing.T, dir, key string, at time.Time) {
+	t.Helper()
+	path := filepath.Join(dir, key+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading entry: %v", err)
+	}
+	var entry capture.CacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("parsing entry: %v", err)
+	}
+	entry.LastAccessedAt = at.Format(time.RFC3339)
+	updated, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("re-encoding entry: %v", err)
+	}
+	if err := os.WriteFile(path, updated, 0o644); err != nil {
+		t.Fatalf("writing entry: %v", err)
+	}
+}
+
+// cacheDirSize is the total size of the entry files in a cache directory.
+func cacheDirSize(t *testing.T, dir string) int64 {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading cache dir: %v", err)
+	}
+	var total int64
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatalf("stat entry: %v", err)
+		}
+		total += info.Size()
+	}
+	return total
+}
+
+func TestCachePruneExpiresOldEntries(t *testing.T) {
+	dir := t.TempDir()
+	cache := capture.NewCache(dir, time.Hour)
+	stale := capture.CacheKey("endpoint", "transaction", "stale")
+	fresh := capture.CacheKey("endpoint", "transaction", "fresh")
+	if err := cache.Put(stale, []capture.Record{{Name: "envelope", XDR: "AAAA"}}); err != nil {
+		t.Fatalf("Put stale: %v", err)
+	}
+	if err := cache.Put(fresh, []capture.Record{{Name: "envelope", XDR: "BBBB"}}); err != nil {
+		t.Fatalf("Put fresh: %v", err)
+	}
+	ageEntry(t, dir, stale, time.Now().Add(-2*time.Hour))
+
+	if err := cache.Prune(0, time.Hour); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if _, ok := cache.Get(stale); ok {
+		t.Error("expired entry survived Prune")
+	}
+	if _, ok := cache.Get(fresh); !ok {
+		t.Error("fresh entry was pruned")
+	}
+}
+
+func TestCachePruneEvictsLeastRecentlyUsed(t *testing.T) {
+	dir := t.TempDir()
+	cache := capture.NewCache(dir, time.Hour)
+
+	payload := strings.Repeat("x", 1024)
+	keys := []string{
+		capture.CacheKey("endpoint", "transaction", "one"),
+		capture.CacheKey("endpoint", "transaction", "two"),
+		capture.CacheKey("endpoint", "transaction", "three"),
+	}
+	for _, key := range keys {
+		if err := cache.Put(key, []capture.Record{{Name: "envelope", XDR: payload}}); err != nil {
+			t.Fatalf("Put %s: %v", key, err)
+		}
+	}
+
+	now := time.Now()
+	setAccess(t, dir, keys[0], now.Add(-3*time.Hour))
+	setAccess(t, dir, keys[1], now.Add(-2*time.Hour))
+	setAccess(t, dir, keys[2], now.Add(-time.Hour))
+
+	total := cacheDirSize(t, dir)
+	// Room for two entries: the oldest access must go.
+	if err := cache.Prune(total-1, 0); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+
+	if _, ok := cache.Get(keys[0]); ok {
+		t.Error("the least-recently-used entry survived a size prune")
+	}
+	if _, ok := cache.Get(keys[1]); !ok {
+		t.Error("the second-most-recent entry was evicted")
+	}
+	if _, ok := cache.Get(keys[2]); !ok {
+		t.Error("the most-recently-used entry was evicted")
+	}
+}
+
+func TestCachePruneKeepsTheCacheWithinItsByteLimit(t *testing.T) {
+	dir := t.TempDir()
+	cache := capture.NewCache(dir, time.Hour)
+	payload := strings.Repeat("y", 512)
+	for _, part := range []string{"a", "b", "c", "d"} {
+		key := capture.CacheKey("endpoint", "transaction", part)
+		if err := cache.Put(key, []capture.Record{{Name: "envelope", XDR: payload}}); err != nil {
+			t.Fatalf("Put %s: %v", part, err)
+		}
+	}
+
+	const maxBytes = 1400
+	if err := cache.Prune(maxBytes, time.Hour); err != nil {
+		t.Fatalf("Prune: %v", err)
+	}
+	if got := cacheDirSize(t, dir); got > maxBytes {
+		t.Errorf("cache is %d bytes after pruning, want at most %d", got, maxBytes)
+	}
+}
+
+func TestCacheGetRefreshesLastAccess(t *testing.T) {
+	dir := t.TempDir()
+	cache := capture.NewCache(dir, time.Hour)
+	key := capture.CacheKey("endpoint", "transaction", "hot")
+	if err := cache.Put(key, []capture.Record{{Name: "envelope", XDR: "AAAA"}}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	old := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+	setAccess(t, dir, key, old)
+
+	if _, ok := cache.Get(key); !ok {
+		t.Fatal("cache miss after Put")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, key+".json"))
+	if err != nil {
+		t.Fatalf("reading entry: %v", err)
+	}
+	var entry capture.CacheEntry
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatalf("parsing entry: %v", err)
+	}
+	accessed, err := time.Parse(time.RFC3339, entry.LastAccessedAt)
+	if err != nil {
+		t.Fatalf("parsing lastAccess: %v", err)
+	}
+	if !accessed.After(old) {
+		t.Errorf("Get did not refresh last access: still %v", accessed)
+	}
+}
+
+func TestPruneIsHarmlessForNilDisabledAndMissingCaches(t *testing.T) {
+	var nilCache *capture.Cache
+	if err := nilCache.Prune(10, time.Hour); err != nil {
+		t.Errorf("nil cache Prune: %v", err)
+	}
+	if err := capture.NewCache("", time.Hour).Prune(10, time.Hour); err != nil {
+		t.Errorf("disabled cache Prune: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "absent")
+	if err := capture.NewCache(missing, time.Hour).Prune(10, time.Hour); err != nil {
+		t.Errorf("missing cache dir Prune: %v", err)
+	}
+}
+
+func TestOpenCachePrunesOnOpen(t *testing.T) {
+	dir := t.TempDir()
+	staleKey := capture.CacheKey("endpoint", "transaction", "stale")
+	cache := capture.NewCache(dir, time.Hour)
+	if err := cache.Put(staleKey, []capture.Record{{Name: "envelope", XDR: "AAAA"}}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	ageEntry(t, dir, staleKey, time.Now().Add(-2*time.Hour))
+
+	opened, err := capture.OpenCache(capture.CacheOptions{Dir: dir, TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("OpenCache: %v", err)
+	}
+	if _, ok := opened.Get(staleKey); ok {
+		t.Error("OpenCache did not prune the expired entry")
 	}
 }
 
