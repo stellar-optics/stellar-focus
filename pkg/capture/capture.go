@@ -220,6 +220,53 @@ func Capture(ctx context.Context, src Source, records []Record, now time.Time) (
 	return out, nil
 }
 
+// MutateRecord applies a deterministic mutation to a captured record and
+// returns the mutant as another record.
+//
+// It is the capture-level entry point to MutateXDR: a valid capture can be
+// turned into a negative fixture without leaving the package or handling
+// base64 by hand. The original record is not modified, and the report names
+// the exact byte offset the mutation touched.
+func MutateRecord(record Record, seed int64, mutationType MutationType) (Record, MutationReport, error) {
+	raw, err := base64.StdEncoding.DecodeString(record.XDR)
+	if err != nil {
+		return Record{}, MutationReport{}, fmt.Errorf("mutating %q: XDR is not base64: %w", record.Name, err)
+	}
+
+	mutated, report := MutateXDR(raw, seed, mutationType)
+	if !report.Applied {
+		return Record{}, report, fmt.Errorf("mutating %q: %s", record.Name, report.Description)
+	}
+
+	mutant := record
+	mutant.XDR = base64.StdEncoding.EncodeToString(mutated)
+	if mutant.Name != "" {
+		mutant.Name = fmt.Sprintf("%s_%s_%d", mutant.Name, mutationType, seed)
+	}
+	mutant.Description = fmt.Sprintf("%s (mutated: %s)", record.Description, report.Description)
+	return mutant, report, nil
+}
+
+// CaptureWASM fetches a contract's WASM, verifies it against the ledger's own
+// code hash, extracts its specification and writes the binary beside its JSON
+// metadata in dir.
+//
+// It is the whole capture workflow in one call, returning the capture and the
+// two paths written so a caller can report them.
+//
+//nolint:revive // The public name is fixed by issue #239.
+func CaptureWASM(ctx context.Context, src ContractWASMSource, contractID, dir string) (*WASMCapture, string, string, error) {
+	capture, err := CaptureContractWASM(ctx, src, contractID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	metadataPath, wasmPath, err := capture.Save(dir)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return capture, metadataPath, wasmPath, nil
+}
+
 // VerifyResult reports whether a stored fixture still matches the chain.
 type VerifyResult struct {
 	// Path is the fixture that was checked.

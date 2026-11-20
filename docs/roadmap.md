@@ -187,7 +187,7 @@ Working and tested:
   is checked against the bytes before anything is written, so a truncated
   capture reports `ErrContractCodeHashMismatch` rather than archiving a
   contract that does not match the one the ledger names
-  (`pkg/capture/contract_wasm.go`)
+  (`pkg/capture/contractwasm.go`)
 - Dependency-light library, enforced by compiled-graph and AST tests
 - Package boundaries between focus, golden, capture, and CLI enforced by an
   offline compiled-graph test (`pkg/focus/decouple_test.go`)

@@ -22,6 +22,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
@@ -402,12 +404,94 @@ archive holds envelopes and results but not transaction meta.`,
 		},
 	}
 
+	simCmd := &cobra.Command{
+		Use:   "simulate <envelope-xdr>",
+		Short: "Record a Soroban simulateTransaction response",
+		Long: `Run a transaction against the current ledger state and record the whole
+response: return value, diagnostic events, authorization trees and the
+SorobanTransactionData resource footprint.
+
+A host-rejected simulation is still recorded, because the error is the
+interesting part; the command then exits non-zero so a pipeline notices.`,
+		Example: `  focus capture simulate "AAAAAgAAAAB..." --out testdata/`,
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			src, err := openSource(cfg)
+			if err != nil {
+				return err
+			}
+			simSrc, ok := src.(capture.SimulationSource)
+			if !ok {
+				return usageErrorf("source %q cannot simulate transactions", src.Name())
+			}
+
+			sim, simErr := capture.Simulate(cmd.Context(), simSrc,
+				protocol.SimulateTransactionRequest{Transaction: args[0]})
+			if sim == nil {
+				return simErr
+			}
+
+			path := filepath.Join(cfg.outDir(), cfg.prefix()+"simulation.json")
+			if !cfg.force() {
+				if _, err := os.Stat(path); err == nil {
+					return usageErrorf("%s already exists; pass --force to overwrite it", path)
+				}
+			}
+			if err := sim.Save(path); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintf(stdout, "wrote %s\n", path); err != nil {
+				return err
+			}
+			return simErr
+		},
+	}
+
+	wasmCmd := &cobra.Command{
+		Use:   "wasm <contract-id>",
+		Short: "Record a deployed contract's WASM, hash and specification",
+		Long: `Fetch a contract's WASM bytecode, verify that SHA-256 of the bytes matches
+the hash the ledger stores, extract the embedded contract specification, and
+write the binary beside its JSON metadata.
+
+The code hash mismatch is reported as an error rather than written: bytes that
+do not hash to the on-chain value do not describe the contract the ledger is
+talking about.`,
+		Example: `  focus capture wasm 0102030405060708090a0b0c0d0e0f10... --out testdata/`,
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			src, err := openSource(cfg)
+			if err != nil {
+				return err
+			}
+
+			contract, err := capture.CaptureContractWASM(cmd.Context(), src, args[0])
+			if err != nil {
+				return err
+			}
+
+			metadataPath, wasmPath := contract.Paths(cfg.outDir())
+			if !cfg.force() {
+				for _, path := range []string{metadataPath, wasmPath} {
+					if _, err := os.Stat(path); err == nil {
+						return usageErrorf("%s already exists; pass --force to overwrite it", path)
+					}
+				}
+			}
+			if _, _, err := contract.Save(cfg.outDir()); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "wrote %s and %s\n", wasmPath, metadataPath)
+			return err
+		},
+	}
+
 	txCmd.Flags().Uint32Var(&ledger, "ledger", 0,
 		"ledger the transaction closed in; needed to find it in a history archive")
 
 	cfg.bindCaptureFlags(cmd)
 	cfg.bindBatchFlags(txCmd)
-	cmd.AddCommand(txCmd, entryCmd)
+	cmd.AddCommand(txCmd, entryCmd, simCmd, wasmCmd)
 	return cmd
 }
 

@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -9,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/internal/fakesource"
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
@@ -65,6 +70,94 @@ func sourceWithTx(t *testing.T) *fakesource.Source {
 			Ledger: 1234, TxHash: testHash},
 	}
 	return src
+}
+
+func TestCaptureSimulateWritesTheResponse(t *testing.T) {
+	src := fakesource.New(capture.NetworkTestnet, "https://fake.example")
+	src.Simulations["envelopeXDR"] = &protocol.SimulateTransactionResponse{
+		LatestLedger:   777,
+		MinResourceFee: 42,
+	}
+	withFake(t, src)
+	dir := t.TempDir()
+
+	stdout, _, err := run(t, "capture", "simulate", "envelopeXDR", "--out", dir)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	path := filepath.Join(dir, "simulation.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("simulation capture was not written: %v", err)
+	}
+	loaded, err := capture.LoadCaptureSimulation(path)
+	if err != nil {
+		t.Fatalf("LoadCaptureSimulation: %v", err)
+	}
+	if loaded.Resp.LatestLedger != 777 || loaded.Resp.MinResourceFee != 42 {
+		t.Errorf("recorded response is wrong: %+v", loaded.Resp)
+	}
+	if loaded.Request == nil || loaded.Request.Transaction != "envelopeXDR" {
+		t.Errorf("recorded request is wrong: %+v", loaded.Request)
+	}
+	if !strings.Contains(stdout, "wrote") {
+		t.Errorf("simulate printed nothing useful:\n%s", stdout)
+	}
+}
+
+func TestCaptureWASMWritesBinaryAndMetadata(t *testing.T) {
+	const contractID = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	wasm := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	sum := sha256.Sum256(wasm)
+	var hash xdr.Hash
+	copy(hash[:], sum[:])
+
+	entry := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.ContractCodeEntry{
+			Ext:  xdr.ContractCodeEntryExt{V: 0},
+			Hash: hash,
+			Code: wasm,
+		},
+	}
+	raw, err := entry.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshalling entry: %v", err)
+	}
+
+	key, err := capture.ContractCodeKey(contractID)
+	if err != nil {
+		t.Fatalf("ContractCodeKey: %v", err)
+	}
+	src := fakesource.New(capture.NetworkTestnet, "https://fake.example")
+	src.Entries[key] = []capture.Record{{
+		Name: "wasm", Type: "ContractCode", Ledger: 55,
+		XDR: base64.StdEncoding.EncodeToString(raw),
+	}}
+	withFake(t, src)
+	dir := t.TempDir()
+
+	stdout, _, err := run(t, "capture", "wasm", contractID, "--out", dir)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	metadataPath, wasmPath := (&capture.WASMCapture{ContractID: contractID}).Paths(dir)
+	for _, path := range []string{metadataPath, wasmPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was not written: %v", path, err)
+		}
+	}
+	saved, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("reading saved WASM: %v", err)
+	}
+	if string(saved) != string(wasm) {
+		t.Error("saved WASM differs from the captured bytes")
+	}
+	if !strings.Contains(stdout, "wrote") {
+		t.Errorf("wasm printed nothing useful:\n%s", stdout)
+	}
 }
 
 func TestCaptureTxWritesFixtures(t *testing.T) {
