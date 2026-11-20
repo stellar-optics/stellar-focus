@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +38,13 @@ type CacheEntry struct {
 	Format string `json:"format"`
 	// Endpoint and Key record what was fetched, so an entry found by hash
 	// can still be inspected and sanity-checked by a human.
-	Endpoint string   `json:"endpoint"`
-	Key      string   `json:"key"`
-	StoredAt string   `json:"storedAt"`
-	Records  []Record `json:"records"`
+	Endpoint string `json:"endpoint"`
+	Key      string `json:"key"`
+	StoredAt string `json:"storedAt"`
+	// LastAccessedAt is refreshed on a cache hit. Prune uses it to evict the
+	// least-recently-used entries when the cache outgrows its byte limit.
+	LastAccessedAt string   `json:"lastAccessedAt,omitempty"`
+	Records        []Record `json:"records"`
 }
 
 // Cache stores fetched records on disk, keyed by CacheKey.
@@ -98,12 +104,22 @@ func (c *Cache) Get(key string) ([]Record, bool) {
 		return nil, false
 	}
 
+	now := c.now()
 	storedAt, err := time.Parse(time.RFC3339, entry.StoredAt)
 	if err != nil {
 		return nil, false
 	}
-	if c.ttl > 0 && c.now().Sub(storedAt) > c.ttl {
+	if c.ttl > 0 && now.Sub(storedAt) > c.ttl {
 		return nil, false
+	}
+
+	// Record the hit so Prune can evict by least-recent use. A failure to
+	// rewrite the timestamp must not turn a valid cache hit into a miss;
+	// the cache is a speed-up, not a source of truth.
+	entry.LastAccessedAt = now.UTC().Format(time.RFC3339)
+	if err := c.writeEntry(key, entry); err != nil {
+		// Best effort: the records returned below are still valid.
+		return entry.Records, true
 	}
 
 	return entry.Records, true
@@ -118,12 +134,19 @@ func (c *Cache) Put(key string, records []Record) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	now := c.now().UTC()
 	entry := CacheEntry{
-		Format:   CacheFormat,
-		Key:      key,
-		StoredAt: c.now().UTC().Format(time.RFC3339),
-		Records:  records,
+		Format:         CacheFormat,
+		Key:            key,
+		StoredAt:       now.Format(time.RFC3339),
+		LastAccessedAt: now.Format(time.RFC3339),
+		Records:        records,
 	}
+	return c.writeEntry(key, entry)
+}
+
+// writeEntry replaces the file backing key, atomically.
+func (c *Cache) writeEntry(key string, entry CacheEntry) error {
 	data, err := json.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding cache entry %s: %w", key, err)
@@ -153,6 +176,108 @@ func (c *Cache) Put(key string, records []Record) error {
 		return fmt.Errorf("storing cache entry %s: %w", key, err)
 	}
 	return nil
+}
+
+// Prune expires stale entries and evicts the least-recently-used ones until
+// the cache fits within maxBytes.
+//
+// A ttl of zero or less uses the cache's configured TTL. A maxBytes of zero
+// or less leaves the size unbounded, so a caller can prune by age alone. An
+// entry's last access is refreshed by Get, so repeated fetches keep a hot
+// entry alive while a cold one ages out first. Missing files are ignored: a
+// concurrent Get or another process may have removed them already.
+func (c *Cache) Prune(maxBytes int64, ttl time.Duration) error {
+	if c == nil || c.dir == "" {
+		return nil
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	dirEntries, err := os.ReadDir(c.dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("reading cache dir %s: %w", c.dir, err)
+	}
+
+	if ttl <= 0 {
+		ttl = c.ttl
+	}
+	now := c.now()
+
+	files := make([]cacheFile, 0, len(dirEntries))
+	var total int64
+	for _, entry := range dirEntries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			// Temporary files from an interrupted Put are not entries.
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		file := cacheFile{
+			path:     filepath.Join(c.dir, entry.Name()),
+			size:     info.Size(),
+			accessed: info.ModTime(),
+		}
+		if data, err := os.ReadFile(file.path); err == nil {
+			var stored CacheEntry
+			if json.Unmarshal(data, &stored) == nil && stored.Format == CacheFormat {
+				if at, err := time.Parse(time.RFC3339, stored.StoredAt); err == nil {
+					file.storedAt = at
+				}
+				if stored.LastAccessedAt != "" {
+					if at, err := time.Parse(time.RFC3339, stored.LastAccessedAt); err == nil {
+						file.accessed = at
+					}
+				}
+			}
+		}
+
+		if ttl > 0 && !file.storedAt.IsZero() && now.Sub(file.storedAt) > ttl {
+			if err := os.Remove(file.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("pruning expired cache entry %s: %w", file.path, err)
+			}
+			continue
+		}
+
+		files = append(files, file)
+		total += file.size
+	}
+
+	if maxBytes <= 0 || total <= maxBytes {
+		return nil
+	}
+
+	// Oldest access first. A stable sort keeps the outcome deterministic when
+	// two entries share a timestamp.
+	sort.SliceStable(files, func(i, j int) bool {
+		return files[i].accessed.Before(files[j].accessed)
+	})
+	for _, file := range files {
+		if total <= maxBytes {
+			break
+		}
+		if err := os.Remove(file.path); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("evicting cache entry %s: %w", file.path, err)
+		}
+		total -= file.size
+	}
+	return nil
+}
+
+// cacheFile is one cache entry as Prune sees it.
+type cacheFile struct {
+	path     string
+	size     int64
+	storedAt time.Time
+	accessed time.Time
 }
 
 // path is the file backing one key.

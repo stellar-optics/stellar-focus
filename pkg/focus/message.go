@@ -128,6 +128,7 @@ func renderDiffContext(b *strings.Builder, ch lens.Change, want, got *lens.Value
 
 	if before {
 		start := max(0, changedIndex-limit)
+		renderOmittedContext(b, start, p)
 		for index := start; index < changedIndex; index++ {
 			renderContextChild(b, parentPath, wantParent, gotParent, index, p)
 		}
@@ -137,6 +138,17 @@ func renderDiffContext(b *strings.Builder, ch lens.Change, want, got *lens.Value
 	for index := changedIndex + 1; index < end; index++ {
 		renderContextChild(b, parentPath, wantParent, gotParent, index, p)
 	}
+	renderOmittedContext(b, len(wantParent.Children)-end, p)
+}
+
+// renderOmittedContext notes that unchanged siblings outside the context
+// window were left out. Without it, a trimmed diff looks like the whole
+// parent, and the reader cannot tell whether anything else was there.
+func renderOmittedContext(b *strings.Builder, omitted int, p lensformat.Palette) {
+	if omitted <= 0 {
+		return
+	}
+	fmt.Fprintf(b, "  %s… %d unchanged field(s) omitted…%s\n", p.Dim, omitted, p.Reset)
 }
 
 func renderContextChild(b *strings.Builder, parentPath string, wantParent, gotParent *lens.Node, index int, p lensformat.Palette) {

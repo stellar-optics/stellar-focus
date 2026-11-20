@@ -30,6 +30,17 @@ func Assert(t focus.TB, name string, actual focus.Value, opts ...golden.Opt) {
 	golden.New(t, opts...).Require(name, actual)
 }
 
+// AssertAs is Assert with an explicit XDR type, stopping the test on failure.
+//
+// Naming the type removes the ambiguity of detecting it from the payload, and
+// matches focus.AssertEqualAs and the golden.WithType option.
+//
+//	require.AssertAs(t, "TransactionEnvelope", "payment", BuildPayment(dest, "100"))
+func AssertAs(t focus.TB, typeName, name string, actual focus.Value, opts ...golden.Opt) {
+	t.Helper()
+	golden.New(t, append([]golden.Opt{golden.WithType(typeName)}, opts...)...).Require(name, actual)
+}
+
 // Golden is a golden file comparison whose failures stop the test.
 //
 // It holds the same Golden as pkg/golden does, with the same options and

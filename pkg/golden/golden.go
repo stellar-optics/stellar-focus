@@ -103,6 +103,9 @@ type Golden struct {
 	desc             string
 	typeHnt          string
 	vars             any
+	// diffContext is how many unchanged sibling fields a failure diff shows
+	// around each difference. nil means the focus default.
+	diffContext *int
 }
 
 // Opt configures a Golden.
@@ -133,6 +136,20 @@ func WithFormat(f Format) Opt {
 // to every comparison this Golden makes.
 func WithOptions(opts ...focus.Option) Opt {
 	return func(g *Golden) { g.opts = append(g.opts, opts...) }
+}
+
+// WithDiffContext sets how many unchanged sibling fields a golden mismatch
+// shows around each changed field. The default is three; zero disables the
+// surrounding context and shows only the differences themselves.
+//
+// A large fixture that differs by one field should not bury that field in
+// hundreds of lines of unchanged output, so the context is trimmed around the
+// difference and any omitted fields are noted in the message.
+func WithDiffContext(lines int) Opt {
+	return func(g *Golden) {
+		n := max(lines, 0)
+		g.diffContext = &n
+	}
 }
 
 // WithNoiseSuppression controls automatic normalization of volatile XDR fields.
@@ -283,12 +300,15 @@ func (g *Golden) assert(
 // asks for. focus options accumulate rather than replace one another, so
 // nothing is overridden by the order; the order is only about reading.
 func (g *Golden) options(extra []focus.Option) []focus.Option {
-	opts := make([]focus.Option, 0, len(g.opts)+len(extra))
+	opts := make([]focus.Option, 0, len(g.opts)+len(extra)+1)
 	if g.noiseSuppression {
 		opts = append(opts, noiseSuppressionOptions()...)
 	}
 	opts = append(opts, g.opts...)
 	opts = append(opts, extra...)
+	if g.diffContext != nil {
+		opts = append(opts, focus.WithDiffContext(*g.diffContext))
+	}
 	return opts
 }
 
