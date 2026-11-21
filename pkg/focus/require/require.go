@@ -11,6 +11,7 @@
 package require
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -37,6 +38,61 @@ func (f fatalTB) Errorf(format string, args ...any) {
 
 func fatal(t focus.TB) focus.TB {
 	return fatalTB{TB: t}
+}
+
+// groupTB records the failures a Group's closure reports instead of passing
+// them straight to the test, so every assertion in the group can run before
+// the test is stopped.
+type groupTB struct {
+	focus.TB
+	messages []string
+}
+
+// Errorf records a failure rather than reporting it immediately.
+func (g *groupTB) Errorf(format string, args ...any) {
+	g.messages = append(g.messages, fmt.Sprintf(format, args...))
+}
+
+// Fatalf records a failure as well. A fatal assertion inside a group cannot
+// stop the test without hiding the rest of the group, which is the problem
+// Group exists to solve, so it is reported with the other failures at the
+// end.
+func (g *groupTB) Fatalf(format string, args ...any) {
+	g.Errorf(format, args...)
+}
+
+// Group runs several focus assertions as one fatal check.
+//
+// The assertions are given a recording focus.TB, so a mismatch in any of them
+// does not stop the closure: every assertion runs and every failure is
+// collected. If anything failed, the collected messages are reported through
+// Errorf and the test is then stopped with Fatalf, so downstream logic never
+// runs on a value that failed its prerequisites.
+//
+//	require.Group(t, func(g focus.TB) {
+//		focus.AssertFee(g, env, 100)
+//		focus.AssertSourceAccount(g, env, alice)
+//		focus.AssertOperationCount(g, env, 2)
+//	})
+//
+// A group that passes reports nothing.
+func Group(t focus.TB, fn func(g focus.TB)) {
+	t.Helper()
+	if fn == nil {
+		t.Fatalf("group assertions failed: no assertions were given")
+		return
+	}
+
+	recorder := &groupTB{TB: t}
+	fn(recorder)
+
+	if len(recorder.messages) == 0 {
+		return
+	}
+	for _, msg := range recorder.messages {
+		t.Errorf("%s", msg)
+	}
+	t.Fatalf("group assertions failed")
 }
 
 // EnvelopeEqual is focus.AssertEnvelopeEqual, stopping the test on failure.
