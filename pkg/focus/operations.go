@@ -1,6 +1,7 @@
 package focus
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -240,4 +241,108 @@ func describeTrustLimit(limit int64, unit string) string {
 		return "no limit"
 	}
 	return amountStroops(xdr.Int64(limit), unit)
+}
+
+// OpMatcher is a functional predicate for matching an operation.
+// It returns an error describing why the operation did not match, or nil if it matched.
+type OpMatcher func(op *xdr.Operation) error
+
+// MatchPayment returns an OpMatcher that checks if an operation is a Payment.
+// If dest is non-empty, it verifies the payment destination address.
+// If amount >= 0, it verifies the payment amount in stroops.
+func MatchPayment(dest string, amount int64) OpMatcher {
+	return func(op *xdr.Operation) error {
+		if op == nil {
+			return fmt.Errorf("operation is nil")
+		}
+		if op.Body.Type != xdr.OperationTypePayment || op.Body.PaymentOp == nil {
+			return fmt.Errorf("operation is %s, want Payment", operationTypeName(op.Body.Type))
+		}
+		payment := op.Body.PaymentOp
+		if dest != "" {
+			var gotDest string
+			account := payment.Destination.ToAccountId()
+			if addr, err := account.GetAddress(); err == nil {
+				gotDest = addr
+			}
+			if wantAddr, err := addressFromString(dest); err == nil {
+				if gotDest != wantAddr {
+					return fmt.Errorf("payment destination is %s, want %s", shorten(gotDest), shorten(wantAddr))
+				}
+			} else if gotDest != dest {
+				return fmt.Errorf("payment destination is %s, want %s", shorten(gotDest), shorten(dest))
+			}
+		}
+		if amount >= 0 {
+			if int64(payment.Amount) != amount {
+				return fmt.Errorf("payment amount is %d stroops, want %d", payment.Amount, amount)
+			}
+		}
+		return nil
+	}
+}
+
+// MatchSetOptions returns an OpMatcher that checks if an operation is a SetOptions operation.
+func MatchSetOptions() OpMatcher {
+	return func(op *xdr.Operation) error {
+		if op == nil {
+			return fmt.Errorf("operation is nil")
+		}
+		if op.Body.Type != xdr.OperationTypeSetOptions || op.Body.SetOptionsOp == nil {
+			return fmt.Errorf("operation is %s, want SetOptions", operationTypeName(op.Body.Type))
+		}
+		return nil
+	}
+}
+
+// MatchInvokeHost returns an OpMatcher that checks if an operation is an InvokeHostFunction operation.
+func MatchInvokeHost() OpMatcher {
+	return func(op *xdr.Operation) error {
+		if op == nil {
+			return fmt.Errorf("operation is nil")
+		}
+		if op.Body.Type != xdr.OperationTypeInvokeHostFunction || op.Body.InvokeHostFunctionOp == nil {
+			return fmt.Errorf("operation is %s, want InvokeHostFunction", operationTypeName(op.Body.Type))
+		}
+		return nil
+	}
+}
+
+// AssertOperationsMatch verifies a transaction envelope's operation list against a sequence of OpMatchers.
+// It reports a mismatch at the first failing matcher, or if the number of operations does not match.
+func AssertOperationsMatch(t TestingT, envInput any, matchers ...OpMatcher) bool {
+	t.Helper()
+	const assertion = "AssertOperationsMatch"
+
+	env, _, ok := envelopeFrom(t, assertion, envInput)
+	if !ok {
+		return false
+	}
+	var (
+		ops []xdr.Operation
+		err error
+	)
+	if !guard(t, assertion, func() { ops, err = transactionOperations(env) }) {
+		return false
+	}
+	if err != nil {
+		t.Errorf("%s: %v", assertion, err)
+		return false
+	}
+
+	if len(ops) != len(matchers) {
+		t.Errorf("%s: transaction has %d operation(s), want %d to match", assertion, len(ops), len(matchers))
+		return false
+	}
+
+	for i, m := range matchers {
+		if m == nil {
+			continue
+		}
+		if err := m(&ops[i]); err != nil {
+			t.Errorf("%s: operation %d does not match: %v", assertion, i, err)
+			return false
+		}
+	}
+	return true
 }

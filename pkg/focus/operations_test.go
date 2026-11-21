@@ -1,6 +1,7 @@
 package focus_test
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,6 +9,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // createAccountOpFor builds a create-account operation.
@@ -303,4 +305,95 @@ func TestAssertChangeTrustWithNoLimit(t *testing.T) {
 	if !strings.Contains(msg, "no limit") {
 		t.Errorf("the message does not explain the limit:\n%s", msg)
 	}
+}
+
+func TestAssertOperationsMatch(t *testing.T) {
+	t.Parallel()
+
+	setOptionsOp := xdr.Operation{
+		Body: xdr.OperationBody{
+			Type:         xdr.OperationTypeSetOptions,
+			SetOptionsOp: &xdr.SetOptionsOp{},
+		},
+	}
+	invokeHostOp := invokeHostFunctionOp(t)
+
+	env := buildEnvelope(t,
+		paymentOp(t, 100),
+		setOptionsOp,
+		invokeHostOp,
+	)
+
+	t.Run("matches exact pattern of operations", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertOperationsMatch(tb, env,
+			focus.MatchPayment(testDest, 100),
+			focus.MatchSetOptions(),
+			focus.MatchInvokeHost(),
+		) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.OperationsMatch(t, env,
+			focus.MatchPayment(testDest, 100),
+			focus.MatchSetOptions(),
+			focus.MatchInvokeHost(),
+		)
+	})
+
+	t.Run("supports custom OpMatcher predicate", func(t *testing.T) {
+		t.Parallel()
+
+		customMatcher := func(op *xdr.Operation) error {
+			if op.Body.Type != xdr.OperationTypePayment {
+				return fmt.Errorf("want Payment")
+			}
+			return nil
+		}
+
+		tb := faketb.New()
+		if !focus.AssertOperationsMatch(tb, env,
+			customMatcher,
+			focus.MatchSetOptions(),
+			focus.MatchInvokeHost(),
+		) {
+			t.Errorf("assertion failed with custom matcher:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("reports mismatch at first failing matcher", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertOperationsMatch(tb, env,
+			focus.MatchPayment(testDest, 100),
+			focus.MatchPayment(testDest, 200), // fails here
+			focus.MatchInvokeHost(),
+		) {
+			t.Fatal("assertion passed when second operation mismatched")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "operation 1 does not match") {
+			t.Errorf("message did not report failing index 1:\n%s", msg)
+		}
+	})
+
+	t.Run("reports count mismatch when matcher count differs", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertOperationsMatch(tb, env,
+			focus.MatchPayment(testDest, 100),
+			focus.MatchSetOptions(),
+		) {
+			t.Fatal("assertion passed with count mismatch")
+		}
+		if !strings.Contains(tb.Output(), "transaction has 3 operation(s), want 2 to match") {
+			t.Errorf("message did not report operation count mismatch:\n%s", tb.Output())
+		}
+	})
 }
