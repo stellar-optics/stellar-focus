@@ -123,6 +123,8 @@ func TestEveryMirrorReportsFatally(t *testing.T) {
 		{"TrustlineModified", func(tb *faketb.TB) { require.TrustlineModified(tb, "bad", "G", "native", 0) }},
 		{"SignersEqual", func(tb *faketb.TB) { require.SignersEqual(tb, "bad", "G", nil) }},
 		{"ThresholdsEqual", func(tb *faketb.TB) { require.ThresholdsEqual(tb, "bad", "G", focus.Thresholds{}) }},
+		{"HashSigner", func(tb *faketb.TB) { require.HashSigner(tb, "bad", [32]byte{}, 1) }},
+		{"PreAuthTxSigner", func(tb *faketb.TB) { require.PreAuthTxSigner(tb, "bad", [32]byte{}, 1) }},
 		{"TimeboundsValid", func(tb *faketb.TB) { require.TimeboundsValid(tb, env, 1, 2) }},
 		{"LedgerboundsValid", func(tb *faketb.TB) { require.LedgerboundsValid(tb, env, 1, 0) }},
 		{"TimeBounds", func(tb *faketb.TB) { require.TimeBounds(tb, env, 1, 2) }},
