@@ -55,6 +55,9 @@ type TB interface {
 	Name() string
 }
 
+// TestingT is an alias for TB for compatibility with standard testing interfaces.
+type TestingT = TB
+
 // Value is any XDR payload an assertion accepts. The permitted forms are:
 //
 //	string                          base64-encoded XDR

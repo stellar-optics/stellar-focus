@@ -383,3 +383,80 @@ func TestDescribeScErrorRendering(t *testing.T) {
 		})
 	}
 }
+
+func TestAssertContractPanicReason(t *testing.T) {
+	t.Parallel()
+
+	meta101 := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger),
+		fnCall("transfer", false),
+		errorEvent(hostErrorVal(101)))
+
+	meta4 := trappedMeta(t)
+	evidence := trappedEvidence(t)
+	vmResponse := trappedResponse(t,
+		fnCall("transfer", false),
+		errorEvent(vmErrorVal(xdr.ScErrorCodeScecInvalidAction)))
+
+	t.Run("succeeds with uint32 contract error code from meta", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertContractPanicReason(tb, meta101, 101) {
+			t.Errorf("assertion failed for error code 101: %s", tb.Output())
+		}
+		require.ContractPanicReason(t, meta101, 101)
+	})
+
+	t.Run("succeeds with TrapEvidence and RPC response", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertContractPanicReason(tb, evidence, uint32(4)) {
+			t.Errorf("assertion failed for evidence: %s", tb.Output())
+		}
+		tb2 := faketb.New()
+		if !focus.AssertContractPanicReason(tb2, vmResponse, "InvalidAction") {
+			t.Errorf("assertion failed for VM response: %s", tb2.Output())
+		}
+	})
+
+	t.Run("succeeds with xdr.ScError", func(t *testing.T) {
+		t.Parallel()
+		code := xdr.Uint32(101)
+		scErr := xdr.ScError{Type: xdr.ScErrorTypeSceContract, ContractCode: &code}
+		tb := faketb.New()
+		if !focus.AssertContractPanicReason(tb, meta101, scErr) {
+			t.Errorf("assertion failed for scErr: %s", tb.Output())
+		}
+	})
+
+	t.Run("fails stating transaction succeeded when no trap occurred", func(t *testing.T) {
+		t.Parallel()
+		successRes := buildResult(t, xdr.TransactionResultCodeTxSuccess)
+		tb := faketb.New()
+		if focus.AssertContractPanicReason(tb, focus.TrapEvidence{Result: successRes, Meta: meta101}, 101) {
+			t.Fatal("assertion unexpectedly passed on successful transaction")
+		}
+		if !strings.Contains(tb.Output(), "transaction succeeded; no contract trap occurred") {
+			t.Errorf("unexpected error message: %s", tb.Output())
+		}
+	})
+
+	t.Run("fails with informative diagnostic dump when different error code was emitted", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertContractPanicReason(tb, meta4, 101) {
+			t.Fatal("assertion unexpectedly passed for different error code")
+		}
+		msg := tb.Output()
+		for _, want := range []string{
+			"AssertContractPanicReason",
+			"contract trapped with different reason",
+			"want Error(Contract, #101)",
+			"got Error(Contract, #4)",
+			"host diagnostics searched",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("failure message missing %q:\n%s", want, msg)
+			}
+		}
+	})
+}

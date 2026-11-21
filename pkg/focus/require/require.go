@@ -673,3 +673,27 @@ func FailureSnapshot(t focus.TB, name string, fn func(focus.TB), opts ...focus.S
 	t.Helper()
 	focus.AssertFailureSnapshot(fatal(t), name, fn, opts...)
 }
+
+// ClaimPredicateTree is focus.AssertClaimPredicateTree, stopping the test on failure.
+func ClaimPredicateTree(t focus.TestingT, opOrEntry any, claimantIndex int, wantPredicate xdr.ClaimPredicate, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertClaimPredicateTree(fatal(t), opOrEntry, claimantIndex, wantPredicate, opts...)
+}
+
+// LiquidityPoolShares is focus.AssertLiquidityPoolShares, stopping the test on failure.
+func LiquidityPoolShares(t focus.TestingT, metaInput any, poolID string, wantShareDelta int64, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLiquidityPoolShares(fatal(t), metaInput, poolID, wantShareDelta, opts...)
+}
+
+// ContractPanicReason is focus.AssertContractPanicReason, stopping the test on failure.
+func ContractPanicReason(t focus.TestingT, resultOrMeta any, wantReason any, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertContractPanicReason(fatal(t), resultOrMeta, wantReason, opts...)
+}
+
+// TrustlineFlags is focus.AssertTrustlineFlags, stopping the test on failure.
+func TrustlineFlags(t focus.TestingT, metaOrEntry any, account string, asset string, wantFlags uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertTrustlineFlags(fatal(t), metaOrEntry, account, asset, wantFlags, opts...)
+}

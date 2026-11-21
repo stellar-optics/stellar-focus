@@ -9,6 +9,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 func TestAssertTrustlineModified(t *testing.T) {
@@ -230,6 +231,93 @@ func TestAssertTrustlineModifiedPoolShare(t *testing.T) {
 		}
 		if !strings.Contains(msg, address) {
 			t.Errorf("message does not name the wanted pool:\n%s", msg)
+		}
+	})
+}
+
+func TestAssertTrustlineFlags(t *testing.T) {
+	t.Parallel()
+
+	entryAuth := trustlineEntryValue(t, 100, 1000)
+	entryAuth.Data.TrustLine.Flags = xdr.Uint32(xdr.TrustLineFlagsAuthorizedFlag)
+
+	entryAuthClawback := trustlineEntryValue(t, 100, 1000)
+	entryAuthClawback.Data.TrustLine.Flags = xdr.Uint32(uint32(xdr.TrustLineFlagsAuthorizedFlag) | uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag))
+
+	entryLiabilities := trustlineEntryValue(t, 100, 1000)
+	entryLiabilities.Data.TrustLine.Flags = xdr.Uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag)
+
+	metaAuth := metaV2(t, []xdr.LedgerEntryChange{createdChange(entryAuth)})
+	metaAuthClawback := metaV2(t, []xdr.LedgerEntryChange{stateChange(entryAuth), updatedChange(entryAuthClawback)})
+
+	t.Run("asserts AUTHORIZED flag on created trustline", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertTrustlineFlags(tb, metaAuth, testDest, usdcAsset, uint32(xdr.TrustLineFlagsAuthorizedFlag)) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.TrustlineFlags(t, metaAuth, testDest, usdcAsset, uint32(xdr.TrustLineFlagsAuthorizedFlag))
+	})
+
+	t.Run("asserts AUTHORIZED and CLAWBACK_ENABLED flags on updated trustline", func(t *testing.T) {
+		t.Parallel()
+		wantFlags := uint32(xdr.TrustLineFlagsAuthorizedFlag) | uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag)
+		tb := faketb.New()
+		if !focus.AssertTrustlineFlags(tb, metaAuthClawback, testDest, usdcAsset, wantFlags) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("asserts direct TrustLineEntry and LedgerEntry", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertTrustlineFlags(tb, entryLiabilities.Data.TrustLine, testDest, usdcAsset, uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag)) {
+			t.Errorf("assertion failed on direct TrustLineEntry: %s", tb.Output())
+		}
+		tb2 := faketb.New()
+		if !focus.AssertTrustlineFlags(tb2, &entryLiabilities, testDest, usdcAsset, uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag)) {
+			t.Errorf("assertion failed on direct LedgerEntry: %s", tb2.Output())
+		}
+	})
+
+	t.Run("failure message prints human-readable active flags vs wanted flags", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		wantFlags := uint32(xdr.TrustLineFlagsAuthorizedFlag) | uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag)
+		if focus.AssertTrustlineFlags(tb, metaAuth, testDest, usdcAsset, wantFlags) {
+			t.Fatal("assertion unexpectedly passed when flags differed")
+		}
+		msg := tb.Output()
+		for _, want := range []string{
+			"AssertTrustlineFlags",
+			"has flags AUTHORIZED",
+			"want AUTHORIZED|CLAWBACK_ENABLED",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("failure message missing %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("untouched trustline fails", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertTrustlineFlags(tb, metaAuth, testDest, eurAsset, uint32(xdr.TrustLineFlagsAuthorizedFlag)) {
+			t.Fatal("assertion unexpectedly passed for untouched trustline")
+		}
+		if !strings.Contains(tb.Output(), "did not modify trustline") {
+			t.Errorf("unexpected error message: %s", tb.Output())
+		}
+	})
+
+	t.Run("native asset is rejected", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertTrustlineFlags(tb, metaAuth, testDest, "native", uint32(xdr.TrustLineFlagsAuthorizedFlag)) {
+			t.Fatal("assertion unexpectedly passed for native asset")
+		}
+		if !strings.Contains(tb.Output(), "the native asset has no trustline") {
+			t.Errorf("unexpected error message: %s", tb.Output())
 		}
 	})
 }
