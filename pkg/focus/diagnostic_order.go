@@ -2,6 +2,7 @@ package focus
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -556,4 +557,112 @@ func describeCloseTime(t time.Time) string {
 		return "(no close time)"
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// AssertContractLogMessage checks that a transaction's diagnostic events contain
+// a log message matching pattern.
+//
+// pattern can be a literal substring, or a regular expression enclosed in slashes
+// (e.g. "/user \d+ deposited/").
+//
+// When no match is found, failure output shows all captured diagnostic log events.
+func AssertContractLogMessage(t TestingT, metaInput any, pattern string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertContractLogMessage"
+	_ = newConfig(opts...)
+
+	var (
+		re       *regexp.Regexp
+		isRegex  bool
+		regexErr error
+	)
+	if len(pattern) >= 2 && strings.HasPrefix(pattern, "/") && strings.HasSuffix(pattern, "/") {
+		isRegex = true
+		re, regexErr = regexp.Compile(pattern[1 : len(pattern)-1])
+		if regexErr != nil {
+			t.Errorf("%s: invalid regular expression %s: %v", assertion, pattern, regexErr)
+			return false
+		}
+	}
+
+	matchStr := func(s string) bool {
+		if isRegex {
+			return re.MatchString(s)
+		}
+		return strings.Contains(s, pattern)
+	}
+
+	events, _, ok := diagnosticStream(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+
+	for _, e := range events {
+		if matchStr(e.detail) {
+			return true
+		}
+		if body, hasBody := e.event.Body.GetV0(); hasBody {
+			for _, topic := range body.Topics {
+				for _, str := range extractScValStrings(topic) {
+					if matchStr(str) {
+						return true
+					}
+				}
+				if matchStr(describeScVal(topic)) {
+					return true
+				}
+			}
+			for _, str := range extractScValStrings(body.Data) {
+				if matchStr(str) {
+					return true
+				}
+			}
+			if matchStr(describeScVal(body.Data)) {
+				return true
+			}
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: no diagnostic log message matched %q\n\n", assertion, pattern)
+	if len(events) == 0 {
+		b.WriteString("  the transaction emitted no diagnostic events")
+	} else {
+		fmt.Fprintf(&b, "  captured diagnostic event(s) (%d):\n%s",
+			len(events), indent(describeDiagnosticStream(events)))
+	}
+	t.Errorf("%s", b.String())
+	return false
+}
+
+func extractScValStrings(v xdr.ScVal) []string {
+	var res []string
+	switch v.Type {
+	case xdr.ScValTypeScvString:
+		if s, ok := v.GetStr(); ok {
+			res = append(res, string(s))
+		}
+	case xdr.ScValTypeScvSymbol:
+		if s, ok := v.GetSym(); ok {
+			res = append(res, string(s))
+		}
+	case xdr.ScValTypeScvBytes:
+		if b, ok := v.GetBytes(); ok {
+			res = append(res, string(b))
+		}
+	case xdr.ScValTypeScvVec:
+		if vec, ok := v.GetVec(); ok && vec != nil {
+			for _, item := range *vec {
+				res = append(res, extractScValStrings(item)...)
+			}
+		}
+	case xdr.ScValTypeScvMap:
+		if m, ok := v.GetMap(); ok && m != nil {
+			for _, entry := range *m {
+				res = append(res, extractScValStrings(entry.Key)...)
+				res = append(res, extractScValStrings(entry.Val)...)
+			}
+		}
+	}
+	return res
 }

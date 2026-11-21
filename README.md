@@ -1019,6 +1019,27 @@ The script prints transaction hashes at each step. View them on
 See [examples/README.md](examples/README.md) for full setup and a sample
 Soroban contract for the attest/settle steps.
 
+### Soroban Contract Testing (Go)
+
+`examples/soroban_test.go` provides a runnable Go test suite demonstrating contract assertions:
+- `TestSorobanDeploymentConstructorState` — Verifies contract initialization and instance storage entries.
+- `TestSorobanInvocationReturnValue` — Asserts on function return values.
+- `TestSorobanContractEvents` — Matches emitted event sequences.
+- `TestSorobanContractPanic` — Asserts on trapped panic reasons and contract error codes.
+- `TestSorobanContractDiagnosticLogs` — Matches diagnostic logs using substrings and regular expressions.
+- `TestSorobanResourceLimits` — Checks CPU instruction counts and storage footprint limits.
+
+Run the example tests:
+```sh
+go test -v ./examples/...
+```
+
+## Guides & Tutorials
+
+- [End-to-End Soroban Contract Testing Guide](docs/soroban_testing_guide.md) — Comprehensive tutorial covering contract deployment, `__constructor` state, return value assertions, event sequence matching, trap/panic inspection, diagnostic logs, and resource budget checks.
+- [Golden Fixtures & CI Integration Guide](docs/golden_fixtures_guide.md) — Complete guide on fixture anatomy, recording updates with `-focus.update`, interactive drift resolution via `focus golden resolve`, and GitHub Actions CI integration.
+
+
 ## Fuzzing
 
 The XDR this project has been reading is a seed corpus worth having: real

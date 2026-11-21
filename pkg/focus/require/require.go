@@ -727,3 +727,15 @@ func OfferPriceRatio(t focus.TestingT, opInput any, wantNumerator, wantDenominat
 	t.Helper()
 	focus.AssertOfferPriceRatio(fatal(t), opInput, wantNumerator, wantDenominator, opts...)
 }
+
+// OperationsMatch is focus.AssertOperationsMatch, stopping the test on failure.
+func OperationsMatch(t focus.TestingT, envInput any, matchers ...focus.OpMatcher) {
+	t.Helper()
+	focus.AssertOperationsMatch(fatal(t), envInput, matchers...)
+}
+
+// ContractLogMessage is focus.AssertContractLogMessage, stopping the test on failure.
+func ContractLogMessage(t focus.TestingT, metaInput any, pattern string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertContractLogMessage(fatal(t), metaInput, pattern, opts...)
+}
