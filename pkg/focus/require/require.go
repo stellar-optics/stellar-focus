@@ -517,6 +517,19 @@ func ThresholdsEqual(t focus.TB, meta, account, want focus.Value) {
 	focus.AssertThresholdsEqual(fatal(t), meta, account, want)
 }
 
+// HashSigner is focus.AssertHashSigner, stopping the test on failure.
+func HashSigner(t focus.TestingT, opOrEntry any, hash [32]byte, wantWeight uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertHashSigner(fatal(t), opOrEntry, hash, wantWeight, opts...)
+}
+
+// PreAuthTxSigner is focus.AssertPreAuthTxSigner, stopping the test on
+// failure.
+func PreAuthTxSigner(t focus.TestingT, opOrEntry any, txHash [32]byte, wantWeight uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertPreAuthTxSigner(fatal(t), opOrEntry, txHash, wantWeight, opts...)
+}
+
 // FailedOperations is focus.AssertFailedOperations, stopping the test on
 // failure.
 func FailedOperations(t focus.TB, result focus.Value, want ...int) {
