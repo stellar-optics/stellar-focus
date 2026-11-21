@@ -697,3 +697,33 @@ func TrustlineFlags(t focus.TestingT, metaOrEntry any, account string, asset str
 	t.Helper()
 	focus.AssertTrustlineFlags(fatal(t), metaOrEntry, account, asset, wantFlags, opts...)
 }
+
+// ClawbackRevocation is focus.AssertClawbackRevocation, stopping the test on failure.
+func ClawbackRevocation(t focus.TestingT, metaInput any, fromAccount, asset string, wantClawbackAmount int64, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertClawbackRevocation(fatal(t), metaInput, fromAccount, asset, wantClawbackAmount, opts...)
+}
+
+// FeeBumpInnerResultCode is focus.AssertFeeBumpInnerResultCode, stopping the test on failure.
+func FeeBumpInnerResultCode(t focus.TestingT, resultInput any, wantInnerCode string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertFeeBumpInnerResultCode(fatal(t), resultInput, wantInnerCode, opts...)
+}
+
+// SponsorshipTransition is focus.AssertSponsorshipTransition, stopping the test on failure.
+func SponsorshipTransition(t focus.TestingT, metaInput any, targetKey string, wantPrevSponsor, wantNewSponsor string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSponsorshipTransition(fatal(t), metaInput, targetKey, wantPrevSponsor, wantNewSponsor, opts...)
+}
+
+// PassiveOffer is focus.AssertPassiveOffer, stopping the test on failure.
+func PassiveOffer(t focus.TestingT, opInput any, wantPassive bool, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertPassiveOffer(fatal(t), opInput, wantPassive, opts...)
+}
+
+// OfferPriceRatio is focus.AssertOfferPriceRatio, stopping the test on failure.
+func OfferPriceRatio(t focus.TestingT, opInput any, wantNumerator, wantDenominator int32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertOfferPriceRatio(fatal(t), opInput, wantNumerator, wantDenominator, opts...)
+}
