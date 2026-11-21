@@ -159,23 +159,23 @@ func AssertTrustlineFlags(t TestingT, metaOrEntry any, account string, asset str
 	switch v := metaOrEntry.(type) {
 	case xdr.TrustLineEntry:
 		actualFlags := uint32(v.Flags)
-		return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+		return checkTrustlineFlags(t, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
 	case *xdr.TrustLineEntry:
 		if v == nil {
 			t.Errorf("%s: metaOrEntry is a nil *xdr.TrustLineEntry", assertion)
 			return false
 		}
 		actualFlags := uint32(v.Flags)
-		return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+		return checkTrustlineFlags(t, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
 	case xdr.LedgerEntry:
 		if v.Data.Type == xdr.LedgerEntryTypeTrustline && v.Data.TrustLine != nil {
 			actualFlags := uint32(v.Data.TrustLine.Flags)
-			return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+			return checkTrustlineFlags(t, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
 		}
 	case *xdr.LedgerEntry:
 		if v != nil && v.Data.Type == xdr.LedgerEntryTypeTrustline && v.Data.TrustLine != nil {
 			actualFlags := uint32(v.Data.TrustLine.Flags)
-			return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+			return checkTrustlineFlags(t, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
 		}
 	}
 
@@ -184,7 +184,7 @@ func AssertTrustlineFlags(t TestingT, metaOrEntry any, account string, asset str
 		return false
 	}
 
-	mod, ok := findTrustlineFlagsModification(t, assertion, changes, addr, spec)
+	mod, ok := findTrustlineFlagsModification(t, changes, addr, spec)
 	if !ok {
 		return false
 	}
@@ -194,7 +194,7 @@ func AssertTrustlineFlags(t TestingT, metaOrEntry any, account string, asset str
 		return false
 	}
 
-	return checkTrustlineFlags(t, assertion, spec.id, addr, mod.flags, wantFlags, mod)
+	return checkTrustlineFlags(t, spec.id, addr, mod.flags, wantFlags, mod)
 }
 
 // DescribeTrustlineFlags returns human-readable active flag names for a trustline flag bitmask.
@@ -230,9 +230,10 @@ type trustlineFlagsModification struct {
 }
 
 func findTrustlineFlagsModification(
-	t TB, assertion string, changes []ledgerChange, account string, spec assetSpec,
+	t TB, changes []ledgerChange, account string, spec assetSpec,
 ) (trustlineFlagsModification, bool) {
 	var mod trustlineFlagsModification
+	const assertion = "AssertTrustlineFlags"
 	ok := guard(t, assertion, func() {
 		for _, c := range changes {
 			if c.entryType != xdr.LedgerEntryTypeTrustline || c.account != account || c.asset != spec.id {
@@ -272,8 +273,9 @@ func trustlineEntryFlags(entry *xdr.LedgerEntry) (uint32, bool) {
 	return uint32(entry.Data.TrustLine.Flags), true
 }
 
-func checkTrustlineFlags(t TB, assertion, assetID, addr string, gotFlags, wantFlags uint32, mod trustlineFlagsModification) bool {
+func checkTrustlineFlags(t TB, assetID, addr string, gotFlags, wantFlags uint32, mod trustlineFlagsModification) bool {
 	t.Helper()
+	const assertion = "AssertTrustlineFlags"
 	if gotFlags == wantFlags {
 		return true
 	}

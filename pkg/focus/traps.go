@@ -332,7 +332,7 @@ func AssertContractPanicReason(t TestingT, resultOrMeta any, wantReason any, opt
 	const assertion = "AssertContractPanicReason"
 	_ = newConfig(opts...)
 
-	events, rawMeta, ok := extractTrapEvents(t, assertion, resultOrMeta)
+	events, rawMeta, ok := extractTrapEvents(t, resultOrMeta)
 	if !ok {
 		return false
 	}
@@ -348,26 +348,27 @@ func AssertContractPanicReason(t TestingT, resultOrMeta any, wantReason any, opt
 	return false
 }
 
-func extractTrapEvents(t TB, assertion string, resultOrMeta any) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+func extractTrapEvents(t TB, resultOrMeta any) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
 	t.Helper()
+	const assertion = "AssertContractPanicReason"
 
 	switch r := resultOrMeta.(type) {
 	case rpcproto.GetTransactionResponse:
-		return extractTrapEventsFromResponse(t, assertion, &r)
+		return extractTrapEventsFromResponse(t, &r)
 	case *rpcproto.GetTransactionResponse:
 		if r == nil {
 			t.Errorf("%s: resultOrMeta is a nil *protocol.GetTransactionResponse", assertion)
 			return nil, nil, false
 		}
-		return extractTrapEventsFromResponse(t, assertion, r)
+		return extractTrapEventsFromResponse(t, r)
 	case TrapEvidence:
-		return extractTrapEventsFromEvidence(t, assertion, r)
+		return extractTrapEventsFromEvidence(t, r)
 	case *TrapEvidence:
 		if r == nil {
 			t.Errorf("%s: resultOrMeta is a nil *TrapEvidence", assertion)
 			return nil, nil, false
 		}
-		return extractTrapEventsFromEvidence(t, assertion, *r)
+		return extractTrapEventsFromEvidence(t, *r)
 	default:
 		// Attempt to read as TransactionMeta directly
 		events, rawMeta, ok := diagnosticStream(t, assertion, resultOrMeta)
@@ -383,8 +384,9 @@ func extractTrapEvents(t TB, assertion string, resultOrMeta any) ([]DiagnosticEv
 	}
 }
 
-func extractTrapEventsFromResponse(t TB, assertion string, resp *rpcproto.GetTransactionResponse) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+func extractTrapEventsFromResponse(t TB, resp *rpcproto.GetTransactionResponse) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
 	t.Helper()
+	const assertion = "AssertContractPanicReason"
 	if resp.Status == "SUCCESS" || (resp.ResultXDR != "" && !isResultTrapped(resp.ResultXDR)) {
 		t.Errorf("%s: transaction succeeded; no contract trap occurred", assertion)
 		return nil, nil, false
@@ -407,8 +409,9 @@ func extractTrapEventsFromResponse(t TB, assertion string, resp *rpcproto.GetTra
 	return decorateDiagnostics(raw), nil, true
 }
 
-func extractTrapEventsFromEvidence(t TB, assertion string, ev TrapEvidence) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+func extractTrapEventsFromEvidence(t TB, ev TrapEvidence) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
 	t.Helper()
+	const assertion = "AssertContractPanicReason"
 	if ev.Result != nil && !isResultTrapped(ev.Result) {
 		t.Errorf("%s: transaction succeeded; no contract trap occurred", assertion)
 		return nil, nil, false

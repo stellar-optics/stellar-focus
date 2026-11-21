@@ -310,7 +310,7 @@ func AssertClaimPredicateTree(t TestingT, opOrEntry any, claimantIndex int, want
 	const assertion = "AssertClaimPredicateTree"
 	_ = newConfig(opts...)
 
-	claimants, ok := extractClaimants(t, assertion, opOrEntry)
+	claimants, ok := extractClaimants(t, opOrEntry)
 	if !ok {
 		return false
 	}
@@ -342,8 +342,9 @@ func AssertClaimPredicateTree(t TestingT, opOrEntry any, claimantIndex int, want
 }
 
 // extractClaimants retrieves the claimant slice from various accepted input types.
-func extractClaimants(t TB, assertion string, opOrEntry any) ([]xdr.Claimant, bool) {
+func extractClaimants(t TB, opOrEntry any) ([]xdr.Claimant, bool) {
 	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
 	if opOrEntry == nil {
 		t.Errorf("%s: opOrEntry is nil", assertion)
 		return nil, false
@@ -376,7 +377,7 @@ func extractClaimants(t TB, assertion string, opOrEntry any) ([]xdr.Claimant, bo
 			t.Errorf("%s: opOrEntry is a nil *xdr.Operation", assertion)
 			return nil, false
 		}
-		return extractClaimants(t, assertion, *v)
+		return extractClaimants(t, *v)
 	case xdr.LedgerEntry:
 		if v.Data.Type == xdr.LedgerEntryTypeClaimableBalance && v.Data.ClaimableBalance != nil {
 			return v.Data.ClaimableBalance.Claimants, true
@@ -388,7 +389,7 @@ func extractClaimants(t TB, assertion string, opOrEntry any) ([]xdr.Claimant, bo
 			t.Errorf("%s: opOrEntry is a nil *xdr.LedgerEntry", assertion)
 			return nil, false
 		}
-		return extractClaimants(t, assertion, *v)
+		return extractClaimants(t, *v)
 	case xdr.Claimant:
 		return []xdr.Claimant{v}, true
 	case *xdr.Claimant:
@@ -409,39 +410,39 @@ func extractClaimants(t TB, assertion string, opOrEntry any) ([]xdr.Claimant, bo
 			t.Errorf("%s: opOrEntry is a nil *xdr.ClaimPredicate", assertion)
 			return nil, false
 		}
-		return extractClaimants(t, assertion, *v)
+		return extractClaimants(t, *v)
 	case xdr.TransactionEnvelope:
-		return claimantsFromEnvelope(t, assertion, &v)
+		return claimantsFromEnvelope(t, &v)
 	case *xdr.TransactionEnvelope:
 		if v == nil {
 			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionEnvelope", assertion)
 			return nil, false
 		}
-		return claimantsFromEnvelope(t, assertion, v)
+		return claimantsFromEnvelope(t, v)
 	case xdr.TransactionMeta:
-		return claimantsFromMeta(t, assertion, v)
+		return claimantsFromMeta(t, v)
 	case *xdr.TransactionMeta:
 		if v == nil {
 			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionMeta", assertion)
 			return nil, false
 		}
-		return claimantsFromMeta(t, assertion, *v)
+		return claimantsFromMeta(t, *v)
 	default:
 		decoded, err := coerce(opOrEntry, "")
 		if err == nil && decoded != nil && decoded.Raw != nil {
 			switch raw := decoded.Raw.(type) {
 			case *xdr.TransactionEnvelope:
-				return claimantsFromEnvelope(t, assertion, raw)
+				return claimantsFromEnvelope(t, raw)
 			case *xdr.TransactionMeta:
-				return claimantsFromMeta(t, assertion, raw)
+				return claimantsFromMeta(t, raw)
 			case *xdr.LedgerEntry:
-				return extractClaimants(t, assertion, raw)
+				return extractClaimants(t, raw)
 			case *xdr.ClaimableBalanceEntry:
-				return extractClaimants(t, assertion, raw)
+				return extractClaimants(t, raw)
 			case *xdr.CreateClaimableBalanceOp:
-				return extractClaimants(t, assertion, raw)
+				return extractClaimants(t, raw)
 			case *xdr.Operation:
-				return extractClaimants(t, assertion, raw)
+				return extractClaimants(t, raw)
 			}
 		}
 		changes, ok := ledgerChanges(t, assertion, opOrEntry)
@@ -457,8 +458,9 @@ func extractClaimants(t TB, assertion string, opOrEntry any) ([]xdr.Claimant, bo
 	}
 }
 
-func claimantsFromEnvelope(t TB, assertion string, env *xdr.TransactionEnvelope) ([]xdr.Claimant, bool) {
+func claimantsFromEnvelope(t TB, env *xdr.TransactionEnvelope) ([]xdr.Claimant, bool) {
 	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
 	var ops []xdr.Operation
 	switch env.Type {
 	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
@@ -483,8 +485,9 @@ func claimantsFromEnvelope(t TB, assertion string, env *xdr.TransactionEnvelope)
 	return nil, false
 }
 
-func claimantsFromMeta(t TB, assertion string, meta any) ([]xdr.Claimant, bool) {
+func claimantsFromMeta(t TB, meta any) ([]xdr.Claimant, bool) {
 	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
 	changes, ok := ledgerChanges(t, assertion, meta)
 	if !ok {
 		return nil, false
