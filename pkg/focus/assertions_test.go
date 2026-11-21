@@ -846,6 +846,7 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		focus.AssertInstructionsBelow(tb, nil, 1)
 		focus.AssertSorobanResources(tb, v, 1, 1, 1)
 		focus.AssertResourceFee(tb, v, 1)
+		focus.AssertContractDataDurability(tb, v, "CAAAA", xdr.ScVal{}, xdr.ContractDataDurabilityPersistent)
 		focus.AssertPayment(tb, v, 0, "G", 1, "native")
 		focus.AssertCreateAccount(tb, v, 0, "G", 1)
 		focus.AssertChangeTrust(tb, v, 0, "native", 1)

@@ -909,3 +909,236 @@ func TestContractErrorRequiresFatalf(t *testing.T) {
 		t.Errorf("require lost the error comparison:\n%s", msg)
 	}
 }
+
+// TestAssertContractDataDurabilityPasses covers the ways a transaction can
+// write contract data: a created entry, an updated one, a restored one, and a
+// version 4 meta. Temporary and persistent are asserted independently, since
+// telling them apart is the whole point of the assertion.
+func TestAssertContractDataDurabilityPasses(t *testing.T) {
+	t.Parallel()
+
+	contractID := constructorContractID(t, 0x10)
+	counter := scSymbol("counter")
+	cache := scSymbol("cache")
+
+	meta := metaV3WithTx(t, nil, nil, []xdr.LedgerEntryChange{
+		createdChange(contractDataEntry(t, contractID, counter, scU32(1), xdr.ContractDataDurabilityPersistent)),
+		createdChange(contractDataEntry(t, contractID, cache, scU32(2), xdr.ContractDataDurabilityTemporary)),
+	})
+
+	updated := metaV3WithTx(t, nil, nil, []xdr.LedgerEntryChange{
+		stateChange(contractDataEntry(t, contractID, counter, scU32(1), xdr.ContractDataDurabilityPersistent)),
+		updatedChange(contractDataEntry(t, contractID, counter, scU32(2), xdr.ContractDataDurabilityPersistent)),
+	})
+
+	restored := metaV3WithTx(t, nil, nil, []xdr.LedgerEntryChange{
+		restoredChange(contractDataEntry(t, contractID, counter, scU32(3), xdr.ContractDataDurabilityTemporary)),
+	})
+
+	v4 := mustMarshal(t, xdr.TransactionMeta{
+		V: 4,
+		V4: &xdr.TransactionMetaV4{
+			TxChangesAfter: []xdr.LedgerEntryChange{
+				createdChange(contractDataEntry(t, contractID, cache, scU32(4), xdr.ContractDataDurabilityPersistent)),
+			},
+		},
+	})
+
+	tests := []struct {
+		name string
+		meta focus.Value
+		key  xdr.ScVal
+		want xdr.ContractDataDurability
+		opts []focus.Option
+	}{
+		{
+			name: "persistent storage",
+			meta: meta,
+			key:  counter,
+			want: xdr.ContractDataDurabilityPersistent,
+		},
+		{
+			name: "temporary storage",
+			meta: meta,
+			key:  cache,
+			want: xdr.ContractDataDurabilityTemporary,
+		},
+		{
+			name: "an updated entry",
+			meta: updated,
+			key:  counter,
+			want: xdr.ContractDataDurabilityPersistent,
+		},
+		{
+			name: "a restored entry",
+			meta: restored,
+			key:  counter,
+			want: xdr.ContractDataDurabilityTemporary,
+		},
+		{
+			name: "a version 4 meta",
+			meta: v4,
+			key:  cache,
+			want: xdr.ContractDataDurabilityPersistent,
+		},
+		{
+			name: "with a label",
+			meta: meta,
+			key:  counter,
+			want: xdr.ContractDataDurabilityPersistent,
+			opts: []focus.Option{focus.WithLabel("step 2: allocate")},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if !focus.AssertContractDataDurability(tb, tc.meta, contractID, tc.key, tc.want, tc.opts...) {
+				t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+			}
+			if tb.Failed() {
+				t.Errorf("assertion reported a failure while returning true:\n%s", tb.Output())
+			}
+		})
+	}
+}
+
+// TestAssertContractDataDurabilityFailures pins what a deviating durability
+// says: the key, the contract, the durability that was found and the one that
+// was wanted. A key the transaction never wrote is a separate failure that
+// lists the contract data that is there.
+func TestAssertContractDataDurabilityFailures(t *testing.T) {
+	t.Parallel()
+
+	contractID := constructorContractID(t, 0x11)
+	counter := scSymbol("counter")
+	cache := scSymbol("cache")
+
+	meta := metaV3WithTx(t, nil, nil, []xdr.LedgerEntryChange{
+		createdChange(contractDataEntry(t, contractID, counter, scU32(1), xdr.ContractDataDurabilityPersistent)),
+		createdChange(contractDataEntry(t, contractID, cache, scU32(2), xdr.ContractDataDurabilityTemporary)),
+	})
+
+	tests := []struct {
+		name     string
+		call     func(focus.TB) bool
+		contains []string
+	}{
+		{
+			name: "persistent where temporary was expected",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, contractID, counter,
+					xdr.ContractDataDurabilityTemporary)
+			},
+			contains: []string{
+				"AssertContractDataDurability",
+				`contract data "counter"`,
+				"has persistent durability, want temporary",
+				"contract data present (2)",
+				`"cache"`,
+			},
+		},
+		{
+			name: "temporary where persistent was expected",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, contractID, cache,
+					xdr.ContractDataDurabilityPersistent)
+			},
+			contains: []string{
+				`contract data "cache"`,
+				"has temporary durability, want persistent",
+			},
+		},
+		{
+			name: "a key the transaction never wrote",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, contractID, scSymbol("missing"),
+					xdr.ContractDataDurabilityPersistent)
+			},
+			contains: []string{
+				`wrote no contract data for key "missing"`,
+				"contract data present (2)",
+			},
+		},
+		{
+			name: "an empty contract id",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, "", counter,
+					xdr.ContractDataDurabilityPersistent)
+			},
+			contains: []string{"contractID is empty"},
+		},
+		{
+			name: "a contract id that is not a strkey",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, "CAAAA", counter,
+					xdr.ContractDataDurabilityPersistent)
+			},
+			contains: []string{"not a valid strkey contract address"},
+		},
+		{
+			name: "a meta with no contract data",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, metaV2(t), contractID, counter,
+					xdr.ContractDataDurabilityPersistent)
+			},
+			contains: []string{"carries no contract data changes"},
+		},
+		{
+			name: "the label is shown",
+			call: func(tb focus.TB) bool {
+				return focus.AssertContractDataDurability(tb, meta, contractID, counter,
+					xdr.ContractDataDurabilityTemporary, focus.WithLabel("step 2: allocate"))
+			},
+			contains: []string{"AssertContractDataDurability [step 2: allocate]"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if tc.call(tb) {
+				t.Fatal("assertion passed, want a failure")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("reading the failure message: %v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("failure message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestContractDataDurabilityRequiresFatalf covers the require mirror.
+func TestContractDataDurabilityRequiresFatalf(t *testing.T) {
+	t.Parallel()
+
+	contractID := constructorContractID(t, 0x12)
+	counter := scSymbol("counter")
+	meta := metaV3WithTx(t, nil, nil, []xdr.LedgerEntryChange{
+		createdChange(contractDataEntry(t, contractID, counter, scU32(1), xdr.ContractDataDurabilityPersistent)),
+	})
+
+	tb := faketb.New()
+	require.ContractDataDurability(tb, meta, contractID, counter, xdr.ContractDataDurabilityTemporary)
+	if len(tb.Fatals) != 1 || len(tb.Errors) != 0 {
+		t.Fatalf("require reported through Errorf; want one Fatalf (errors=%d fatals=%d)",
+			len(tb.Errors), len(tb.Fatals))
+	}
+
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("reading the failure message: %v", err)
+	}
+	if !strings.Contains(msg, "has persistent durability, want temporary") {
+		t.Errorf("require lost the durability comparison:\n%s", msg)
+	}
+}
