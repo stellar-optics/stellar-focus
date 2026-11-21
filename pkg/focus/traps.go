@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 	rpcproto "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -312,4 +313,319 @@ func describeScError(e xdr.ScError) string {
 		return fmt.Sprintf("Error(%s, %s)", name, codeName)
 	}
 	return fmt.Sprintf("Error(%s)", name)
+}
+
+// AssertContractPanicReason checks that the transaction failed with a contract trap,
+// and that the host diagnostic events record the expected panic reason.
+//
+// resultOrMeta accepts:
+//   - protocol.GetTransactionResponse (or pointer to it)
+//   - TrapEvidence (or pointer to it)
+//   - TransactionMeta (in any form accepted by focus: xdr.TransactionMeta, *xdr.TransactionMeta, base64, bytes, *lens.Value)
+//
+// wantReason accepts:
+//   - uint32 / int / numeric (contract error code, e.g. 101 -> Error(Contract, #101))
+//   - xdr.ScError (exact host error structure)
+//   - string (error symbol name or expected diagnostic substring)
+func AssertContractPanicReason(t TestingT, resultOrMeta any, wantReason any, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertContractPanicReason"
+	_ = newConfig(opts...)
+
+	events, rawMeta, ok := extractTrapEvents(t, assertion, resultOrMeta)
+	if !ok {
+		return false
+	}
+
+	matched, wantDesc, actualDesc := matchPanicReason(wantReason, events, rawMeta)
+	if matched {
+		return true
+	}
+
+	t.Errorf("%s: contract trapped with different reason: want %s, got %s\n\n%s",
+		assertion, wantDesc, actualDesc,
+		indent(describeDiagnosticMiss(events, wantDesc)))
+	return false
+}
+
+func extractTrapEvents(t TB, assertion string, resultOrMeta any) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+	t.Helper()
+
+	switch r := resultOrMeta.(type) {
+	case rpcproto.GetTransactionResponse:
+		return extractTrapEventsFromResponse(t, assertion, &r)
+	case *rpcproto.GetTransactionResponse:
+		if r == nil {
+			t.Errorf("%s: resultOrMeta is a nil *protocol.GetTransactionResponse", assertion)
+			return nil, nil, false
+		}
+		return extractTrapEventsFromResponse(t, assertion, r)
+	case TrapEvidence:
+		return extractTrapEventsFromEvidence(t, assertion, r)
+	case *TrapEvidence:
+		if r == nil {
+			t.Errorf("%s: resultOrMeta is a nil *TrapEvidence", assertion)
+			return nil, nil, false
+		}
+		return extractTrapEventsFromEvidence(t, assertion, *r)
+	default:
+		// Attempt to read as TransactionMeta directly
+		events, rawMeta, ok := diagnosticStream(t, assertion, resultOrMeta)
+		if !ok {
+			return nil, nil, false
+		}
+		// Check whether a trap/error is recorded
+		if !metaIndicatesTrap(events, rawMeta) {
+			t.Errorf("%s: transaction succeeded; no contract trap occurred", assertion)
+			return nil, nil, false
+		}
+		return events, rawMeta, true
+	}
+}
+
+func extractTrapEventsFromResponse(t TB, assertion string, resp *rpcproto.GetTransactionResponse) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+	t.Helper()
+	if resp.Status == "SUCCESS" || (resp.ResultXDR != "" && !isResultTrapped(resp.ResultXDR)) {
+		t.Errorf("%s: transaction succeeded; no contract trap occurred", assertion)
+		return nil, nil, false
+	}
+	if len(resp.DiagnosticEventsXDR) == 0 {
+		t.Errorf("%s: the transaction response carries no diagnostic events", assertion)
+		return nil, nil, false
+	}
+	var raw []xdr.DiagnosticEvent
+	var err error
+	if !guard(t, assertion, func() {
+		raw, err = decodeDiagnosticEvents(resp.DiagnosticEventsXDR)
+	}) {
+		return nil, nil, false
+	}
+	if err != nil {
+		t.Errorf("%s: decoding diagnostic events: %v", assertion, err)
+		return nil, nil, false
+	}
+	return decorateDiagnostics(raw), nil, true
+}
+
+func extractTrapEventsFromEvidence(t TB, assertion string, ev TrapEvidence) ([]DiagnosticEvent, *xdr.TransactionMeta, bool) {
+	t.Helper()
+	if ev.Result != nil && !isResultTrapped(ev.Result) {
+		t.Errorf("%s: transaction succeeded; no contract trap occurred", assertion)
+		return nil, nil, false
+	}
+	if ev.Meta == nil {
+		t.Errorf("%s: TrapEvidence carries no meta", assertion)
+		return nil, nil, false
+	}
+	events, rawMeta, ok := diagnosticStream(t, assertion, ev.Meta)
+	if !ok {
+		return nil, nil, false
+	}
+	if len(events) == 0 {
+		t.Errorf("%s: the transaction meta carries no diagnostic events", assertion)
+		return nil, nil, false
+	}
+	return events, rawMeta, true
+}
+
+func isResultTrapped(res Value) bool {
+	decoded, err := coerce(res, "TransactionResult")
+	if err != nil {
+		return false
+	}
+	s, err := lens.Explain(decoded)
+	if err != nil || s == nil {
+		return false
+	}
+	for _, op := range s.Operations {
+		if op.Result != nil && op.Result.Code == "invoke_host_function_trapped" {
+			return true
+		}
+	}
+	return false
+}
+
+func metaIndicatesTrap(events []DiagnosticEvent, rawMeta *xdr.TransactionMeta) bool {
+	if rawMeta != nil {
+		if retVal, ok := metaReturnValue(rawMeta); ok {
+			if _, isErr := scValError(retVal); isErr {
+				return true
+			}
+		}
+	}
+	for _, e := range events {
+		if e.Kind == DiagnosticError || !e.InSuccessfulContractCall {
+			return true
+		}
+		if data, ok := eventData(e); ok {
+			if _, isErr := scValError(data); isErr {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toUint32(v any) (uint32, bool) {
+	switch val := v.(type) {
+	case uint32:
+		return val, true
+	case int:
+		if val >= 0 {
+			return uint32(val), true
+		}
+	case int32:
+		if val >= 0 {
+			return uint32(val), true
+		}
+	case int64:
+		if val >= 0 {
+			return uint32(val), true
+		}
+	case uint:
+		return uint32(val), true
+	case uint64:
+		return uint32(val), true
+	}
+	return 0, false
+}
+
+func matchPanicReason(wantReason any, events []DiagnosticEvent, rawMeta *xdr.TransactionMeta) (matched bool, wantDesc string, actualDesc string) {
+	var actualReasons []string
+
+	// Collect any actual errors from events and rawMeta
+	collectActual := func(e xdr.ScError) {
+		desc := describeScError(e)
+		for _, a := range actualReasons {
+			if a == desc {
+				return
+			}
+		}
+		actualReasons = append(actualReasons, desc)
+	}
+
+	for _, e := range events {
+		if data, ok := eventData(e); ok {
+			if scErr, ok := scValError(data); ok {
+				collectActual(scErr)
+			}
+		}
+	}
+	if rawMeta != nil {
+		if retVal, ok := metaReturnValue(rawMeta); ok {
+			if scErr, ok := scValError(retVal); ok {
+				collectActual(scErr)
+			}
+		}
+	}
+
+	formatActual := func() string {
+		if len(actualReasons) == 0 {
+			return "none"
+		}
+		return strings.Join(actualReasons, ", ")
+	}
+
+	if code, ok := toUint32(wantReason); ok {
+		wantDesc = fmt.Sprintf("Error(Contract, #%d)", code)
+		for _, e := range events {
+			if data, ok := eventData(e); ok {
+				if scErr, ok := scValError(data); ok {
+					if scErr.Type == xdr.ScErrorTypeSceContract && scErr.ContractCode != nil && uint32(*scErr.ContractCode) == code {
+						return true, wantDesc, wantDesc
+					}
+				}
+			}
+			if strings.Contains(e.detail, fmt.Sprintf("Error(Contract, #%d)", code)) {
+				return true, wantDesc, wantDesc
+			}
+		}
+		if rawMeta != nil {
+			if retVal, ok := metaReturnValue(rawMeta); ok {
+				if scErr, ok := scValError(retVal); ok {
+					if scErr.Type == xdr.ScErrorTypeSceContract && scErr.ContractCode != nil && uint32(*scErr.ContractCode) == code {
+						return true, wantDesc, wantDesc
+					}
+				}
+			}
+		}
+		return false, wantDesc, formatActual()
+	}
+
+	switch w := wantReason.(type) {
+	case xdr.ScError:
+		wantDesc = describeScError(w)
+		for _, e := range events {
+			if data, ok := eventData(e); ok {
+				if scErr, ok := scValError(data); ok {
+					if scErr.Type == w.Type {
+						if w.Type == xdr.ScErrorTypeSceContract {
+							if w.ContractCode != nil && scErr.ContractCode != nil && *w.ContractCode == *scErr.ContractCode {
+								return true, wantDesc, wantDesc
+							}
+						} else {
+							if w.Code != nil && scErr.Code != nil && *w.Code == *scErr.Code {
+								return true, wantDesc, wantDesc
+							}
+						}
+					}
+				}
+			}
+			if strings.Contains(e.detail, wantDesc) {
+				return true, wantDesc, wantDesc
+			}
+		}
+		if rawMeta != nil {
+			if retVal, ok := metaReturnValue(rawMeta); ok {
+				if scErr, ok := scValError(retVal); ok {
+					if scErr.Type == w.Type {
+						if w.Type == xdr.ScErrorTypeSceContract {
+							if w.ContractCode != nil && scErr.ContractCode != nil && *w.ContractCode == *scErr.ContractCode {
+								return true, wantDesc, wantDesc
+							}
+						} else {
+							if w.Code != nil && scErr.Code != nil && *w.Code == *scErr.Code {
+								return true, wantDesc, wantDesc
+							}
+						}
+					}
+				}
+			}
+		}
+		return false, wantDesc, formatActual()
+
+	case string:
+		wantDesc = w
+		for _, e := range events {
+			if strings.Contains(e.detail, wantDesc) {
+				return true, wantDesc, wantDesc
+			}
+			if data, ok := eventData(e); ok {
+				if scErr, ok := scValError(data); ok {
+					if describeScError(scErr) == wantDesc {
+						return true, wantDesc, wantDesc
+					}
+					if scErr.Code != nil && strings.TrimPrefix(scErr.Code.String(), "ScErrorCodeScec") == wantDesc {
+						return true, wantDesc, wantDesc
+					}
+				}
+				if data.Type == xdr.ScValTypeScvSymbol && data.Sym != nil && string(*data.Sym) == wantDesc {
+					return true, wantDesc, wantDesc
+				}
+			}
+			for _, topic := range e.Topics {
+				if sym, ok := topic.(xdr.ScSymbol); ok && string(sym) == wantDesc {
+					return true, wantDesc, wantDesc
+				}
+				if sv, ok := topic.(xdr.ScVal); ok && sv.Type == xdr.ScValTypeScvSymbol && sv.Sym != nil && string(*sv.Sym) == wantDesc {
+					return true, wantDesc, wantDesc
+				}
+			}
+		}
+		return false, wantDesc, formatActual()
+
+	default:
+		wantDesc = fmt.Sprintf("%v", wantReason)
+		return false, wantDesc, formatActual()
+	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // poolFixture builds a pool before and after a deposit of 100/200 reserves
@@ -433,6 +434,74 @@ func TestLiquidityPoolEdgeCases(t *testing.T) {
 			if !strings.Contains(msg, label) {
 				t.Errorf("listing does not contain %q:\n%s", label, msg)
 			}
+		}
+	})
+}
+
+func TestAssertLiquidityPoolShares(t *testing.T) {
+	t.Parallel()
+
+	_, before, after := poolFixture(t)
+	depositMeta := metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(after)})
+	withdrawMeta := metaV2(t, []xdr.LedgerEntryChange{stateChange(after), updatedChange(before)})
+
+	t.Run("verifies minted shares on deposit", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertLiquidityPoolShares(tb, depositMeta, strings.Repeat("7a", 32), 70) {
+			t.Errorf("deposit assertion failed: %s", tb.Output())
+		}
+		require.LiquidityPoolShares(t, depositMeta, strings.Repeat("7a", 32), 70)
+	})
+
+	t.Run("verifies burned shares on withdrawal", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertLiquidityPoolShares(tb, withdrawMeta, strings.Repeat("7a", 32), -70) {
+			t.Errorf("withdrawal assertion failed: %s", tb.Output())
+		}
+		require.LiquidityPoolShares(t, withdrawMeta, strings.Repeat("7a", 32), -70)
+	})
+
+	t.Run("pool creation mints initial shares", func(t *testing.T) {
+		t.Parallel()
+		createMeta := metaV2(t, []xdr.LedgerEntryChange{createdChange(after)})
+		tb := faketb.New()
+		if !focus.AssertLiquidityPoolShares(tb, createMeta, strings.Repeat("7a", 32), 770) {
+			t.Errorf("creation assertion failed: %s", tb.Output())
+		}
+	})
+
+	t.Run("deviating share count shows clear diff with reserve movements and units", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertLiquidityPoolShares(tb, depositMeta, strings.Repeat("7a", 32), 100) {
+			t.Fatal("assertion unexpectedly passed for deviating shares")
+		}
+		msg := tb.Output()
+		for _, want := range []string{
+			"AssertLiquidityPoolShares: liquidity pool",
+			"share delta mismatch",
+			"~ shares: got +70 (0.0000070), want +100 (0.0000100)",
+			"reserve A",
+			"moved by +100 (0.0000100)",
+			"reserve B",
+			"moved by +200 (0.0000200)",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("failure message missing %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("untouched pool reports failure", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertLiquidityPoolShares(tb, depositMeta, strings.Repeat("99", 32), 70) {
+			t.Fatal("assertion unexpectedly passed for untouched pool")
+		}
+		if !strings.Contains(tb.Output(), "the transaction did not change liquidity pool") {
+			t.Errorf("unexpected error message: %s", tb.Output())
 		}
 	})
 }

@@ -500,3 +500,58 @@ func signedStroops(v int64) string {
 	}
 	return amountStroops(xdr.Int64(v), "")
 }
+
+// AssertLiquidityPoolShares verifies minted or burned pool shares and reserve movements
+// for a liquidity pool.
+//
+// metaInput accepts any transaction meta form accepted by ledgerChanges.
+// poolID accepts 64 hex characters (with or without "pool:" or "0x"), an xdr.PoolId,
+// or an xdr.TrustLineAsset for the pool's shares.
+// wantShareDelta is the expected net change in total pool shares (positive for deposits,
+// negative for withdrawals).
+func AssertLiquidityPoolShares(t TestingT, metaInput any, poolID string, wantShareDelta int64, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertLiquidityPoolShares"
+	_ = newConfig(opts...)
+
+	changes, ok := ledgerChanges(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+	id, ok := resolvePoolID(t, assertion, poolID)
+	if !ok {
+		return false
+	}
+	mov, ok := poolMovementOf(t, assertion, changes, id)
+	if !ok {
+		return false
+	}
+
+	if !mov.touched {
+		t.Errorf("%s: the transaction did not change liquidity pool %s\n\n%s",
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
+		return false
+	}
+	if !mov.hasBefore {
+		t.Errorf("%s: this meta does not record liquidity pool %s before the change, "+
+			"so the movement cannot be measured\n\n%s",
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
+		return false
+	}
+
+	delta := mov.delta()
+	if delta.shares == wantShareDelta {
+		return true
+	}
+
+	t.Errorf("%s: liquidity pool %s share delta mismatch\n\n"+
+		"  ~ shares: got %s, want %s\n"+
+		"    reserve A%s moved by %s\n"+
+		"    reserve B%s moved by %s\n\n%s",
+		assertion, shortenID(id),
+		signedStroops(delta.shares), signedStroops(wantShareDelta),
+		poolAssetSuffix(mov.assetA), signedStroops(delta.a),
+		poolAssetSuffix(mov.assetB), signedStroops(delta.b),
+		indent(describePoolMovement(mov)))
+	return false
+}

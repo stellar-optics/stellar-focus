@@ -8,6 +8,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 func TestAssertClaimableBalanceCreated(t *testing.T) {
@@ -369,6 +370,115 @@ func TestClaimableBalanceEdgeCases(t *testing.T) {
 			if !strings.Contains(msg, want) {
 				t.Errorf("message does not contain %q:\n%s", want, msg)
 			}
+		}
+	})
+}
+
+func TestAssertClaimPredicateTree(t *testing.T) {
+	t.Parallel()
+
+	unconditional := xdr.ClaimPredicate{
+		Type: xdr.ClaimPredicateTypeClaimPredicateUnconditional,
+	}
+
+	absTime := int64(1_700_000_000)
+	absPred := xdr.ClaimPredicate{
+		Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
+		AbsBefore: (*xdr.Int64)(&absTime),
+	}
+
+	relTime := int64(300)
+	relPred := xdr.ClaimPredicate{
+		Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime,
+		RelBefore: (*xdr.Int64)(&relTime),
+	}
+
+	notAbsPred := xdr.ClaimPredicate{
+		Type:         xdr.ClaimPredicateTypeClaimPredicateNot,
+		NotPredicate: func() **xdr.ClaimPredicate { p := &absPred; return &p }(),
+	}
+
+	orPred := xdr.ClaimPredicate{
+		Type:         xdr.ClaimPredicateTypeClaimPredicateOr,
+		OrPredicates: &[]xdr.ClaimPredicate{unconditional, relPred},
+	}
+
+	andPred := xdr.ClaimPredicate{
+		Type:          xdr.ClaimPredicateTypeClaimPredicateAnd,
+		AndPredicates: &[]xdr.ClaimPredicate{notAbsPred, orPred},
+	}
+
+	claimant := xdr.Claimant{
+		Type: xdr.ClaimantTypeClaimantTypeV0,
+		V0: &xdr.ClaimantV0{
+			Destination: mustAccountID(t, testDest),
+			Predicate:   andPred,
+		},
+	}
+
+	entry := claimableBalanceEntryWith(claimableBalanceIDValue(0x55), nativeAsset(), 1000, claimant)
+	op := xdr.CreateClaimableBalanceOp{
+		Asset:     nativeAsset(),
+		Amount:    1000,
+		Claimants: []xdr.Claimant{claimant},
+	}
+
+	t.Run("matches complex nested predicate on entry and operation", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertClaimPredicateTree(tb, entry, 0, andPred) {
+			t.Errorf("assertion failed for entry: %s", tb.Output())
+		}
+		tb2 := faketb.New()
+		if !focus.AssertClaimPredicateTree(tb2, op, 0, andPred) {
+			t.Errorf("assertion failed for op: %s", tb2.Output())
+		}
+		// Require mirror test
+		require.ClaimPredicateTree(t, entry, 0, andPred)
+	})
+
+	t.Run("failure shows structural path diff and human-readable timestamps", func(t *testing.T) {
+		t.Parallel()
+		deviatingAbsTime := int64(1_600_000_000)
+		deviatingAbsPred := xdr.ClaimPredicate{
+			Type:      xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime,
+			AbsBefore: (*xdr.Int64)(&deviatingAbsTime),
+		}
+		deviatingNot := xdr.ClaimPredicate{
+			Type:         xdr.ClaimPredicateTypeClaimPredicateNot,
+			NotPredicate: func() **xdr.ClaimPredicate { p := &deviatingAbsPred; return &p }(),
+		}
+		deviatingAnd := xdr.ClaimPredicate{
+			Type:          xdr.ClaimPredicateTypeClaimPredicateAnd,
+			AndPredicates: &[]xdr.ClaimPredicate{deviatingNot, orPred},
+		}
+
+		tb := faketb.New()
+		if focus.AssertClaimPredicateTree(tb, entry, 0, deviatingAnd) {
+			t.Fatal("assertion unexpectedly passed for deviating predicate")
+		}
+		msg := tb.Output()
+		for _, want := range []string{
+			"AssertClaimPredicateTree",
+			`at path "$.and[0].not"`,
+			"1600000000",
+			"1700000000",
+			"2023-11-14T22:13:20Z",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message missing %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("claimantIndex out of bounds reports informative error", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertClaimPredicateTree(tb, entry, 5, andPred) {
+			t.Fatal("assertion unexpectedly passed for out of bounds index")
+		}
+		if !strings.Contains(tb.Output(), "claimantIndex 5 out of bounds") {
+			t.Errorf("unexpected error message: %s", tb.Output())
 		}
 	})
 }

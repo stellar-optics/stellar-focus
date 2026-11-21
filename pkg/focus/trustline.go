@@ -2,6 +2,7 @@ package focus
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -126,5 +127,172 @@ func describeTrustlineModification(mod trustlineModification) string {
 			amountStroops(mod.before, ""), amountStroops(mod.limit, ""))
 	default:
 		return "limit " + amountStroops(mod.limit, "")
+	}
+}
+
+// AssertTrustlineFlags checks that an account's trustline for asset has flags matching wantFlags.
+//
+// metaOrEntry accepts a TransactionMeta (in any form accepted by focus) or a direct
+// xdr.TrustLineEntry or xdr.LedgerEntry.
+//
+// account and asset accept the same forms as AssertTrustlineModified.
+// Flags are compared against wantFlags bitmask, and failure messages display
+// human-readable active flag names (e.g. AUTHORIZED, CLAWBACK_ENABLED).
+func AssertTrustlineFlags(t TestingT, metaOrEntry any, account string, asset string, wantFlags uint32, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertTrustlineFlags"
+	_ = newConfig(opts...)
+
+	addr, ok := resolveAccount(t, assertion, "account", account)
+	if !ok {
+		return false
+	}
+	spec, ok := resolveAsset(t, assertion, "asset", asset)
+	if !ok {
+		return false
+	}
+	if spec.native {
+		t.Errorf("%s: the native asset has no trustline", assertion)
+		return false
+	}
+
+	switch v := metaOrEntry.(type) {
+	case xdr.TrustLineEntry:
+		actualFlags := uint32(v.Flags)
+		return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+	case *xdr.TrustLineEntry:
+		if v == nil {
+			t.Errorf("%s: metaOrEntry is a nil *xdr.TrustLineEntry", assertion)
+			return false
+		}
+		actualFlags := uint32(v.Flags)
+		return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+	case xdr.LedgerEntry:
+		if v.Data.Type == xdr.LedgerEntryTypeTrustline && v.Data.TrustLine != nil {
+			actualFlags := uint32(v.Data.TrustLine.Flags)
+			return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+		}
+	case *xdr.LedgerEntry:
+		if v != nil && v.Data.Type == xdr.LedgerEntryTypeTrustline && v.Data.TrustLine != nil {
+			actualFlags := uint32(v.Data.TrustLine.Flags)
+			return checkTrustlineFlags(t, assertion, spec.id, addr, actualFlags, wantFlags, trustlineFlagsModification{modified: true, flags: actualFlags})
+		}
+	}
+
+	changes, ok := ledgerChanges(t, assertion, metaOrEntry)
+	if !ok {
+		return false
+	}
+
+	mod, ok := findTrustlineFlagsModification(t, assertion, changes, addr, spec)
+	if !ok {
+		return false
+	}
+	if !mod.modified {
+		t.Errorf("%s: the transaction did not modify trustline %s on account %s\n\n%s",
+			assertion, spec.id, shorten(addr), indent(describeAccountChanges(changes, addr)))
+		return false
+	}
+
+	return checkTrustlineFlags(t, assertion, spec.id, addr, mod.flags, wantFlags, mod)
+}
+
+// DescribeTrustlineFlags returns human-readable active flag names for a trustline flag bitmask.
+func DescribeTrustlineFlags(flags uint32) string {
+	var parts []string
+	if flags&uint32(xdr.TrustLineFlagsAuthorizedFlag) != 0 {
+		parts = append(parts, "AUTHORIZED")
+	}
+	if flags&uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) != 0 {
+		parts = append(parts, "AUTHORIZED_TO_MAINTAIN_LIABILITIES")
+	}
+	if flags&uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag) != 0 {
+		parts = append(parts, "CLAWBACK_ENABLED")
+	}
+	known := uint32(xdr.TrustLineFlagsAuthorizedFlag) |
+		uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) |
+		uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag)
+	if remaining := flags &^ known; remaining != 0 {
+		parts = append(parts, fmt.Sprintf("UNKNOWN_0x%x", remaining))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "|")
+}
+
+type trustlineFlagsModification struct {
+	modified  bool
+	created   bool
+	hasBefore bool
+	before    uint32
+	flags     uint32
+}
+
+func findTrustlineFlagsModification(
+	t TB, assertion string, changes []ledgerChange, account string, spec assetSpec,
+) (trustlineFlagsModification, bool) {
+	var mod trustlineFlagsModification
+	ok := guard(t, assertion, func() {
+		for _, c := range changes {
+			if c.entryType != xdr.LedgerEntryTypeTrustline || c.account != account || c.asset != spec.id {
+				continue
+			}
+			switch c.kind {
+			case xdr.LedgerEntryChangeTypeLedgerEntryState:
+				if flags, has := trustlineEntryFlags(c.entry); has {
+					mod.before = flags
+					mod.hasBefore = true
+				}
+			case xdr.LedgerEntryChangeTypeLedgerEntryCreated:
+				if flags, has := trustlineEntryFlags(c.entry); has {
+					mod.flags = flags
+					mod.modified = true
+					mod.created = true
+				}
+			case xdr.LedgerEntryChangeTypeLedgerEntryUpdated,
+				xdr.LedgerEntryChangeTypeLedgerEntryRestored:
+				if flags, has := trustlineEntryFlags(c.entry); has {
+					mod.flags = flags
+					mod.modified = true
+				}
+			}
+		}
+	})
+	if !ok {
+		return trustlineFlagsModification{}, false
+	}
+	return mod, true
+}
+
+func trustlineEntryFlags(entry *xdr.LedgerEntry) (uint32, bool) {
+	if entry == nil || entry.Data.Type != xdr.LedgerEntryTypeTrustline || entry.Data.TrustLine == nil {
+		return 0, false
+	}
+	return uint32(entry.Data.TrustLine.Flags), true
+}
+
+func checkTrustlineFlags(t TB, assertion, assetID, addr string, gotFlags, wantFlags uint32, mod trustlineFlagsModification) bool {
+	t.Helper()
+	if gotFlags == wantFlags {
+		return true
+	}
+	t.Errorf("%s: trustline %s on account %s has flags %s (0x%x), want %s (0x%x)\n\n  %s",
+		assertion, assetID, shorten(addr),
+		DescribeTrustlineFlags(gotFlags), gotFlags,
+		DescribeTrustlineFlags(wantFlags), wantFlags,
+		describeTrustlineFlagsMovement(mod))
+	return false
+}
+
+func describeTrustlineFlagsMovement(mod trustlineFlagsModification) string {
+	switch {
+	case mod.created:
+		return "new trustline, flags " + DescribeTrustlineFlags(mod.flags)
+	case mod.hasBefore:
+		return fmt.Sprintf("flags %s → %s",
+			DescribeTrustlineFlags(mod.before), DescribeTrustlineFlags(mod.flags))
+	default:
+		return "flags " + DescribeTrustlineFlags(mod.flags)
 	}
 }
