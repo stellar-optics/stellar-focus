@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 func TestAssertOfferCreated(t *testing.T) {
@@ -799,6 +800,196 @@ func TestDexEdgeCases(t *testing.T) {
 		tb = faketb.New()
 		if focus.AssertTradeExecuted(tb, pooled, focus.Trade{AmountBought: 1}) {
 			t.Fatal("assertion passed for a different bought amount")
+		}
+	})
+}
+
+func TestAssertPassiveOffer(t *testing.T) {
+	t.Parallel()
+
+	usdc := mustCreditAsset(t, "USDC")
+	native := nativeAsset()
+
+	passiveOp := xdr.CreatePassiveSellOfferOp{
+		Selling: usdc,
+		Buying:  native,
+		Amount:  1000,
+		Price:   xdr.Price{N: 1, D: 2},
+	}
+	manageSellOp := xdr.ManageSellOfferOp{
+		Selling: usdc,
+		Buying:  native,
+		Amount:  1000,
+		Price:   xdr.Price{N: 1, D: 2},
+		OfferId: 0,
+	}
+	manageBuyOp := xdr.ManageBuyOfferOp{
+		Selling:   usdc,
+		Buying:    native,
+		BuyAmount: 1000,
+		Price:     xdr.Price{N: 1, D: 2},
+		OfferId:   0,
+	}
+	passiveOfferEntry := xdr.OfferEntry{
+		SellerId: mustAccountID(t, testSource),
+		OfferId:  42,
+		Selling:  usdc,
+		Buying:   native,
+		Amount:   1000,
+		Price:    xdr.Price{N: 1, D: 2},
+		Flags:    xdr.Uint32(xdr.OfferEntryFlagsPassiveFlag),
+	}
+	standardOfferEntry := xdr.OfferEntry{
+		SellerId: mustAccountID(t, testSource),
+		OfferId:  43,
+		Selling:  usdc,
+		Buying:   native,
+		Amount:   1000,
+		Price:    xdr.Price{N: 1, D: 2},
+		Flags:    0,
+	}
+
+	t.Run("passive sell offer operation is passive", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertPassiveOffer(tb, passiveOp, true) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.PassiveOffer(t, passiveOp, true)
+	})
+
+	t.Run("manage sell offer operation is not passive", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertPassiveOffer(tb, manageSellOp, false) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.PassiveOffer(t, manageSellOp, false)
+	})
+
+	t.Run("manage buy offer operation is not passive", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertPassiveOffer(tb, manageBuyOp, false) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.PassiveOffer(t, manageBuyOp, false)
+	})
+
+	t.Run("offer entry with passive flag is passive", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertPassiveOffer(tb, passiveOfferEntry, true) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.PassiveOffer(t, passiveOfferEntry, true)
+	})
+
+	t.Run("offer entry without passive flag is not passive", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertPassiveOffer(tb, standardOfferEntry, false) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.PassiveOffer(t, standardOfferEntry, false)
+	})
+
+	t.Run("mismatch reports failure", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if focus.AssertPassiveOffer(tb, manageSellOp, true) {
+			t.Fatal("assertion passed when wanting passive for standard offer")
+		}
+		if !strings.Contains(tb.Output(), "got passive=false, want passive=true") {
+			t.Errorf("failure message did not report passive state mismatch:\n%s", tb.Output())
+		}
+	})
+}
+
+func TestAssertOfferPriceRatio(t *testing.T) {
+	t.Parallel()
+
+	usdc := mustCreditAsset(t, "USDC")
+	native := nativeAsset()
+
+	passiveOp := xdr.CreatePassiveSellOfferOp{
+		Selling: usdc,
+		Buying:  native,
+		Amount:  1000,
+		Price:   xdr.Price{N: 1, D: 2},
+	}
+	manageSellOp := xdr.ManageSellOfferOp{
+		Selling: usdc,
+		Buying:  native,
+		Amount:  1000,
+		Price:   xdr.Price{N: 3, D: 4},
+		OfferId: 0,
+	}
+	manageBuyOp := xdr.ManageBuyOfferOp{
+		Selling:   usdc,
+		Buying:    native,
+		BuyAmount: 1000,
+		Price:     xdr.Price{N: 5, D: 6},
+		OfferId:   0,
+	}
+
+	t.Run("exact price ratio matching across operations", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertOfferPriceRatio(tb, passiveOp, 1, 2) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.OfferPriceRatio(t, passiveOp, 1, 2)
+
+		if !focus.AssertOfferPriceRatio(tb, manageSellOp, 3, 4) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.OfferPriceRatio(t, manageSellOp, 3, 4)
+
+		if !focus.AssertOfferPriceRatio(tb, manageBuyOp, 5, 6) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.OfferPriceRatio(t, manageBuyOp, 5, 6)
+	})
+
+	t.Run("fraction equivalence matches (1/2 == 2/4 == 50/100)", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertOfferPriceRatio(tb, passiveOp, 2, 4) {
+			t.Errorf("assertion failed for equivalent fraction 2/4:\n%s", tb.Output())
+		}
+		if !focus.AssertOfferPriceRatio(tb, passiveOp, 50, 100) {
+			t.Errorf("assertion failed for equivalent fraction 50/100:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("ratio mismatch reports fractions and decimals", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertOfferPriceRatio(tb, passiveOp, 3, 4) {
+			t.Fatal("assertion passed for mismatched ratio")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "1/2") || !strings.Contains(msg, "3/4") {
+			t.Errorf("message did not include fraction arithmetic:\n%s", msg)
+		}
+	})
+
+	t.Run("non-positive denominator is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertOfferPriceRatio(tb, passiveOp, 1, 0) {
+			t.Fatal("assertion passed for denominator 0")
+		}
+		if !strings.Contains(tb.Output(), "wantDenominator must be positive") {
+			t.Errorf("message did not report non-positive denominator error:\n%s", tb.Output())
 		}
 	})
 }

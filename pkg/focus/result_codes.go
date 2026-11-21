@@ -67,3 +67,48 @@ func describeWantedCode(want string) string {
 	return fmt.Sprintf("%q (not a known result code; codes are the short forms Horizon returns, "+
 		"such as \"tx_bad_seq\" or \"payment_underfunded\")", want)
 }
+
+// AssertFeeBumpInnerResultCode isolates and checks the inner failure code of a fee-bump transaction.
+//
+// When fee-bump transactions fail, the outer result is typically tx_fee_bump_inner_failed,
+// while the actionable failure code resides inside the inner transaction result.
+//
+// Both outer and inner codes are cleanly reported, and the failure output includes
+// lens plain-English explanations and remediations.
+func AssertFeeBumpInnerResultCode(t TestingT, resultInput any, wantInnerCode string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertFeeBumpInnerResultCode"
+	_ = newConfig(opts...)
+
+	s, ok := summarize(t, assertion, resultInput, "TransactionResult")
+	if !ok {
+		return false
+	}
+	if s.Outcome == nil {
+		t.Errorf("%s: transaction result carries no outcome", assertion)
+		return false
+	}
+	if s.Outcome.InnerReason == nil {
+		t.Errorf("%s: transaction result (outer code %q) is not a fee-bump transaction with an inner result",
+			assertion, s.Outcome.Reason.Code)
+		return false
+	}
+
+	gotInnerCode := s.Outcome.InnerReason.Code
+	if gotInnerCode == wantInnerCode {
+		return true
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: inner transaction result code is %q, want %q\n\n",
+		assertion, gotInnerCode, wantInnerCode)
+	fmt.Fprintf(&b, "  outer:      %s\n", describeReason(s.Outcome.Reason))
+	fmt.Fprintf(&b, "  got inner:  %s\n", describeReason(*s.Outcome.InnerReason))
+	if wantReason, ok := lens.ReasonByCode(wantInnerCode); ok {
+		fmt.Fprintf(&b, "  want inner: %s\n", describeReason(wantReason))
+	} else {
+		fmt.Fprintf(&b, "  want inner: %s\n", describeWantedCode(wantInnerCode))
+	}
+	t.Errorf("%s", b.String())
+	return false
+}

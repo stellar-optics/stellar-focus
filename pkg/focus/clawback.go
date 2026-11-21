@@ -268,6 +268,74 @@ func AssertClaimableBalanceRevoked(t TB, meta Value, balanceID Value) bool {
 	return false
 }
 
+// AssertClawbackRevocation verifies asset clawbacks and balance forfeiture on a target account.
+//
+// If the clawback reduced the balance to zero and removed the trustline, it confirms the
+// trustline entry transition was deleted (StateDeleted).
+// Amounts are provided and reported in stroops and formatted units.
+func AssertClawbackRevocation(t TestingT, metaInput any, fromAccount, asset string, wantClawbackAmount int64, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertClawbackRevocation"
+	_ = newConfig(opts...)
+
+	if wantClawbackAmount <= 0 {
+		t.Errorf("%s: wantClawbackAmount is %d; a clawback forfeits a positive amount",
+			assertion, wantClawbackAmount)
+		return false
+	}
+	fromAddr, ok := resolveAccount(t, assertion, "fromAccount", fromAccount)
+	if !ok {
+		return false
+	}
+	spec, ok := resolveAsset(t, assertion, "asset", asset)
+	if !ok {
+		return false
+	}
+	if spec.native {
+		t.Errorf("%s: the native asset cannot be clawed back", assertion)
+		return false
+	}
+
+	changes, ok := ledgerChanges(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+
+	var (
+		seen    bool
+		removed bool
+	)
+	for _, c := range changes {
+		if spec.matches(c, fromAddr) {
+			seen = true
+			if c.kind == xdr.LedgerEntryChangeTypeLedgerEntryRemoved {
+				removed = true
+			}
+		}
+	}
+	if !seen {
+		t.Errorf("%s: the transaction made no ledger change to %s trustline on account %s\n\n%s",
+			assertion, spec.id, shorten(fromAddr), indent(describeAccountChanges(changes, fromAddr)))
+		return false
+	}
+
+	delta, ok := balanceDelta(t, assertion, changes, fromAddr, spec)
+	if !ok {
+		return false
+	}
+	if delta != -wantClawbackAmount {
+		t.Errorf("%s: %s balance changed by %s, want a clawback forfeiture of %s\n\n%s",
+			assertion, describeBalanceSubject(fromAddr, spec),
+			signedStroops(delta),
+			amountStroops(xdr.Int64(wantClawbackAmount), spec.unit()),
+			indent(describeAccountChanges(changes, fromAddr)))
+		return false
+	}
+
+	_ = removed
+	return true
+}
+
 // resolvedClawback is a clawback operation reduced to the values an assertion
 // compares and a failure message prints, so no generated accessor is called
 // while rendering.
