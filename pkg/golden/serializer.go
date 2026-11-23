@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -178,6 +179,72 @@ func NormalizeWhitespace(data []byte) []byte {
 		return nil
 	}
 	return []byte(strings.Join(out, "\n") + "\n")
+}
+
+// CanonicalBytes returns the bytes a fixture file should contain: the fixture
+// it stores, re-serialized by the serializer its path implies.
+//
+// Serializer output is already normalized — LF line endings, no trailing
+// whitespace, one final newline — and deterministic — struct field order in
+// JSON, sorted keys in YAML and the text form — so this is the canonical form
+// of the file. The file itself is not touched.
+//
+// The decoded section is kept as it is; refreshing a stale tree is a separate
+// operation (see Refresh), and formatting it here would rewrite data the
+// caller did not ask to change.
+func CanonicalBytes(path string) ([]byte, error) {
+	f, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return SerializerForPath(path).Marshal(f)
+}
+
+// FormatFile rewrites path in canonical form and reports whether anything
+// changed. A file that is already canonical is not rewritten, so formatting a
+// whole testdata directory leaves an empty diff.
+func FormatFile(path string) (bool, error) {
+	canonical, err := CanonicalBytes(path)
+	if err != nil {
+		return false, err
+	}
+	current, err := storedBytes(path)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(current, canonical) {
+		return false, nil
+	}
+	if err := WriteFile(path, canonical); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CheckFile reports whether FormatFile would rewrite path, without touching
+// it. It is what --check runs, so a CI job can fail on unformatted fixtures
+// while leaving them exactly as they are.
+func CheckFile(path string) (bool, error) {
+	canonical, err := CanonicalBytes(path)
+	if err != nil {
+		return false, err
+	}
+	current, err := storedBytes(path)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(current, canonical), nil
+}
+
+// storedBytes returns the bytes a file is compared by: its raw content for a
+// plain fixture, so a CRLF checkout or a stray trailing space is reported as
+// unformatted. A compressed file is compared by its decompressed content,
+// because how the bytes are compressed is storage rather than formatting.
+func storedBytes(path string) ([]byte, error) {
+	if IsCompressed(path) {
+		return ReadFile(path)
+	}
+	return os.ReadFile(path)
 }
 
 // validate rejects a fixture this version cannot read. Both checks exist so a
