@@ -2,7 +2,7 @@ package golden
 
 import "bytes"
 
-// NormalizeLineEndings rewrites every CRLF and lone-CR line ending in b to a
+// NormalizeNewlines rewrites every CRLF and lone-CR line ending in b to a
 // plain LF, returning b itself — untouched and uncopied — when there is no CR
 // to rewrite.
 //
@@ -14,10 +14,13 @@ import "bytes"
 // checksums and diffs see the file's content rather than its working-copy
 // encoding. Files written here are still LF, and nothing outside line
 // endings is altered.
-func NormalizeLineEndings(b []byte) []byte {
+func NormalizeNewlines(b []byte) []byte {
 	if bytes.IndexByte(b, '\r') < 0 {
 		return b
 	}
 	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
 	return bytes.ReplaceAll(b, []byte("\r"), []byte("\n"))
 }
+
+// NormalizeLineEndings is an alias for NormalizeNewlines for backward compatibility.
+var NormalizeLineEndings = NormalizeNewlines

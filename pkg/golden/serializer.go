@@ -335,6 +335,31 @@ func writeYAMLPair(buf *bytes.Buffer, level int, key string, v any) {
 		}
 		buf.WriteByte('\n')
 		writeYAMLSeq(buf, level+1, val)
+	case string:
+		// For strings, decide between a bare/scalar value and a block scalar.
+		// Long strings (like base64 XDR) are rendered as block scalars with `|`
+		// to keep the YAML file reviewable and allow line wrapping.
+		if len(val) > blockScalarThreshold {
+			// Output as YAML block scalar: key: | followed by content on
+			// subsequent lines with 2-space indentation.
+			buf.WriteString(" \\|\n")
+			// Write the wrapped content with 2-space prefix
+			wrapped := wrapLines(val, blockScalarWidth)
+			// Each line of wrapped content needs the 2-space block scalar indent
+			lines := strings.Split(wrapped, "\n")
+			for i, line := range lines {
+				if i > 0 {
+					buf.WriteByte('\n')
+				}
+				buf.WriteString("  ")
+				buf.WriteString(line)
+			}
+			buf.WriteByte('\n')
+		} else {
+			buf.WriteByte(' ')
+			buf.WriteString(scalarText(v))
+			buf.WriteByte('\n')
+		}
 	default:
 		buf.WriteByte(' ')
 		buf.WriteString(scalarText(v))
@@ -1245,6 +1270,17 @@ func scalarText(v any) string {
 // YAML: indicators, the comment marker, and the quoting characters.
 const yamlUnsafeChars = ":#,{}[]&*!|>'\"%@`\\"
 
+// blockScalarThreshold is the minimum string length at which the YAML writer
+// will use a block scalar (|) instead of a single-line scalar. Strings longer
+// than this threshold are likely to be base64-encoded XDR and benefit from
+// line wrapping to keep the golden file reviewable.
+const blockScalarThreshold = 60
+
+// blockScalarWidth is the maximum line width, in characters, for content
+// inside a YAML block scalar. This is set to 76, the conventional base64 line
+// length, so that long base64 strings are wrapped at the standard width.
+const blockScalarWidth = 76
+
 // yamlReservedWords are the bare scalars a YAML reader resolves to a boolean
 // or a null. A string that equals one has to be quoted to stay a string.
 var yamlReservedWords = map[string]bool{
@@ -1307,38 +1343,80 @@ func quoteText(s string) string {
 	return string(b)
 }
 
-// parseScalarToken reads one scalar as the writers emit it: a JSON literal
-// when it is quoted or a number or a boolean or null, and a bare string
-// otherwise.
-func parseScalarToken(text string) (any, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil, nil
-	}
-
-	if strings.HasPrefix(text, "'") {
-		return parseSingleQuoted(text)
-	}
-	if json.Valid([]byte(text)) {
-		return decodeTree([]byte(text))
-	}
-	if strings.HasPrefix(text, "\"") {
-		return nil, fmt.Errorf("malformed double-quoted scalar %q", text)
-	}
-
-	switch strings.ToLower(text) {
-	case "null", "~":
-		return nil, nil
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	}
-
-	for _, r := range text {
-		if r < 0x20 {
-			return nil, fmt.Errorf("control character in value %q", text)
+// wrapLines wraps a string into lines of at most width characters,
+// inserting line breaks at word boundaries when possible.
+// This is used for YAML block scalar content.
+func wrapLines(s string, width int) string {
+	var b strings.Builder
+	// Split by existing newlines first, then wrap each line
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteString("\n")
 		}
+		if len(line) <= width {
+			b.WriteString(line)
+			continue
+		}
+		// Word-wrap the line
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			b.WriteString(line)
+			continue
+		}
+		currentLine := words[0]
+		for _, word := range words[1:] {
+			if len(currentLine)+1+len(word) <= width {
+				currentLine += " " + word
+			} else {
+				b.WriteString(currentLine)
+				currentLine = word
+			}
+		}
+		b.WriteString(currentLine)
 	}
-	return text, nil
+	return b.String()
+}
+
+// blockScalarText renders a string as a YAML block scalar with | prefix,
+// wrapping lines at the given width. The block scalar preserves newlines
+// literally, which is ideal for long base64 strings and other multi-line content.
+func blockScalarText(s string, width int) string {
+	if len(s) <= width {
+		// Short enough to write as a single-line scalar
+		return quoteText(s)
+	}
+	// Wrap the content and output as a block scalar
+	wrapped := wrapLines(s, width)
+	return "|\\n  " + strings.ReplaceAll(wrapped, "\n", "\n  ")
+}
+
+// scalarText renders a scalar the way both the YAML and text writers write it:
+// bare when that is unambiguous, and as a JSON string literal otherwise.
+//
+// Quoting is what makes a round trip lossless. "testnet" is written bare and
+// read back as the string it is; "12345" would be read back as a number, so a
+// string that looks like one is quoted. The literal is JSON's, which is also a
+// valid YAML double-quoted scalar, so one reader decodes both.
+func scalarText(v any) string {
+	switch val := v.(type) {
+	case nil:
+		return "null"
+	case bool:
+		return strconv.FormatBool(val)
+	case string:
+		if plainSafe(val) {
+			return val
+		}
+		return quoteText(val)
+	case json.Number:
+		if isNumber(string(val)) {
+			return string(val)
+		}
+		return quoteText(string(val))
+	default:
+		// Values come from JSON, so a scalar is one of the cases above; the
+		// fallback keeps a hand-built value from producing an empty line.
+		return quoteText(fmt.Sprintf("%v", val))
+	}
 }

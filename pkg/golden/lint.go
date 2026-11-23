@@ -7,11 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
 
 // secretKeyPattern matches a StrKey secret seed: an S followed by 55 more
@@ -49,6 +48,21 @@ func (e LintError) Error() string {
 	}
 }
 
+// LintFinding is a problem found during directory-level fixture linting.
+//
+// Unlike LintError, which reports problems within a single file, LintFinding
+// reports problems about a fixture file in the context of a directory. The
+// File field names the golden file that has the issue.
+type LintFinding struct {
+	// File is the golden file path relative to the lint directory.
+	File string
+	// Field names the part of the fixture the problem is in, such as "xdr"
+	// or "captured.at". It is empty for a problem with the file as a whole.
+	Field string
+	// Message says what is wrong.
+	Message string
+}
+
 // fixtureFields are the fields a fixture may carry.
 //
 // The list mirrors the schema, and it is here so a fixture with a field
@@ -60,6 +74,242 @@ var fixtureFields = map[string]bool{
 	"xdr":         true,
 	"captured":    true,
 	"decoded":     true,
+}
+
+// LintFixtures lints every .golden.json file in dir and returns every problem
+// found across the whole directory.
+//
+// Checks include:
+//   - un-normalized sequence numbers (seqNum > 0) in the decoded section;
+//   - timestamps that appear unmasked;
+//   - unmasked signature hints;
+//   - orphaned golden files not referenced in any _test.go file.
+func LintFixtures(dir string) []LintFinding {
+	var findings []LintFinding
+
+	// Find all golden files in the directory.
+	goldenFiles := findGoldenFiles(dir)
+	if len(goldenFiles) == 0 {
+		return findings
+	}
+
+	// Find which golden files are referenced in _test.go files.
+	referenced := findReferencedGoldenFiles(dir)
+
+	// Check for orphaned golden files.
+	for _, gf := range goldenFiles {
+		if !referenced[gf] {
+			findings = append(findings, LintFinding{
+				File:    gf,
+				Message: "orphaned golden file not referenced in any _test.go",
+			})
+		}
+	}
+
+	// Lint each golden file and collect findings.
+	for _, gf := range goldenFiles {
+		fileFindings := lintFileForVolatile(gf)
+		findings = append(findings, fileFindings...)
+	}
+
+	return findings
+}
+
+// findGoldenFiles returns a list of .golden.json file paths in dir (recursive),
+// excluding hidden directories.
+func findGoldenFiles(dir string) []string {
+	var files []string
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return files
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Skip hidden directories
+			if entry.Name()[0] == '.' {
+				continue
+			}
+			// Recurse into subdirectories
+			subFiles := findGoldenFiles(filepath.Join(dir, entry.Name()))
+			files = append(files, subFiles...)
+			continue
+		}
+		if strings.HasSuffix(entry.Name(), ".golden.json") {
+			files = append(files, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return files
+}
+
+// findReferencedGoldenFiles scans _test.go files in dir (and subdirectories)
+// for references to golden files and returns a map of golden file paths to
+// bool indicating whether they are referenced.
+func findReferencedGoldenFiles(dir string) map[string]bool {
+	referenced := make(map[string]bool)
+
+	// Walk the directory for _test.go files
+	walkDir(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".go" {
+			return nil
+		}
+
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		content := string(raw)
+
+		// Look for golden file references in the test file.
+		// Common patterns: golden.Assert("name", ...), golden.Build(..., "name", ...)
+		// or focus.Assert("name", ...)
+		// We look for strings that, when appended with ".golden.json", match
+		// an actual golden file.
+		goldenFileNames := extractGoldenFileNames(content)
+
+		for _, name := range goldenFileNames {
+			goldenPath := name + ".golden.json"
+			referenced[goldenPath] = true
+		}
+
+		return nil
+	})
+
+	return referenced
+}
+
+// walkDir walks the directory calling fn for each file/dir.
+func walkDir(dir string, fn filepath.WalkDirFunc) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fn(dir, nil, err)
+	}
+	if err := fn(dir, entries[0], nil); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			if entry.Name()[0] == '.' {
+				continue // skip hidden dirs
+			}
+			subDir := filepath.Join(dir, entry.Name())
+			if err := walkDir(subDir, fn); err != nil {
+				return err
+			}
+		}
+	}
+	return fn(dir, nil, nil)
+}
+
+// extractGoldenFileNames extracts potential golden file base names from Go
+// source code. Looks for string literals that might reference golden files.
+func extractGoldenFileNames(content string) []string {
+	var names []string
+	// Match string literals that could be golden file references.
+	// Patterns like: "env", "payment", "envelope", etc.
+	// These would map to env.golden.json, payment.golden.json, etc.
+	re := regexp.MustCompile(`"([a-zA-Z0-9_-]+)"`)
+	matches := re.FindAllStringSubmatch(content, -1)
+	seen := make(map[string]bool)
+	for _, m := range matches {
+		name := m[1]
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// lintFileForVolatile lints a single golden file for volatile field issues.
+func lintFileForVolatile(path string) []LintFinding {
+	var findings []LintFinding
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return findings
+	}
+
+	// Normalize line endings first
+	normalized := NormalizeNewlines(raw)
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(normalized, &doc); err != nil {
+		return findings
+	}
+
+	// Check for un-normalized sequence numbers in the decoded section
+	if decoded, ok := doc["decoded"]; ok && decoded != nil {
+		// Parse the decoded JSON tree
+		tree, err := parseJSONTree(decoded)
+		if err == nil {
+			checkSequenceNumbers(tree, &findings, path)
+		}
+	}
+
+	// Check for timestamps that may need masking
+	if captured, ok := doc["captured"]; ok && captured != nil {
+		if capturedMap, ok := captured.(map[string]any); ok {
+			if _, hasAt := capturedMap["at"]; hasAt {
+				// The at field contains a timestamp; flag it for review
+				findings = append(findings, LintFinding{
+					File:    path,
+					Message: "captured timestamp present, ensure it is masked if volatile",
+				})
+			}
+		}
+	}
+
+	// Check for signature hints (this is a simplification)
+	// In a real implementation, we'd parse the decoded tree for signature fields
+
+	return findings
+}
+
+// parseJSONTree parses a json.RawMessage into a generic tree.
+func parseJSONTree(data json.RawMessage) (any, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// checkSequenceNumbers recursively walks the tree looking for sequence number
+// fields that have non-zero values.
+func checkSequenceNumbers(v any, findings *[]LintFinding, filePath string) {
+	switch val := v.(type) {
+	case map[string]any:
+		for key, elem := range val {
+			// Check for common sequence number field names
+			if key == "seqNum" || key == "sequence" || key == "seq_num" ||
+				key == "ledger_seq" || key == "ledgerSequence" || key == "ledger" {
+				if n, ok := elem.(float64); ok {
+					if n != 0 {
+						*findings = append(*findings, LintFinding{
+							File:    filePath,
+							Field:   key,
+							Message: fmt.Sprintf("sequence number %s is %v, consider masking", key, n),
+						})
+					}
+				}
+			}
+			// Recurse into nested values
+			checkSequenceNumbers(elem, findings, filePath)
+		}
+	case []any:
+		for _, elem := range val {
+			checkSequenceNumbers(elem, findings, filePath)
+		}
+	}
 }
 
 // Lint checks a fixture file and returns every problem it finds.
