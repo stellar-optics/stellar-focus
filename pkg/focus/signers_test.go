@@ -4,10 +4,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 func TestAssertSignersEqual(t *testing.T) {
@@ -297,6 +299,256 @@ func TestAssertThresholdsEqualFailures(t *testing.T) {
 		}
 		if !strings.Contains(msg, "so its thresholds cannot be read from it") {
 			t.Errorf("message does not explain the missing entry:\n%s", msg)
+		}
+	})
+}
+
+func TestAssertSignerWeight(t *testing.T) {
+	t.Parallel()
+
+	edKey := testDest
+	hashXRaw := make([]byte, 32)
+	hashXRaw[0] = 0xab
+	hashXKey, err := strkey.Encode(strkey.VersionByteHashX, hashXRaw)
+	if err != nil {
+		t.Fatalf("encoding hashX key: %v", err)
+	}
+
+	preAuthRaw := make([]byte, 32)
+	preAuthRaw[0] = 0xcd
+	preAuthKey, err := strkey.Encode(strkey.VersionByteHashTx, preAuthRaw)
+	if err != nil {
+		t.Fatalf("encoding preAuthTx key: %v", err)
+	}
+
+	signerEd := signerValue(t, edKey, 20)
+	signerHashX := signerValue(t, hashXKey, 15)
+	signerPreAuth := signerValue(t, preAuthKey, 10)
+	signerRemoved := signerValue(t, edKey, 0)
+
+	t.Run("SetOptionsOp adding signers", func(t *testing.T) {
+		t.Parallel()
+
+		opEd := xdr.SetOptionsOp{Signer: &signerEd}
+		opHashX := xdr.SetOptionsOp{Signer: &signerHashX}
+		opPreAuth := xdr.SetOptionsOp{Signer: &signerPreAuth}
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, opEd, edKey, 20) {
+			t.Errorf("AssertSignerWeight failed for Ed25519:\n%s", tb.Output())
+		}
+		require.SignerWeight(t, opEd, edKey, 20)
+
+		tb = faketb.New()
+		if !focus.AssertSignerWeight(tb, opHashX, hashXKey, 15) {
+			t.Errorf("AssertSignerWeight failed for HashX:\n%s", tb.Output())
+		}
+		require.SignerWeight(t, opHashX, hashXKey, 15)
+
+		tb = faketb.New()
+		if !focus.AssertSignerWeight(tb, opPreAuth, preAuthKey, 10) {
+			t.Errorf("AssertSignerWeight failed for PreAuthTx:\n%s", tb.Output())
+		}
+		require.SignerWeight(t, opPreAuth, preAuthKey, 10)
+	})
+
+	t.Run("SetOptionsOp updating signer weight", func(t *testing.T) {
+		t.Parallel()
+
+		updatedSigner := signerValue(t, edKey, 50)
+		op := xdr.SetOptionsOp{Signer: &updatedSigner}
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, op, edKey, 50) {
+			t.Errorf("AssertSignerWeight failed on updated weight:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("SetOptionsOp removing signer with weight 0", func(t *testing.T) {
+		t.Parallel()
+
+		op := xdr.SetOptionsOp{Signer: &signerRemoved}
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, op, edKey, 0) {
+			t.Errorf("AssertSignerWeight failed for removed signer in SetOptionsOp:\n%s", tb.Output())
+		}
+		require.SignerWeight(t, op, edKey, 0)
+	})
+
+	t.Run("AccountEntry signers", func(t *testing.T) {
+		t.Parallel()
+
+		thresholds := xdr.NewThreshold(1, 0, 0, 0)
+		entry := accountEntryValue(t, testSource, 100, thresholds, signerEd, signerHashX)
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, entry, edKey, 20) {
+			t.Errorf("AssertSignerWeight failed for Ed25519 in AccountEntry:\n%s", tb.Output())
+		}
+		tb = faketb.New()
+		if !focus.AssertSignerWeight(tb, entry, hashXKey, 15) {
+			t.Errorf("AssertSignerWeight failed for HashX in AccountEntry:\n%s", tb.Output())
+		}
+		tb = faketb.New()
+		if !focus.AssertSignerWeight(tb, entry, preAuthKey, 0) {
+			t.Errorf("AssertSignerWeight failed for absent/removed signer in AccountEntry:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("TransactionEnvelope containing SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		op := xdr.Operation{
+			Body: xdr.OperationBody{
+				Type:         xdr.OperationTypeSetOptions,
+				SetOptionsOp: &xdr.SetOptionsOp{Signer: &signerEd},
+			},
+		}
+		env := envelopeValue(t, op)
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, env, edKey, 20) {
+			t.Errorf("AssertSignerWeight failed for envelope:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("TransactionMeta containing account entry", func(t *testing.T) {
+		t.Parallel()
+
+		thresholds := xdr.NewThreshold(1, 0, 0, 0)
+		entry := accountEntryValue(t, testSource, 100, thresholds, signerEd)
+		meta := metaV2(t, []xdr.LedgerEntryChange{updatedChange(entry)})
+
+		tb := faketb.New()
+		if !focus.AssertSignerWeight(tb, meta, edKey, 20) {
+			t.Errorf("AssertSignerWeight failed for meta:\n%s", tb.Output())
+		}
+	})
+}
+
+func TestAssertSignerWeightFailures(t *testing.T) {
+	t.Parallel()
+
+	signerEd := signerValue(t, testDest, 20)
+	opEd := xdr.SetOptionsOp{Signer: &signerEd}
+
+	t.Run("mismatched weight in SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, opEd, testDest, 10) {
+			t.Fatal("assertion passed with mismatched weight")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "weight is 20, want 10") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("missing signer in SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		emptyOp := xdr.SetOptionsOp{}
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, emptyOp, testDest, 20) {
+			t.Fatal("assertion passed with nil Signer in SetOptionsOp")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "missing from SetOptionsOp") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("mismatched signer key in SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, opEd, testIssuer, 20) {
+			t.Fatal("assertion passed with mismatched signer key")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "signer key is") || !strings.Contains(msg, "want") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("not removed when wantWeight is 0", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, opEd, testDest, 0) {
+			t.Fatal("assertion passed when signer was not removed")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "was not removed: weight is 20, want 0") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("missing signer from AccountEntry", func(t *testing.T) {
+		t.Parallel()
+
+		thresholds := xdr.NewThreshold(1, 0, 0, 0)
+		entry := accountEntryValue(t, testSource, 100, thresholds)
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, entry, testDest, 20) {
+			t.Fatal("assertion passed for missing signer in AccountEntry")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "missing from account entry") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("signer present when asserted removed in AccountEntry", func(t *testing.T) {
+		t.Parallel()
+
+		thresholds := xdr.NewThreshold(1, 0, 0, 0)
+		entry := accountEntryValue(t, testSource, 100, thresholds, signerEd)
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, entry, testDest, 0) {
+			t.Fatal("assertion passed when signer still present in AccountEntry")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "was not removed from account entry") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("nil input handles gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSignerWeight(tb, nil, testDest, 20) {
+			t.Fatal("assertion passed with nil input")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "opOrEntry is nil") {
+			t.Errorf("unexpected failure message:\n%s", msg)
 		}
 	})
 }

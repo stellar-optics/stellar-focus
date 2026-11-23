@@ -12,6 +12,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // accountLedgerKeyValue builds the ledger key of an account, for the
@@ -535,4 +536,266 @@ func TestNormalizeAddressContractID(t *testing.T) {
 	if !focus.AssertEnvelopeEqual(tb, want, got, focus.NormalizeAddress(aliases)) {
 		t.Errorf("mapped contract IDs were reported as different:\n%s", tb.Output())
 	}
+}
+
+func TestAssertAccountThresholds(t *testing.T) {
+	t.Parallel()
+
+	mw := xdr.Uint32(10)
+	low := xdr.Uint32(1)
+	med := xdr.Uint32(2)
+	high := xdr.Uint32(3)
+
+	setOptionsOp := xdr.SetOptionsOp{
+		MasterWeight:  &mw,
+		LowThreshold:  &low,
+		MedThreshold:  &med,
+		HighThreshold: &high,
+	}
+
+	accountLedgerEntry := accountEntryValue(t, testSource, 100, xdr.Thresholds{10, 1, 2, 3})
+	accountEntry := *accountLedgerEntry.Data.Account
+
+	t.Run("SetOptionsOp matches exact thresholds", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, setOptionsOp, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for SetOptionsOp:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, setOptionsOp, 10, 1, 2, 3)
+	})
+
+	t.Run("Operation containing SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		op := xdr.Operation{
+			Body: xdr.OperationBody{
+				Type:         xdr.OperationTypeSetOptions,
+				SetOptionsOp: &setOptionsOp,
+			},
+		}
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, op, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for Operation:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, op, 10, 1, 2, 3)
+	})
+
+	t.Run("TransactionEnvelope containing SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		op := xdr.Operation{
+			Body: xdr.OperationBody{
+				Type:         xdr.OperationTypeSetOptions,
+				SetOptionsOp: &setOptionsOp,
+			},
+		}
+		env := envelopeValue(t, op)
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, env, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for envelope:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, env, 10, 1, 2, 3)
+	})
+
+	t.Run("AccountEntry matches exact thresholds", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, accountEntry, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for AccountEntry:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, accountEntry, 10, 1, 2, 3)
+	})
+
+	t.Run("LedgerEntry containing AccountEntry", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, accountLedgerEntry, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for LedgerEntry:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, accountLedgerEntry, 10, 1, 2, 3)
+	})
+
+	t.Run("TransactionMeta containing account entry", func(t *testing.T) {
+		t.Parallel()
+
+		meta := metaV2(t, []xdr.LedgerEntryChange{updatedChange(accountLedgerEntry)})
+
+		tb := faketb.New()
+		if !focus.AssertAccountThresholds(tb, meta, 10, 1, 2, 3) {
+			t.Errorf("AssertAccountThresholds failed for meta:\n%s", tb.Output())
+		}
+		require.AccountThresholds(t, meta, 10, 1, 2, 3)
+	})
+}
+
+func TestAssertAccountThresholdsFailures(t *testing.T) {
+	t.Parallel()
+
+	mw := xdr.Uint32(10)
+	low := xdr.Uint32(1)
+	med := xdr.Uint32(2)
+	high := xdr.Uint32(3)
+
+	setOptionsOp := xdr.SetOptionsOp{
+		MasterWeight:  &mw,
+		LowThreshold:  &low,
+		MedThreshold:  &med,
+		HighThreshold: &high,
+	}
+
+	t.Run("invalid threshold hierarchy ordering (low > med)", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 10, 5, 2, 3) {
+			t.Fatal("assertion passed with invalid hierarchy (low > med)")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "invalid threshold hierarchy") || !strings.Contains(msg, "low (5) <= med (2)") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("invalid threshold hierarchy ordering (med > high)", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 10, 1, 5, 3) {
+			t.Fatal("assertion passed with invalid hierarchy (med > high)")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "invalid threshold hierarchy") || !strings.Contains(msg, "med (5) <= high (3)") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("mismatched master weight", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 20, 1, 2, 3) {
+			t.Fatal("assertion passed with mismatched master weight")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "master weight is 10, want 20") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("mismatched low threshold", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 10, 2, 2, 3) {
+			t.Fatal("assertion passed with mismatched low threshold")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "low threshold is 1, want 2") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("mismatched medium threshold", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 10, 1, 3, 3) {
+			t.Fatal("assertion passed with mismatched medium threshold")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "medium threshold is 2, want 3") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("mismatched high threshold", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, setOptionsOp, 10, 1, 2, 5) {
+			t.Fatal("assertion passed with mismatched high threshold")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "high threshold is 3, want 5") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("unset thresholds in SetOptionsOp", func(t *testing.T) {
+		t.Parallel()
+
+		partialOp := xdr.SetOptionsOp{
+			MasterWeight: &mw,
+		}
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, partialOp, 10, 1, 2, 3) {
+			t.Fatal("assertion passed with unset thresholds in SetOptionsOp")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "low threshold is unset, want 1") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("missing SetOptionsOp in envelope", func(t *testing.T) {
+		t.Parallel()
+
+		emptyEnv := envelopeValue(t, paymentOp(t, 100))
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, emptyEnv, 10, 1, 2, 3) {
+			t.Fatal("assertion passed when envelope has no SetOptionsOp")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "envelope carries no SetOptions operation") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
+
+	t.Run("nil input handles gracefully", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertAccountThresholds(tb, nil, 10, 1, 2, 3) {
+			t.Fatal("assertion passed with nil input")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("reading message: %v", err)
+		}
+		if !strings.Contains(msg, "opOrEntry is nil") {
+			t.Errorf("unexpected failure message:\n%s", msg)
+		}
+	})
 }
