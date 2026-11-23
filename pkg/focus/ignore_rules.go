@@ -26,6 +26,10 @@ import "strings"
 // name also matches an indexed segment ("Signatures" covers "Signatures[0]"),
 // because remembering to write the index for the only entry a field has is
 // exactly the kind of detail that should not be load-bearing in a test.
+//
+// The full pattern language, the built-in presets and how applied and unused
+// ignore rules are reported in failure output are documented in
+// docs/ignore_rules_reference.md.
 
 // matchPath reports whether a path matches a pattern.
 func matchPath(pattern, path string) bool {

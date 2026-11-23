@@ -19,6 +19,20 @@
 //	cursor := ledgerkey.EvictionIterator()
 //
 // Both return base64 XDR, ready for capture.Source or AssertLedgerKeyEqual.
+//
+// Every key type is built the same way, from the values a test already holds:
+//
+//	// the account itself, by address
+//	key, err := ledgerkey.Account("GA5XIGA5C7Z4…")
+//
+//	// a trustline, by owner address and asset
+//	key, err = ledgerkey.Trustline(address, asset)
+//
+//	// contract data, by contract id, key and durability
+//	key, err = ledgerkey.ContractData(contractID, "counter", xdr.ContractDataDurabilityPersistent)
+//
+//	// deployed contract code, by hash
+//	key, err = ledgerkey.ContractCode(hash)
 package ledgerkey
 
 import (
@@ -31,6 +45,12 @@ import (
 )
 
 // Account returns the LedgerKey for an account, as base64 XDR.
+//
+// The key wraps the AccountId the address decodes to; a muxed address names
+// the underlying account, so it builds the same key as its G… form.
+//
+//	key, err := ledgerkey.Account("GA5XIGA5C7Z4…")
+//	// key: base64 XDR of the account's LedgerKey, e.g. "AAAAAAAB..."
 func Account(address string) (string, error) {
 	accountID, err := xdr.AddressToAccountId(address)
 	if err != nil {
@@ -47,6 +67,8 @@ func Account(address string) (string, error) {
 // Trustline returns the LedgerKey for a trustline owned by address, as base64
 // XDR. The asset must be native or a credit asset; a pool-share asset is not a
 // trustline key.
+//
+//	key, err := ledgerkey.Trustline(address, asset)
 func Trustline(address string, asset xdr.Asset) (string, error) {
 	accountID, err := xdr.AddressToAccountId(address)
 	if err != nil {
@@ -69,6 +91,10 @@ func Trustline(address string, asset xdr.Asset) (string, error) {
 // contractID is the strkey "C…" address. key is the contract data key and
 // accepts an xdr.ScVal, base64 XDR, raw XDR bytes, or a plain string, which is
 // treated as a symbol because that is the common contract key.
+//
+// The durability selects the storage arm of the key: persistent or temporary.
+//
+//	key, err = ledgerkey.ContractData(contractID, "counter", xdr.ContractDataDurabilityPersistent)
 func ContractData(
 	contractID string,
 	key focus.Value,
@@ -98,6 +124,8 @@ func ContractData(
 
 // ContractCode returns the LedgerKey for contract code with the given hash, as
 // base64 XDR.
+//
+//	key, err = ledgerkey.ContractCode(hash) // hash is [32]byte
 func ContractCode(hash [32]byte) (string, error) {
 	var key xdr.LedgerKey
 	if err := key.SetContractCode(xdr.Hash(hash)); err != nil {
