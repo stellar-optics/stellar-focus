@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-focus/internal/fakesource"
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 )
@@ -307,5 +309,80 @@ func TestCaptureBatchRejectsABadConcurrency(t *testing.T) {
 	}
 	if src.Calls != 0 {
 		t.Error("a request was made despite the invalid concurrency")
+	}
+}
+
+// classicEnvelopeXDR builds the envelope of an ordinary payment, which a
+// Soroban filter must skip.
+func classicEnvelopeXDR(t *testing.T) string {
+	t.Helper()
+
+	const account = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+	encoded, err := xdr.MarshalBase64(xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(account),
+				Fee:           100,
+				SeqNum:        1,
+				Operations: []xdr.Operation{{
+					Body: xdr.OperationBody{
+						Type: xdr.OperationTypePayment,
+						PaymentOp: &xdr.PaymentOp{
+							Destination: xdr.MustMuxedAddress(account),
+							Asset:       xdr.Asset{Type: xdr.AssetTypeAssetTypeNative},
+							Amount:      1,
+						},
+					},
+				}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encoding the classic envelope: %v", err)
+	}
+	return encoded
+}
+
+// TestCaptureBatchSkipsTransactionsFilteredOut checks that a capture filter
+// applies to every transaction of a batch: the ones that do not match are
+// reported and nothing is written for them.
+func TestCaptureBatchSkipsTransactionsFilteredOut(t *testing.T) {
+	const (
+		classic = "1111111111111111111111111111111111111111111111111111111111111111"
+		soroban = "2222222222222222222222222222222222222222222222222222222222222222"
+	)
+
+	src := fakesource.New(capture.NetworkTestnet, "https://fake.example")
+	src.Transactions[classic] = []capture.Record{
+		{Name: "envelope", Type: "TransactionEnvelope", XDR: classicEnvelopeXDR(t),
+			Ledger: 1234, TxHash: classic},
+	}
+	src.Transactions[soroban] = []capture.Record{
+		{Name: "envelope", Type: "TransactionEnvelope", XDR: fixtureXDR(t, "tx_soroban.env.txt"),
+			Ledger: 1234, TxHash: soroban},
+	}
+	withFake(t, src)
+
+	dir := t.TempDir()
+	batch := writeBatchFile(t, classic+"\n"+soroban+"\n")
+
+	stdout, stderr, err := run(t, "capture", "tx", "--batch", batch, "--out", dir, "--only-soroban")
+	if err != nil {
+		t.Fatalf("capture --batch --only-soroban: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, "22222222_envelope.golden.json")); statErr != nil {
+		t.Errorf("the Soroban fixture was not written: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "11111111_envelope.golden.json")); !os.IsNotExist(statErr) {
+		t.Errorf("a fixture was written for the classic transaction:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "skipped tx 11111111") {
+		t.Errorf("the skipped transaction was not reported:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "1 captured") ||
+		!strings.Contains(stdout, "1 skipped by the capture filters") {
+		t.Errorf("the summary does not count the skipped transaction:\n%s", stdout)
 	}
 }
