@@ -393,3 +393,152 @@ func safeFileName(contractID string) string {
 	}
 	return b.String()
 }
+
+// ContractSpecDocument is the JSON structure saved as <tx_hash>.spec.json.
+type ContractSpecDocument struct {
+	TxHash     string          `json:"txHash,omitempty"`
+	ContractID string          `json:"contractId,omitempty"`
+	Entries    []WASMSpecEntry `json:"spec"`
+}
+
+// ExtractTransactionContractSpecs inspects a transaction's operations and footprint for contract IDs,
+// fetches their WASM bytecode using GetContractCode on src, parses the contractspecv0 section,
+// and saves the specification alongside the transaction fixture as <tx_hash>.spec.json.
+func ExtractTransactionContractSpecs(
+	ctx context.Context,
+	src ContractWASMSource,
+	txHash string,
+	env xdr.TransactionEnvelope,
+	outDir string,
+) ([]string, error) {
+	contractIDs := FindTargetContractIDs(env)
+	if len(contractIDs) == 0 {
+		return nil, nil
+	}
+
+	var savedPaths []string
+	for _, cid := range contractIDs {
+		specEntries, err := FetchAndParseContractSpec(ctx, src, cid)
+		if err != nil {
+			// Contract might not have code or source couldn't find it; continue
+			continue
+		}
+		if len(specEntries) == 0 {
+			continue
+		}
+
+		specPath := filepath.Join(outDir, fmt.Sprintf("%s.spec.json", txHash))
+		doc := ContractSpecDocument{
+			TxHash:     txHash,
+			ContractID: cid,
+			Entries:    specMetadata(specEntries),
+		}
+
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("rendering spec json: %w", err)
+		}
+		data = append(data, '\n')
+
+		if err := os.MkdirAll(outDir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(specPath, data, 0o644); err != nil {
+			return nil, fmt.Errorf("writing spec file %s: %w", specPath, err)
+		}
+		savedPaths = append(savedPaths, specPath)
+	}
+	return savedPaths, nil
+}
+
+// FindTargetContractIDs returns all contract IDs targeted by InvokeHostFunction operations or footprints in env.
+func FindTargetContractIDs(env xdr.TransactionEnvelope) []string {
+	seen := make(map[string]bool)
+	var out []string
+
+	addID := func(raw [32]byte) {
+		h := hex.EncodeToString(raw[:])
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+
+	var ops []xdr.Operation
+	switch env.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if env.V1 != nil {
+			ops = env.V1.Tx.Operations
+			if env.V1.Tx.Ext.V == 1 && env.V1.Tx.Ext.SorobanData != nil {
+				for _, k := range env.V1.Tx.Ext.SorobanData.Resources.Footprint.ReadOnly {
+					if k.Type == xdr.LedgerEntryTypeContractCode && k.ContractCode != nil {
+						addID(k.ContractCode.Hash)
+					}
+					if k.Type == xdr.LedgerEntryTypeContractData && k.ContractData != nil && k.ContractData.Contract.ContractId != nil {
+						addID(*k.ContractData.Contract.ContractId)
+					}
+				}
+				for _, k := range env.V1.Tx.Ext.SorobanData.Resources.Footprint.ReadWrite {
+					if k.Type == xdr.LedgerEntryTypeContractCode && k.ContractCode != nil {
+						addID(k.ContractCode.Hash)
+					}
+					if k.Type == xdr.LedgerEntryTypeContractData && k.ContractData != nil && k.ContractData.Contract.ContractId != nil {
+						addID(*k.ContractData.Contract.ContractId)
+					}
+				}
+			}
+		}
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if env.FeeBump != nil && env.FeeBump.Tx.InnerTx.V1 != nil {
+			ops = env.FeeBump.Tx.InnerTx.V1.Tx.Operations
+		}
+	}
+
+	for _, op := range ops {
+		if op.Body.Type == xdr.OperationTypeInvokeHostFunction && op.Body.InvokeHostFunctionOp != nil {
+			hostFn := op.Body.InvokeHostFunctionOp.HostFunction
+			if hostFn.Type == xdr.HostFunctionTypeHostFunctionTypeInvokeContract && hostFn.InvokeContract != nil {
+				if hostFn.InvokeContract.ContractAddress.ContractId != nil {
+					addID(*hostFn.InvokeContract.ContractAddress.ContractId)
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+// FetchAndParseContractSpec fetches contract WASM code via src and parses its ScSpecEntry entries.
+func FetchAndParseContractSpec(ctx context.Context, src ContractWASMSource, contractID string) ([]xdr.ScSpecEntry, error) {
+	record, err := FetchContractWASM(ctx, src, contractID)
+	if err != nil {
+		return nil, err
+	}
+	contract, err := ParseContractWASM(record.XDR)
+	if err != nil {
+		return nil, err
+	}
+	return contract.Spec, nil
+}
+
+// LoadContractSpec loads a <tx_hash>.spec.json file into []xdr.ScSpecEntry.
+func LoadContractSpec(path string) ([]xdr.ScSpecEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading contract spec: %w", err)
+	}
+	var doc ContractSpecDocument
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("parsing contract spec JSON: %w", err)
+	}
+
+	out := make([]xdr.ScSpecEntry, 0, len(doc.Entries))
+	for _, e := range doc.Entries {
+		var entry xdr.ScSpecEntry
+		if err := xdr.SafeUnmarshalBase64(e.XDR, &entry); err != nil {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out, nil
+}

@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 
@@ -136,7 +137,15 @@ precedence.`,
 		newRefreshCmd(stdout, stderr),
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
+		newStatsCmd(cfg, stdout),
 	)
+	return root
+}
+
+// NewRootCmdForTest creates a root command configured with the provided extra subcommands.
+func NewRootCmdForTest(extra ...*cobra.Command) *cobra.Command {
+	root := newRootCmd(os.Stdout, os.Stderr)
+	root.AddCommand(extra...)
 	return root
 }
 
@@ -399,8 +408,27 @@ archive holds envelopes and results but not transaction meta.`,
 				return nil
 			}
 
-			return writeFixtures(cmd.Context(), src, records,
-				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
+			if err := writeFixtures(cmd.Context(), src, records,
+				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout); err != nil {
+				return err
+			}
+
+			if cfg.extractSpecs() {
+				if wasmSrc, ok := src.(capture.ContractWASMSource); ok {
+					for _, rec := range records {
+						if rec.Type == "TransactionEnvelope" {
+							var env xdr.TransactionEnvelope
+							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
+								specPaths, _ := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								for _, sp := range specPaths {
+									fmt.Fprintf(stdout, "wrote %s\n", sp)
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil
 		},
 	}
 
@@ -420,8 +448,27 @@ archive holds envelopes and results but not transaction meta.`,
 			}
 			// Ledger entries are not transactions, so the capture filters do
 			// not apply to them.
-			return writeFixtures(cmd.Context(), src, records,
-				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
+			if err := writeFixtures(cmd.Context(), src, records,
+				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout); err != nil {
+				return err
+			}
+
+			if cfg.extractSpecs() {
+				if wasmSrc, ok := src.(capture.ContractWASMSource); ok {
+					for _, rec := range records {
+						if rec.Type == "TransactionEnvelope" {
+							var env xdr.TransactionEnvelope
+							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
+								specPaths, _ := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								for _, sp := range specPaths {
+									fmt.Fprintf(stdout, "wrote %s\n", sp)
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil
 		},
 	}
 

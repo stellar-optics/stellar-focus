@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/stellar/go-stellar-sdk/amount"
 	"github.com/stellar/go-stellar-sdk/strkey"
@@ -13,6 +15,30 @@ import (
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 )
+
+var (
+	ledgerKeyCache   sync.Map
+	resolvedKeyCache sync.Map
+	keyCacheCount    atomic.Int64
+)
+
+// ClearLedgerKeyCache empties the ledger key memoization caches.
+func ClearLedgerKeyCache() {
+	ledgerKeyCache.Range(func(k, v any) bool {
+		ledgerKeyCache.Delete(k)
+		return true
+	})
+	resolvedKeyCache.Range(func(k, v any) bool {
+		resolvedKeyCache.Delete(k)
+		return true
+	})
+	keyCacheCount.Store(0)
+}
+
+// LedgerKeyCacheLen reports the number of entries currently cached in the ledger key cache.
+func LedgerKeyCacheLen() int {
+	return int(keyCacheCount.Load())
+}
 
 // Ledger entry assertions read the ledger changes a transaction carries in its
 // meta: the entries it created, modified and deleted. An envelope assertion
@@ -223,6 +249,18 @@ func AssertLedgerKeyEqual(t TB, want, got Value) bool {
 	return assertEqual(t, "AssertLedgerKeyEqual", "LedgerKey", want, got)
 }
 
+// AssertLedgerEntriesEqual compares two ledger entries.
+func AssertLedgerEntriesEqual(t TB, want, got Value, opts ...Option) bool {
+	t.Helper()
+	return assertEqual(t, "AssertLedgerEntriesEqual", "LedgerEntry", want, got, opts...)
+}
+
+// AssertOperationsEqual compares two operations.
+func AssertOperationsEqual(t TB, want, got Value, opts ...Option) bool {
+	t.Helper()
+	return assertEqual(t, "AssertOperationsEqual", "Operation", want, got, opts...)
+}
+
 // assertEntryChange is the shared implementation behind the three ledger
 // entry assertions.
 func assertEntryChange(t TB, assertion string, meta, key Value, want xdr.LedgerEntryChangeType) bool {
@@ -382,27 +420,27 @@ func sanitiseChange(ch xdr.LedgerEntryChange) (ledgerChange, bool) {
 	}
 	switch key.Type {
 	case xdr.LedgerEntryTypeAccount:
-		if k, ok := key.GetAccount(); ok {
-			out.account = k.AccountId.Address()
+		if key.Account != nil {
+			out.account = key.Account.AccountId.Address()
 		}
 	case xdr.LedgerEntryTypeTrustline:
-		if k, ok := key.GetTrustLine(); ok {
-			out.account = k.AccountId.Address()
-			out.asset = describeTrustLineAsset(k.Asset)
+		if key.TrustLine != nil {
+			out.account = key.TrustLine.AccountId.Address()
+			out.asset = describeTrustLineAsset(key.TrustLine.Asset)
 		}
 	case xdr.LedgerEntryTypeOffer:
-		if k, ok := key.GetOffer(); ok {
-			out.account = k.SellerId.Address()
-			out.id = strconv.FormatInt(int64(k.OfferId), 10)
+		if key.Offer != nil {
+			out.account = key.Offer.SellerId.Address()
+			out.id = strconv.FormatInt(int64(key.Offer.OfferId), 10)
 		}
 	case xdr.LedgerEntryTypeData:
-		if k, ok := key.GetData(); ok {
-			out.account = k.AccountId.Address()
-			out.id = string(k.DataName)
+		if key.Data != nil {
+			out.account = key.Data.AccountId.Address()
+			out.id = string(key.Data.DataName)
 		}
 	case xdr.LedgerEntryTypeLiquidityPool:
-		if k, ok := key.GetLiquidityPool(); ok {
-			out.id = describePoolID(k.LiquidityPoolId)
+		if key.LiquidityPool != nil {
+			out.id = describePoolID(key.LiquidityPool.LiquidityPoolId)
 		}
 	}
 
@@ -427,6 +465,13 @@ func sanitiseChange(ch xdr.LedgerEntryChange) (ledgerChange, bool) {
 func resolveLedgerKey(t TB, assertion string, v Value) (ledgerKey, bool) {
 	t.Helper()
 
+	if s, ok := v.(string); ok {
+		s = strings.TrimSpace(s)
+		if cached, ok := resolvedKeyCache.Load(s); ok {
+			return cached.(ledgerKey), true
+		}
+	}
+
 	var (
 		out ledgerKey
 		err error
@@ -449,6 +494,9 @@ func resolveLedgerKey(t TB, assertion string, v Value) (ledgerKey, bool) {
 			return
 		}
 		out.label = describeLedgerKey(key)
+		if s, ok := v.(string); ok {
+			resolvedKeyCache.Store(strings.TrimSpace(s), out)
+		}
 	}) {
 		return ledgerKey{}, false
 	}
@@ -478,6 +526,59 @@ func coerceLedgerKey(v Value) (xdr.LedgerKey, error) {
 			return xdr.LedgerKey{}, fmt.Errorf("value is a nil *xdr.LedgerEntry")
 		}
 		return val.LedgerKey()
+	case string:
+		val = strings.TrimSpace(val)
+		if cached, ok := ledgerKeyCache.Load(val); ok {
+			return cached.(xdr.LedgerKey), nil
+		}
+		var key xdr.LedgerKey
+		if err := xdr.SafeUnmarshalBase64(val, &key); err == nil {
+			ledgerKeyCache.Store(val, key)
+			keyCacheCount.Add(1)
+			return key, nil
+		}
+		var entry xdr.LedgerEntry
+		if err := xdr.SafeUnmarshalBase64(val, &entry); err == nil {
+			k, err := entry.LedgerKey()
+			if err == nil {
+				ledgerKeyCache.Store(val, k)
+				keyCacheCount.Add(1)
+				return k, nil
+			}
+		}
+		decoded, err := coerce(v, "LedgerKey")
+		if err != nil {
+			return xdr.LedgerKey{}, fmt.Errorf(
+				"%w; pass an xdr.LedgerKey, an xdr.LedgerEntry, or their base64 XDR", err)
+		}
+		k, ok := decoded.Raw.(*xdr.LedgerKey)
+		if !ok {
+			return xdr.LedgerKey{}, fmt.Errorf(
+				"decoded %s value does not hold a LedgerKey", decoded.Type)
+		}
+		ledgerKeyCache.Store(val, *k)
+		keyCacheCount.Add(1)
+		return *k, nil
+	case []byte:
+		var key xdr.LedgerKey
+		if err := key.UnmarshalBinary(val); err == nil {
+			return key, nil
+		}
+		var entry xdr.LedgerEntry
+		if err := entry.UnmarshalBinary(val); err == nil {
+			return entry.LedgerKey()
+		}
+		decoded, err := coerce(v, "LedgerKey")
+		if err != nil {
+			return xdr.LedgerKey{}, fmt.Errorf(
+				"%w; pass an xdr.LedgerKey, an xdr.LedgerEntry, or their base64 XDR", err)
+		}
+		k, ok := decoded.Raw.(*xdr.LedgerKey)
+		if !ok {
+			return xdr.LedgerKey{}, fmt.Errorf(
+				"decoded %s value does not hold a LedgerKey", decoded.Type)
+		}
+		return *k, nil
 	case *lens.Value:
 		if val == nil {
 			return xdr.LedgerKey{}, fmt.Errorf("value is a nil *lens.Value")
@@ -582,47 +683,47 @@ func changeKindLabel(kind xdr.LedgerEntryChangeType) string {
 func describeLedgerKey(key xdr.LedgerKey) string {
 	switch key.Type {
 	case xdr.LedgerEntryTypeAccount:
-		if k, ok := key.GetAccount(); ok {
+		if k := key.Account; k != nil {
 			return "account " + shorten(k.AccountId.Address())
 		}
 	case xdr.LedgerEntryTypeTrustline:
-		if k, ok := key.GetTrustLine(); ok {
+		if k := key.TrustLine; k != nil {
 			return fmt.Sprintf("trustline %s on %s",
 				describeTrustLineAsset(k.Asset), shorten(k.AccountId.Address()))
 		}
 	case xdr.LedgerEntryTypeOffer:
-		if k, ok := key.GetOffer(); ok {
+		if k := key.Offer; k != nil {
 			return fmt.Sprintf("offer %s #%d", shorten(k.SellerId.Address()), k.OfferId)
 		}
 	case xdr.LedgerEntryTypeData:
-		if k, ok := key.GetData(); ok {
+		if k := key.Data; k != nil {
 			return fmt.Sprintf("data %q on %s", string(k.DataName), shorten(k.AccountId.Address()))
 		}
 	case xdr.LedgerEntryTypeClaimableBalance:
-		if k, ok := key.GetClaimableBalance(); ok {
+		if k := key.ClaimableBalance; k != nil {
 			return "claimable balance " + describeClaimableBalanceID(k.BalanceId)
 		}
 	case xdr.LedgerEntryTypeLiquidityPool:
-		if k, ok := key.GetLiquidityPool(); ok {
+		if k := key.LiquidityPool; k != nil {
 			return "liquidity pool " + describePoolID(k.LiquidityPoolId)
 		}
 	case xdr.LedgerEntryTypeContractData:
-		if k, ok := key.GetContractData(); ok {
+		if k := key.ContractData; k != nil {
 			if addr, err := k.Contract.String(); err == nil {
 				return "contract data for " + shorten(addr)
 			}
 			return "contract data"
 		}
 	case xdr.LedgerEntryTypeContractCode:
-		if k, ok := key.GetContractCode(); ok {
+		if k := key.ContractCode; k != nil {
 			return "contract code " + hex.EncodeToString(k.Hash[:])
 		}
 	case xdr.LedgerEntryTypeConfigSetting:
-		if k, ok := key.GetConfigSetting(); ok {
+		if k := key.ConfigSetting; k != nil {
 			return "config setting " + k.ConfigSettingId.String()
 		}
 	case xdr.LedgerEntryTypeTtl:
-		if k, ok := key.GetTtl(); ok {
+		if k := key.Ttl; k != nil {
 			return "ttl " + hex.EncodeToString(k.KeyHash[:])
 		}
 	}

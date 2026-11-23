@@ -48,6 +48,8 @@ type CaptureFixture struct {
 	// Package is the package clause of the generated file. Empty uses
 	// "fixtures_test".
 	Package string
+	// SpecPath is the optional path to a .spec.json file extracted for this transaction.
+	SpecPath string
 }
 
 // GenerateReplayTest renders a compile-ready, table-driven replay test for one
@@ -112,6 +114,9 @@ func GenerateReplayTest(fixture *CaptureFixture) (string, error) {
 	fmt.Fprintf(&b, "package %s\n\n", pkg)
 	fmt.Fprintf(&b, "import (\n")
 	fmt.Fprintf(&b, "\t\"testing\"\n\n")
+	if fixture.SpecPath != "" {
+		fmt.Fprintf(&b, "\t\"github.com/stellar-optics/stellar-focus/pkg/capture\"\n")
+	}
 	fmt.Fprintf(&b, "\t\"github.com/stellar-optics/stellar-focus/pkg/focus\"\n")
 	fmt.Fprintf(&b, "\t\"github.com/stellar-optics/stellar-focus/pkg/golden\"\n")
 	fmt.Fprintf(&b, ")\n\n")
@@ -123,6 +128,13 @@ func GenerateReplayTest(fixture *CaptureFixture) (string, error) {
 	fmt.Fprintf(&b, "\tif err != nil {\n")
 	fmt.Fprintf(&b, "\t\tt.Fatalf(\"loading fixture: %%v\", err)\n")
 	fmt.Fprintf(&b, "\t}\n\n")
+	if fixture.SpecPath != "" {
+		fmt.Fprintf(&b, "\tspec, err := capture.LoadContractSpec(%s)\n", quote(filepath.ToSlash(fixture.SpecPath)))
+		fmt.Fprintf(&b, "\tif err != nil {\n")
+		fmt.Fprintf(&b, "\t\tt.Fatalf(\"loading contract spec: %%v\", err)\n")
+		fmt.Fprintf(&b, "\t}\n")
+		fmt.Fprintf(&b, "\t_ = spec\n\n")
+	}
 	fmt.Fprintf(&b, "\twantOps := []string{%s}\n\n", strings.Join(opNames, ", "))
 	fmt.Fprintf(&b, "\ttests := []struct {\n")
 	fmt.Fprintf(&b, "\t\tname string\n")

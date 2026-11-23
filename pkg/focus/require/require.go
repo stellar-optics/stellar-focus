@@ -70,6 +70,24 @@ func Equal(t focus.TB, want, got focus.Value, opts ...focus.Option) {
 	focus.AssertEqual(fatal(t), want, got, opts...)
 }
 
+// LedgerEntriesEqual is focus.AssertLedgerEntriesEqual, stopping the test on failure.
+func LedgerEntriesEqual(t focus.TB, want, got focus.Value, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerEntriesEqual(fatal(t), want, got, opts...)
+}
+
+// OperationsEqual is focus.AssertOperationsEqual, stopping the test on failure.
+func OperationsEqual(t focus.TB, want, got focus.Value, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertOperationsEqual(fatal(t), want, got, opts...)
+}
+
+// NoFootprintConflicts is focus.AssertNoFootprintConflicts, stopping the test on failure.
+func NoFootprintConflicts(t focus.TB, txs []xdr.TransactionEnvelope) {
+	t.Helper()
+	focus.AssertNoFootprintConflicts(fatal(t), txs)
+}
+
 // EqualAs is focus.AssertEqualAs, stopping the test on failure.
 func EqualAs(t focus.TB, typeName string, want, got focus.Value, opts ...focus.Option) {
 	t.Helper()

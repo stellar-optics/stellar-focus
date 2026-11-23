@@ -27,7 +27,7 @@ func main() {
 	// `focus assert` and `focus golden` are assembled in cmd/focus and registered
 	// with the root command, keeping interactive generators and golden tooling
 	// beside main while internal/cli stays focused on fixtures.
-	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr, newAssertCmd(), newGoldenCmd())
+	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr, newAssertCmd(), newGoldenCmd(), newStatsCmd())
 	code, printable := cli.ExitCode(err)
 	if printable && err != nil {
 		fmt.Fprintln(os.Stderr, "focus:", err)
