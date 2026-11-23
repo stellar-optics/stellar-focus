@@ -1,6 +1,8 @@
 package capture_test
 
 import (
+	"bytes"
+	"encoding/base64"
 	"go/parser"
 	"go/token"
 	"os"
@@ -8,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
@@ -410,5 +414,82 @@ func TestGenerateTestFileReportsAMissingFixture(t *testing.T) {
 		filepath.Join(dir, "out_test.go"), capture.CodegenOptions{})
 	if err == nil {
 		t.Fatal("missing fixture generated a test")
+	}
+}
+
+// ledgerHeaderFixture encodes a LedgerHeaderHistoryEntry with the given
+// fields, the shape a capture writes for a ledger header.
+func ledgerHeaderFixture(t *testing.T, seq, baseFee, baseReserve uint32) string {
+	t.Helper()
+
+	entry := xdr.LedgerHeaderHistoryEntry{
+		Header: xdr.LedgerHeader{
+			LedgerVersion: xdr.Uint32(20),
+			LedgerSeq:     xdr.Uint32(seq),
+			BaseFee:       xdr.Uint32(baseFee),
+			BaseReserve:   xdr.Uint32(baseReserve),
+		},
+	}
+	var buf bytes.Buffer
+	if _, err := xdr.Marshal(&buf, entry); err != nil {
+		t.Fatalf("marshalling ledger header fixture: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func TestGenerateTestEmitsLedgerHeaderAssertions(t *testing.T) {
+	t.Parallel()
+
+	f := &golden.Fixture{
+		Type:        "LedgerHeaderHistoryEntry",
+		XDR:         ledgerHeaderFixture(t, 8100, 100, 5000),
+		Description: "ledger header 8100",
+	}
+
+	src, err := capture.GenerateTest("ledger_header", f, capture.CodegenOptions{
+		FixturePath: "testdata/ledger_header.golden.json",
+	})
+	if err != nil {
+		t.Fatalf("GenerateTest: %v", err)
+	}
+	parseGenerated(t, src)
+
+	out := string(src)
+	for _, want := range []string{
+		`golden.Load("testdata/ledger_header.golden.json")`,
+		`focus.AssertEqualAs(t, "LedgerHeaderHistoryEntry"`,
+		"// Ledger header: sequence 8100, base fee 100 stroops (0.0000100 XLM), base reserve 5000 stroops (0.0005000 XLM).",
+		"focus.AssertLedgerHeader(t, ",
+		", 8100, 100, 5000)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("generated test is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestGenerateTestLeavesOtherFixturesWithoutHeaderAssertions(t *testing.T) {
+	t.Parallel()
+
+	src, err := capture.GenerateTest("failed_payment", parsedFixture(t), capture.CodegenOptions{
+		FixturePath: "testdata/failed_payment.golden.json",
+	})
+	if err != nil {
+		t.Fatalf("GenerateTest: %v", err)
+	}
+	if strings.Contains(string(src), "AssertLedgerHeader") {
+		t.Errorf("a transaction fixture generated a ledger header assertion:\n%s", src)
+	}
+}
+
+func TestGenerateTestRejectsAnUndecodableLedgerHeader(t *testing.T) {
+	t.Parallel()
+
+	_, err := capture.GenerateTest("ledger_header", &golden.Fixture{
+		Type: "LedgerHeaderHistoryEntry",
+		XDR:  "AAAA",
+	}, capture.CodegenOptions{FixturePath: "testdata/ledger_header.golden.json"})
+	if err == nil {
+		t.Fatal("generation succeeded for a header fixture that does not decode")
 	}
 }

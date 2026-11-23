@@ -739,3 +739,9 @@ func ContractLogMessage(t focus.TestingT, metaInput any, pattern string, opts ..
 	t.Helper()
 	focus.AssertContractLogMessage(fatal(t), metaInput, pattern, opts...)
 }
+
+// LedgerHeader is focus.AssertLedgerHeader, stopping the test on failure.
+func LedgerHeader(t focus.TB, header focus.Value, wantSeq, wantBaseFee, wantBaseReserve uint32) {
+	t.Helper()
+	focus.AssertLedgerHeader(fatal(t), header, wantSeq, wantBaseFee, wantBaseReserve)
+}
