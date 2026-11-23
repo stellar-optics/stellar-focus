@@ -432,6 +432,13 @@ func ContractOwner(t focus.TB, meta focus.Value, contractID, wantOwner string) {
 	focus.AssertContractOwner(fatal(t), meta, contractID, wantOwner)
 }
 
+// ContractInstanceOwner is focus.AssertContractInstanceOwner, stopping the test
+// on failure.
+func ContractInstanceOwner(t focus.TestingT, metaInput any, contractID, wantOwnerAddress string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertContractInstanceOwner(fatal(t), metaInput, contractID, wantOwnerAddress, opts...)
+}
+
 // ContractAuthValid is focus.AssertContractAuthValid, stopping the test on
 // failure.
 func ContractAuthValid(t focus.TB, envelope focus.Value, expectedInvoker string, expectedCall focus.ContractCall) {

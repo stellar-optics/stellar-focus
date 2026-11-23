@@ -194,6 +194,99 @@ func AssertContractOwner(t TB, meta Value, contractID, wantOwner string) bool {
 	return false
 }
 
+// AssertContractInstanceOwner checks that the contract instance a deployment
+// created binds its owner or admin to wantOwnerAddress.
+//
+// A Soroban contract's __constructor — or the protocol, for a Stellar Asset
+// Contract — records the controlling address inside the contract instance
+// entry's storage map. This assertion reads that map and checks the address, so
+// a deployment test can prove who controls the contract without traversing
+// ledger entry changes by hand.
+//
+// Instance storage is searched for an entry keyed "owner" or "admin", ignoring
+// case. "admin" is what a Stellar Asset Contract uses for its issuer, and
+// "owner" is the conventional key a custom contract writes; both are accepted
+// so the same assertion covers a SAC deployment and a custom contract's
+// __constructor. When both are present, a match under either satisfies the
+// check, and a failure names the owner entry first.
+//
+// Only instance storage is read. A persistent or temporary ContractData entry
+// that happens to be keyed "owner" is ordinary contract state, not the
+// instance binding this assertion verifies, so it does not satisfy the check.
+//
+// The owner must be an address: a strkey account ("G…") or contract ("C…"). A
+// value that is not an address is reported as such rather than as a value
+// mismatch, because it usually means the contract wrote the wrong kind of value
+// rather than the wrong owner.
+func AssertContractInstanceOwner(t TestingT, metaInput any, contractID string, wantOwnerAddress string, opts ...Option) bool {
+	t.Helper()
+	cfg := newConfig(opts...)
+	assertion := cfg.assertionName("AssertContractInstanceOwner")
+
+	wantOwner := strings.TrimSpace(wantOwnerAddress)
+	if wantOwner == "" {
+		t.Errorf("%s: wantOwnerAddress is empty; pass the strkey account or contract "+
+			"address the contract instance binds as owner or admin", assertion)
+		return false
+	}
+	want, ok := scAddressValue(wantOwner)
+	if !ok {
+		t.Errorf("%s: wantOwnerAddress %q is not a strkey account (G…) or contract (C…) address",
+			assertion, wantOwnerAddress)
+		return false
+	}
+	wantID, err := scValID(want)
+	if err != nil {
+		t.Errorf("%s: encoding the wanted owner: %v", assertion, err)
+		return false
+	}
+
+	snapshot, ok := readConstructorSnapshot(t, assertion, metaInput, contractID)
+	if !ok {
+		return false
+	}
+
+	var (
+		candidates []constructorEntry
+		key        string
+	)
+	for _, name := range []string{"owner", "admin"} {
+		found := snapshot.instanceEntriesNamed(name)
+		if len(found) == 0 {
+			continue
+		}
+		if key == "" {
+			key = name
+		}
+		candidates = append(candidates, found...)
+	}
+	if len(candidates) == 0 {
+		t.Errorf("%s: contract %s has no owner or admin binding in its instance storage; "+
+			"a deployment binds the owner inside the contract instance entry, not in a "+
+			"separate ContractData entry\n\n%s",
+			assertion, shorten(snapshot.contract), indent(snapshot.describeInstanceStorage()))
+		return false
+	}
+	if anyValueEquals(candidates, wantID) {
+		return true
+	}
+
+	got := candidates[0]
+	if !isAddressScVal(got.value) {
+		t.Errorf("%s: the %s entry in the instance storage of contract %s holds %s, "+
+			"which is not an address; an owner binding must be a strkey account (G…) "+
+			"or contract (C…)\n\n%s",
+			assertion, key, shorten(snapshot.contract), describeValue(got.value),
+			indent(snapshot.describeInstanceStorage()))
+		return false
+	}
+
+	t.Errorf("%s: contract %s binds %s to %s, want %s\n\n%s",
+		assertion, shorten(snapshot.contract), key, describeValue(got.value), describeValue(want),
+		indent(snapshot.describeInstanceStorage()))
+	return false
+}
+
 // constructorExpectation is one storage entry a test expects to find.
 type constructorExpectation struct {
 	// name is the storage key name as the test wrote it, for the message.
@@ -362,6 +455,43 @@ func (s constructorSnapshot) find(name string) []constructorEntry {
 		}
 	}
 	return out
+}
+
+// instanceEntriesNamed returns the instance-storage entries whose key name
+// matches name, ignoring case.
+func (s constructorSnapshot) instanceEntriesNamed(name string) []constructorEntry {
+	var out []constructorEntry
+	for _, e := range s.entries {
+		if !e.instance {
+			continue
+		}
+		if got, ok := storageKeyName(e.key); ok && strings.EqualFold(got, name) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// describeInstanceStorage renders only the contract instance's storage, for
+// assertions that check the instance binding rather than every entry a
+// constructor wrote.
+func (s constructorSnapshot) describeInstanceStorage() string {
+	var b strings.Builder
+	count := 0
+	for _, e := range s.entries {
+		if !e.instance {
+			continue
+		}
+		if count == 0 {
+			b.WriteString("instance storage:\n")
+		}
+		fmt.Fprintf(&b, "  %-32s %s\n", describeStorageKey(e.key), describeValue(e.value))
+		count++
+	}
+	if count == 0 {
+		return "the contract instance storage is empty"
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // describe renders the state the constructor wrote, so a failure shows what is
