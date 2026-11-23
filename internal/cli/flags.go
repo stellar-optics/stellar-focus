@@ -73,6 +73,9 @@ const (
 	keyFilter      = "filter"
 	keyDriftedOnly = "drifted-only"
 	keyVerifyCache = "verify-cache"
+	keyMinOps      = "min-ops"
+	keyOnlySoroban = "only-soroban"
+	keyFailedOnly  = "failed-only"
 )
 
 // The capture sources the command can talk to.
@@ -106,6 +109,9 @@ const (
 	defaultOutFile     = ""
 	defaultType        = ""
 	defaultDescription = ""
+	defaultMinOps      = 0
+	defaultOnlySoroban = false
+	defaultFailedOnly  = false
 )
 
 // discoveredConfigFiles are checked, in order, when --config is not given.
@@ -146,6 +152,9 @@ func newConfig() *config {
 	v.SetDefault(keyPass, defaultPass)
 	v.SetDefault(keyFileSrc, defaultFileSrc)
 	v.SetDefault(keyArchive, defaultArchive)
+	v.SetDefault(keyMinOps, defaultMinOps)
+	v.SetDefault(keyOnlySoroban, defaultOnlySoroban)
+	v.SetDefault(keyFailedOnly, defaultFailedOnly)
 
 	return &config{v: v}
 }
@@ -222,6 +231,27 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyMemoAlias)
 	c.bind(flags, keyData)
 	c.bind(flags, keyKeys)
+}
+
+// bindFilterFlags declares the flags that narrow which transactions a capture
+// records.
+//
+// They live on the transaction subcommand because a ledger entry is not a
+// transaction: there is nothing for --min-ops or --failed-only to decide
+// about one.
+func (c *config) bindFilterFlags(cmd *cobra.Command) {
+	flags := cmd.Flags()
+
+	flags.Int(keyMinOps, defaultMinOps,
+		"keep only transactions with at least this many operations")
+	flags.Bool(keyOnlySoroban, defaultOnlySoroban,
+		"keep only transactions that invoke the Soroban host")
+	flags.Bool(keyFailedOnly, defaultFailedOnly,
+		"keep only transactions whose result is a failure")
+
+	c.bind(flags, keyMinOps)
+	c.bind(flags, keyOnlySoroban)
+	c.bind(flags, keyFailedOnly)
 }
 
 // bindVerifyFlags declares the flags that narrow what a verify run checks.
@@ -391,6 +421,9 @@ func (c *config) validate() error {
 	if c.rate() < 0 {
 		return usageErrorf("rate must not be negative, got %s", c.rate())
 	}
+	if c.v.GetInt(keyMinOps) < 0 {
+		return usageErrorf("min-ops must not be negative, got %d", c.v.GetInt(keyMinOps))
+	}
 	return nil
 }
 
@@ -507,6 +540,16 @@ func (c *config) verifyCachePath() string {
 		return path
 	}
 	return defaultVerifyCachePath
+}
+
+// filters is the transaction filter a capture applies before writing
+// fixtures. The zero value keeps everything.
+func (c *config) filters() capture.FilterOptions {
+	return capture.FilterOptions{
+		MinOps:      c.v.GetInt(keyMinOps),
+		OnlySoroban: c.v.GetBool(keyOnlySoroban),
+		FailedOnly:  c.v.GetBool(keyFailedOnly),
+	}
 }
 
 // maskAddresses replaces real account addresses in captured fixtures with

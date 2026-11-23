@@ -161,6 +161,238 @@ func (s *passphraseSource) TransactionInLedger(ctx context.Context, hash string,
 	return FetchTransaction(ctx, s.Source, hash, ledger)
 }
 
+// FilterOptions selects which captured transactions are kept.
+//
+// It narrows a capture to the transactions worth recording — the ones with
+// many operations, the Soroban calls, the failures — before anything is
+// written to disk. The zero value keeps everything.
+type FilterOptions struct {
+	// MinOps keeps only transactions with at least this many operations.
+	MinOps int
+	// OnlySoroban keeps only transactions that invoke the Soroban host.
+	OnlySoroban bool
+	// FailedOnly keeps only transactions whose result is a failure.
+	FailedOnly bool
+}
+
+// Enabled reports whether any filter is set.
+func (f FilterOptions) Enabled() bool {
+	return f.MinOps > 0 || f.OnlySoroban || f.FailedOnly
+}
+
+// FilterRecords keeps only the records of transactions that match every set
+// filter.
+//
+// A transaction is spread over several records — an envelope, a result and
+// its meta — so each filter is decided once per transaction hash and all of
+// that transaction's records are kept or dropped together. Order is
+// preserved, and records with no transaction hash are not transaction
+// candidates, so they pass through untouched.
+func FilterRecords(records []Record, opts FilterOptions) ([]Record, error) {
+	if !opts.Enabled() {
+		return records, nil
+	}
+
+	order, byTx := groupByTransaction(records)
+	kept := make(map[string]bool, len(order))
+	for _, hash := range order {
+		match, err := matchesFilter(byTx[hash], opts)
+		if err != nil {
+			return nil, fmt.Errorf("filtering transaction %s: %w", hash, err)
+		}
+		kept[hash] = match
+	}
+
+	out := make([]Record, 0, len(records))
+	for _, r := range records {
+		if r.TxHash == "" || kept[r.TxHash] {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// groupByTransaction gathers the records of each transaction, in the order
+// their transaction first appears.
+func groupByTransaction(records []Record) (order []string, byTx map[string][]Record) {
+	byTx = make(map[string][]Record)
+	for _, r := range records {
+		if r.TxHash == "" {
+			continue
+		}
+		if _, seen := byTx[r.TxHash]; !seen {
+			order = append(order, r.TxHash)
+		}
+		byTx[r.TxHash] = append(byTx[r.TxHash], r)
+	}
+	return order, byTx
+}
+
+// matchesFilter reports whether one transaction's records pass every filter.
+//
+// A filter whose input record is missing does not match: a transaction with
+// no envelope cannot be shown to have enough operations, and one with no
+// result cannot be shown to have failed.
+func matchesFilter(records []Record, opts FilterOptions) (bool, error) {
+	envelope, hasEnvelope := recordOfType(records, "TransactionEnvelope")
+
+	if opts.MinOps > 0 {
+		if !hasEnvelope {
+			return false, nil
+		}
+		count, err := operationCount(envelope)
+		if err != nil {
+			return false, err
+		}
+		if count < opts.MinOps {
+			return false, nil
+		}
+	}
+
+	if opts.OnlySoroban {
+		if !hasEnvelope {
+			return false, nil
+		}
+		soroban, err := isSoroban(envelope)
+		if err != nil {
+			return false, err
+		}
+		if !soroban {
+			return false, nil
+		}
+	}
+
+	if opts.FailedOnly {
+		result, ok := recordOfType(records, "TransactionResult")
+		if !ok {
+			return false, nil
+		}
+		failed, err := isFailed(result)
+		if err != nil {
+			return false, err
+		}
+		if !failed {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// recordOfType returns the first record of a type, if there is one.
+func recordOfType(records []Record, typ string) (Record, bool) {
+	for _, r := range records {
+		if r.Type == typ {
+			return r, true
+		}
+	}
+	return Record{}, false
+}
+
+// operationCount counts the operations a transaction carries.
+func operationCount(envelope Record) (int, error) {
+	env, err := decodeEnvelope(envelope.XDR)
+	if err != nil {
+		return 0, err
+	}
+	_, ops, err := envelopeTransaction(env)
+	if err != nil {
+		return 0, err
+	}
+	return len(ops), nil
+}
+
+// isSoroban reports whether a transaction talks to the Soroban host.
+//
+// The signal comes from the envelope: a Soroban transaction carries
+// SorobanTransactionData on its extension, or it invokes the host function.
+// A V0 envelope predates Soroban and never carries either.
+func isSoroban(envelope Record) (bool, error) {
+	env, err := decodeEnvelope(envelope.XDR)
+	if err != nil {
+		return false, err
+	}
+	ext, ops, err := envelopeTransaction(env)
+	if err != nil {
+		return false, err
+	}
+	if ext.SorobanData != nil {
+		return true, nil
+	}
+	for _, op := range ops {
+		if op.Body.Type == xdr.OperationTypeInvokeHostFunction {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isFailed reports whether a transaction's result is a failure.
+//
+// Anything other than txSUCCESS is a failure: a txFAILED transaction, a bad
+// sequence, an insufficient fee, a Soroban precondition the host rejected.
+func isFailed(result Record) (bool, error) {
+	res, err := decodeResult(result.XDR)
+	if err != nil {
+		return false, err
+	}
+	return res.Result.Code != xdr.TransactionResultCodeTxSuccess, nil
+}
+
+// envelopeTransaction unwraps the transaction an envelope carries, returning
+// its extension and operations.
+func envelopeTransaction(env xdr.TransactionEnvelope) (xdr.TransactionExt, []xdr.Operation, error) {
+	switch env.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		if env.V0 == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("V0 envelope carries no transaction")
+		}
+		return xdr.TransactionExt{}, env.V0.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if env.V1 == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("V1 envelope carries no transaction")
+		}
+		return env.V1.Tx.Ext, env.V1.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if env.FeeBump == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("fee bump envelope carries no transaction")
+		}
+		inner := env.FeeBump.Tx.InnerTx.V1
+		if inner == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("fee bump envelope carries no inner V1 transaction")
+		}
+		return inner.Tx.Ext, inner.Tx.Operations, nil
+	default:
+		return xdr.TransactionExt{}, nil, fmt.Errorf("unexpected envelope type %v", env.Type)
+	}
+}
+
+// decodeEnvelope decodes a base64 transaction envelope.
+func decodeEnvelope(b64 string) (xdr.TransactionEnvelope, error) {
+	var env xdr.TransactionEnvelope
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return env, fmt.Errorf("decoding envelope: %w", err)
+	}
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &env); err != nil {
+		return env, fmt.Errorf("decoding envelope: %w", err)
+	}
+	return env, nil
+}
+
+// decodeResult decodes a base64 transaction result.
+func decodeResult(b64 string) (xdr.TransactionResult, error) {
+	var res xdr.TransactionResult
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return res, fmt.Errorf("decoding result: %w", err)
+	}
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &res); err != nil {
+		return res, fmt.Errorf("decoding result: %w", err)
+	}
+	return res, nil
+}
+
 // Capture fetches items and turns them into fixtures, stamping each with the
 // provenance needed to verify or refresh it later.
 //

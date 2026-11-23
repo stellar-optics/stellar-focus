@@ -335,6 +335,12 @@ captured is reported and the batch carries on.
 A batch names each fixture after the transaction it came from, so two
 transactions in one batch do not overwrite each other.
 
+A capture can be narrowed before anything is written: --min-ops keeps only
+transactions with at least that many operations, --only-soroban keeps only
+transactions that invoke the Soroban host, and --failed-only keeps only
+transactions whose result is a failure. A transaction that matches none of
+them is skipped, and no fixture is written for it.
+
 A capture from a private or staging network may carry data that must not be
 committed. --sanitize masks text memos, data entry values and anything shaped
 like a secret key; --mask-memo, --scrub-data and --scrub-keys pick one each.
@@ -348,6 +354,8 @@ archive holds envelopes and results but not transaction meta.`,
   focus capture tx 2b2e276a… --out testdata/ --prefix failed_payment
   focus capture tx 2b2e276a… --out testdata/ --sanitize
   focus capture tx --batch hashes.txt --out testdata/ --concurrency 4
+  focus capture tx --batch hashes.txt --out testdata/ --only-soroban --failed-only
+  focus capture tx --batch hashes.txt --out testdata/ --min-ops 5
   focus capture tx 2b2e276a… --network standalone --rpc-url http://localhost:8000/rpc \
     --passphrase "Standalone Network ; February 2017"
 
@@ -378,6 +386,17 @@ archive holds envelopes and results but not transaction meta.`,
 			if err != nil {
 				return err
 			}
+
+			records, err = capture.FilterRecords(records, cfg.filters())
+			if err != nil {
+				return err
+			}
+			if len(records) == 0 {
+				fmt.Fprintf(stdout, "skipped tx %s: it does not match the capture filters\n",
+					shortHash(args[0]))
+				return nil
+			}
+
 			return writeFixtures(cmd.Context(), src, records,
 				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
 		},
@@ -397,6 +416,8 @@ archive holds envelopes and results but not transaction meta.`,
 			if err != nil {
 				return err
 			}
+			// Ledger entries are not transactions, so the capture filters do
+			// not apply to them.
 			return writeFixtures(cmd.Context(), src, records,
 				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
 		},
@@ -406,6 +427,7 @@ archive holds envelopes and results but not transaction meta.`,
 		"ledger the transaction closed in; needed to find it in a history archive")
 
 	cfg.bindCaptureFlags(cmd)
+	cfg.bindFilterFlags(txCmd)
 	cfg.bindBatchFlags(txCmd)
 	cmd.AddCommand(txCmd, entryCmd)
 	return cmd
