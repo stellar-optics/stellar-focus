@@ -113,6 +113,9 @@ focus.AssertLedgerKeyEqual(t, key, want)
 `AssertLedgerKeyEqual` accepts a key built by the package and one read out of
 a transaction meta or captured fixture, and names the field that differs.
 
+For the full ledger-key builder and state-assertion reference, see the
+[Ledger Keys & State Snapshot Inspection](docs/ledger_keys_and_state.md) guide.
+
 ### Preconditions
 
 A transaction can promise the network a window in which it is valid. The
@@ -621,6 +624,10 @@ g.Assert("payment", BuildPayment(dest, "100"))
 
 ## Capture
 
+For the end-to-end path from a mainnet transaction hash to a sanitized fixture
+and a generated replay test, see the
+[Capture, Anonymize and Replay](docs/capture_and_anonymization.md) guide.
+
 ```sh
 go install github.com/stellar-optics/stellar-focus/cmd/focus@latest
 
@@ -1038,6 +1045,10 @@ go test -v ./examples/...
 
 - [End-to-End Soroban Contract Testing Guide](docs/soroban_testing_guide.md) — Comprehensive tutorial covering contract deployment, `__constructor` state, return value assertions, event sequence matching, trap/panic inspection, diagnostic logs, and resource budget checks.
 - [Golden Fixtures & CI Integration Guide](docs/golden_fixtures_guide.md) — Complete guide on fixture anatomy, recording updates with `-focus.update`, interactive drift resolution via `focus golden resolve`, and GitHub Actions CI integration.
+- [Ledger Keys & State Snapshot Inspection](docs/ledger_keys_and_state.md) — Reference for the `pkg/ledgerkey` builders (account, trustline, contract data, contract code, config setting), durability, and ledger state assertions.
+- [Stellar Operation Assertions Cookbook](docs/assertions_cookbook.md) — Copy-pasteable recipes for common Stellar operation assertions: payments, trustlines, account merges, DEX offers, claimable balances, memos, fees.
+- [Capture, Anonymize and Replay](docs/capture_and_anonymization.md) — Step-by-step workflow from `focus capture tx <hash>` through `--sanitize` / `--mask-addresses` to a generated Go replay test.
+- [Ignore Rules Reference](docs/ignore_rules_reference.md) — Pattern syntax for ignore and normalize rules, built-in presets, ignore vs. normalize vs. sort, and applied/unused reporting.
 
 
 ## Fuzzing
