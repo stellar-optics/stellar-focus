@@ -1,12 +1,18 @@
 package capture
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
@@ -386,4 +392,66 @@ func ExportCIWorkflow(dir string, bundle *Bundle) (string, error) {
 		return "", fmt.Errorf("writing GitHub Actions workflow %s: %w", path, err)
 	}
 	return path, nil
+}
+
+// BatchHash computes a deterministic hex hash for batch file content or data.
+func BatchHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:8])
+}
+
+// BatchCheckpointPath returns the path to the checkpoint file for the given batch hash.
+func BatchCheckpointPath(batchHash string) string {
+	return filepath.Join(".focus", fmt.Sprintf("batch_%s.checkpoint", batchHash))
+}
+
+// ReadCheckpoint reads the list of already-completed transaction hashes from path.
+func ReadCheckpoint(path string) (map[string]bool, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return make(map[string]bool), nil
+		}
+		return nil, fmt.Errorf("reading checkpoint %s: %w", path, err)
+	}
+
+	completed := make(map[string]bool)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		h := strings.ToLower(strings.TrimSpace(scanner.Text()))
+		if h != "" {
+			completed[h] = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("parsing checkpoint %s: %w", path, err)
+	}
+	return completed, nil
+}
+
+// AppendCheckpoint records a completed transaction hash to the checkpoint file.
+func AppendCheckpoint(path string, hash string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating checkpoint directory %s: %w", dir, err)
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening checkpoint %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if _, err := fmt.Fprintf(f, "%s\n", strings.ToLower(strings.TrimSpace(hash))); err != nil {
+		return fmt.Errorf("writing checkpoint %s: %w", path, err)
+	}
+	return f.Sync()
+}
+
+// DeleteCheckpoint removes the checkpoint file upon successful batch completion.
+func DeleteCheckpoint(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing checkpoint %s: %w", path, err)
+	}
+	return nil
 }

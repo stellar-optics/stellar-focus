@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,5 +194,149 @@ func TestFileSourceVerifiesOffline(t *testing.T) {
 	got := capture.Verify(context.Background(), src, "envelope.golden.json", f)
 	if got.Err != nil || !got.Match {
 		t.Errorf("Verify() = %+v, want a match against the dump", got)
+	}
+}
+
+func TestFileSourceS3MockedHTTP(t *testing.T) {
+	t.Parallel()
+
+	env, res := envelopeXDR(t), resultXDR(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/my-bucket/dumps/" + dumpHash + ".envelope.xdr":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(env))
+		case "/my-bucket/dumps/" + dumpHash + ".result.xdr":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(res))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	s3Provider := &capture.S3Provider{BaseURL: server.URL, HTTPClient: server.Client()}
+	src := capture.NewFileSource("s3://my-bucket/dumps").
+		WithRemoteProvider(s3Provider).
+		WithCacheDir(cacheDir)
+
+	records, err := src.Transaction(context.Background(), dumpHash)
+	if err != nil {
+		t.Fatalf("Transaction() error = %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2 (envelope and result)", len(records))
+	}
+	if records[0].XDR != env || records[1].XDR != res {
+		t.Errorf("unexpected record payloads from S3: %+v", records)
+	}
+
+	// Verify caching on demand into cacheDir/remote.
+	files, err := os.ReadDir(filepath.Join(cacheDir, "remote"))
+	if err != nil || len(files) < 2 {
+		t.Errorf("expected cached files in %s/remote, got err=%v, count=%d", cacheDir, err, len(files))
+	}
+}
+
+func TestFileSourceGCSMockedHTTP(t *testing.T) {
+	t.Parallel()
+
+	env := envelopeXDR(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, dumpHash+".envelope.xdr") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(env))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cacheDir := t.TempDir()
+	gcsProvider := &capture.GCSProvider{BaseURL: server.URL, HTTPClient: server.Client()}
+	src := capture.NewFileSource("gs://gcs-bucket/ledger-dumps").
+		WithRemoteProvider(gcsProvider).
+		WithCacheDir(cacheDir)
+
+	records, err := src.Transaction(context.Background(), dumpHash)
+	if err != nil {
+		t.Fatalf("Transaction() error = %v", err)
+	}
+	if len(records) != 1 || records[0].XDR != env {
+		t.Fatalf("expected 1 envelope record, got %+v", records)
+	}
+}
+
+func TestFileSourceRemoteMissingTransaction(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	s3Provider := &capture.S3Provider{BaseURL: server.URL, HTTPClient: server.Client()}
+	src := capture.NewFileSource("s3://test-bucket/empty").WithRemoteProvider(s3Provider).WithCacheDir(t.TempDir())
+
+	_, err := src.Transaction(context.Background(), dumpHash)
+	if !errors.Is(err, capture.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound for missing remote transaction, got %v", err)
+	}
+}
+
+func TestFileSourceRemoteOfflineFallbackWithoutCredentials(t *testing.T) {
+	// Ensure standard credentials are not set for this test.
+	os.Unsetenv("AWS_ACCESS_KEY_ID")
+	os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+	s3Src := capture.NewFileSource("s3://production-bucket/dumps").WithCacheDir(t.TempDir())
+	_, err := s3Src.Transaction(context.Background(), dumpHash)
+	if err == nil || !strings.Contains(err.Error(), "AWS_ACCESS_KEY_ID") {
+		t.Errorf("expected AWS credential error, got %v", err)
+	}
+
+	gcsSrc := capture.NewFileSource("gs://production-bucket/dumps").WithCacheDir(t.TempDir())
+	_, err = gcsSrc.Transaction(context.Background(), dumpHash)
+	if err == nil || !strings.Contains(err.Error(), "GOOGLE_APPLICATION_CREDENTIALS") {
+		t.Errorf("expected GCS credential error, got %v", err)
+	}
+}
+
+func TestFileSourceRemoteLedgerEntry(t *testing.T) {
+	t.Parallel()
+
+	key, err := capture.NewAccountLedgerKey("GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN7")
+	if err != nil {
+		t.Fatalf("NewAccountLedgerKey() error = %v", err)
+	}
+	encoded, err := capture.EncodeLedgerKey(key)
+	if err != nil {
+		t.Fatalf("EncodeLedgerKey() error = %v", err)
+	}
+	name, err := capture.LedgerEntryFileName(encoded)
+	if err != nil {
+		t.Fatalf("LedgerEntryFileName() error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, name) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("AAAAAA=="))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	s3Provider := &capture.S3Provider{BaseURL: server.URL, HTTPClient: server.Client()}
+	src := capture.NewFileSource("s3://bucket/entries").WithRemoteProvider(s3Provider).WithCacheDir(t.TempDir())
+
+	records, err := src.LedgerEntry(context.Background(), encoded)
+	if err != nil {
+		t.Fatalf("LedgerEntry() error = %v", err)
+	}
+	if len(records) != 1 || records[0].XDR != "AAAAAA==" {
+		t.Errorf("unexpected ledger entry record: %+v", records)
 	}
 }

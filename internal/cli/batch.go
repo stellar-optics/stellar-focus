@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
 )
@@ -117,24 +119,72 @@ func captureBatchCmd(ctx context.Context, cfg *config, stdout, stderr io.Writer)
 		return usageErrorf("%s lists no transaction hashes", cfg.batch())
 	}
 
+	// Compute batch hash for checkpoint file.
+	var batchHash string
+	if cfg.batch() != "-" {
+		if data, err := os.ReadFile(cfg.batch()); err == nil {
+			batchHash = capture.BatchHash(data)
+		}
+	}
+	if batchHash == "" {
+		var b strings.Builder
+		for _, e := range entries {
+			b.WriteString(e.hash)
+			b.WriteByte('\n')
+		}
+		batchHash = capture.BatchHash([]byte(b.String()))
+	}
+	checkpointPath := capture.BatchCheckpointPath(batchHash)
+
+	completed := make(map[string]bool)
+	if cfg.resume() {
+		if c, err := capture.ReadCheckpoint(checkpointPath); err == nil {
+			completed = c
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigChan)
+
+	var interrupted bool
+	var intMu sync.Mutex
+	go func() {
+		select {
+		case <-sigChan:
+			intMu.Lock()
+			interrupted = true
+			intMu.Unlock()
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	reporter := &batchReporter{total: len(entries), stdout: stdout, stderr: stderr}
-	captureBatch(ctx, src, entries, cfg, capture.NewLimiter(cfg.rate()), reporter)
+	captureBatchWithCheckpoint(ctx, src, entries, cfg, capture.NewLimiter(cfg.rate()), reporter, completed, checkpointPath)
 	reporter.summary(stdout)
+
+	intMu.Lock()
+	wasInterrupted := interrupted
+	intMu.Unlock()
+	if wasInterrupted {
+		return failureErrorf("batch capture interrupted by signal")
+	}
 
 	if reporter.failed > 0 || reporter.missing > 0 {
 		return failureErrorf("%d transaction(s) could not be captured",
 			reporter.failed+reporter.missing)
 	}
+
+	// Upon successful completion of all items in the batch, automatically delete the checkpoint file.
+	_ = capture.DeleteCheckpoint(checkpointPath)
 	return nil
 }
 
 // captureBatch captures every entry of a batch, a few at a time.
-//
-// The pool is what keeps a batch from arriving at the endpoint as a burst:
-// --concurrency decides how many captures are in flight at once and --rate
-// spaces them out. A transaction that cannot be captured is reported and the
-// batch carries on, because one hash that has aged out of the endpoint's
-// retention window says nothing about the other twenty-nine.
 func captureBatch(
 	ctx context.Context,
 	src capture.Source,
@@ -142,6 +192,20 @@ func captureBatch(
 	cfg *config,
 	limiter *capture.Limiter,
 	reporter *batchReporter,
+) {
+	captureBatchWithCheckpoint(ctx, src, entries, cfg, limiter, reporter, nil, "")
+}
+
+// captureBatchWithCheckpoint captures every entry of a batch with resume & checkpointing support.
+func captureBatchWithCheckpoint(
+	ctx context.Context,
+	src capture.Source,
+	entries []batchEntry,
+	cfg *config,
+	limiter *capture.Limiter,
+	reporter *batchReporter,
+	completed map[string]bool,
+	checkpointPath string,
 ) {
 	workers := cfg.concurrency()
 	if workers < 1 {
@@ -153,6 +217,7 @@ func captureBatch(
 
 	outcomes := make([]batchOutcome, len(entries))
 	queue := make(chan batchEntry)
+	var cpMu sync.Mutex
 
 	var wg sync.WaitGroup
 	for w := 0; w < workers; w++ {
@@ -163,11 +228,26 @@ func captureBatch(
 				outcome := captureBatchEntry(ctx, src, entry, cfg, limiter)
 				outcomes[entry.index-1] = outcome
 				reporter.report(outcome)
+
+				if outcome.err == nil && !outcome.skipped && checkpointPath != "" {
+					cpMu.Lock()
+					_ = capture.AppendCheckpoint(checkpointPath, entry.hash)
+					cpMu.Unlock()
+				}
 			}
 		}()
 	}
 
 	for _, entry := range entries {
+		normHash := strings.ToLower(entry.hash)
+		if completed[normHash] {
+			reporter.mu.Lock()
+			reporter.captured++
+			fmt.Fprintf(reporter.stdout, "[%d/%d] resumed tx %s: already recorded in checkpoint\n",
+				entry.index, reporter.total, shortHash(entry.hash))
+			reporter.mu.Unlock()
+			continue
+		}
 		queue <- entry
 	}
 	close(queue)

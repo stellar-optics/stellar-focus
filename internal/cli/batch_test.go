@@ -386,3 +386,44 @@ func TestCaptureBatchSkipsTransactionsFilteredOut(t *testing.T) {
 		t.Errorf("the summary does not count the skipped transaction:\n%s", stdout)
 	}
 }
+
+// TestCaptureBatchResumeSkipsCompletedTransactions checks that --resume skips already completed
+// transactions listed in the checkpoint file and removes the checkpoint when done.
+func TestCaptureBatchResumeSkipsCompletedTransactions(t *testing.T) {
+	src := sourceWithBatch(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	batchContent := strings.Join(batchHashes, "\n") + "\n"
+	batch := writeBatchFile(t, batchContent)
+
+	batchHash := capture.BatchHash([]byte(batchContent))
+	checkpointPath := capture.BatchCheckpointPath(batchHash)
+
+	// Pre-create the checkpoint marking the first transaction as completed.
+	if err := capture.AppendCheckpoint(checkpointPath, batchHashes[0]); err != nil {
+		t.Fatalf("writing checkpoint: %v", err)
+	}
+	defer func() { _ = capture.DeleteCheckpoint(checkpointPath) }()
+
+	stdout, stderr, err := run(t, "capture", "tx", "--batch", batch, "--out", dir, "--resume")
+	if err != nil {
+		t.Fatalf("capture --batch --resume: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+
+	if !strings.Contains(stdout, "resumed tx 2b2e276a") {
+		t.Errorf("expected resumed message for first transaction in stdout:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "captured tx 3c3f387b") {
+		t.Errorf("expected capture message for second transaction in stdout:\n%s", stdout)
+	}
+	// The endpoint should only have been called for the second transaction.
+	if src.Calls != 1 {
+		t.Errorf("expected exactly 1 endpoint call, got %d", src.Calls)
+	}
+
+	// Checkpoint file should be deleted upon successful completion.
+	if _, statErr := os.Stat(checkpointPath); !os.IsNotExist(statErr) {
+		t.Errorf("expected checkpoint file %s to be deleted upon batch completion, but it exists", checkpointPath)
+	}
+}

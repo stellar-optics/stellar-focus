@@ -56,10 +56,12 @@ const (
 	YAML Format = "yaml"
 	// Text is a flat "dotted.path: value" listing, one leaf per line.
 	Text Format = "text"
+	// TOML is readable, zero-heavy-dependency TOML serialization.
+	TOML Format = "toml"
 )
 
 // ParseFormat converts a format name into a Format, accepting "json", "yaml"
-// (or "yml") and "text" (or "txt"), case-insensitively.
+// (or "yml"), "text" (or "txt") and "toml", case-insensitively.
 func ParseFormat(name string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "json":
@@ -68,9 +70,11 @@ func ParseFormat(name string) (Format, error) {
 		return YAML, nil
 	case "text", "txt":
 		return Text, nil
+	case "toml":
+		return TOML, nil
 	default:
-		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q and %q",
-			name, JSON, YAML, Text)
+		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
+			name, JSON, YAML, Text, TOML)
 	}
 }
 
@@ -87,6 +91,8 @@ func (f Format) DefaultSuffix() string {
 		return ".golden.yaml"
 	case Text:
 		return ".golden.txt"
+	case TOML:
+		return ".golden.toml"
 	default:
 		return ".golden.json"
 	}
@@ -102,6 +108,8 @@ func FormatForPath(path string) Format {
 		return YAML
 	case ".txt":
 		return Text
+	case ".toml":
+		return TOML
 	default:
 		return JSON
 	}
@@ -130,9 +138,11 @@ func SerializerFor(format Format) (Serializer, error) {
 		return yamlSerializer{}, nil
 	case Text:
 		return textSerializer{}, nil
+	case TOML:
+		return tomlSerializer{}, nil
 	default:
-		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q and %q",
-			format, JSON, YAML, Text)
+		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
+			format, JSON, YAML, Text, TOML)
 	}
 }
 
@@ -143,6 +153,8 @@ func SerializerForPath(path string) Serializer {
 		return yamlSerializer{}
 	case Text:
 		return textSerializer{}
+	case TOML:
+		return tomlSerializer{}
 	default:
 		return jsonSerializer{}
 	}

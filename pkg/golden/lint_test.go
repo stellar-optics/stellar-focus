@@ -197,3 +197,68 @@ func TestLintAcceptsAJSONFixtureWithADecodedSection(t *testing.T) {
 		t.Errorf("a fixture with a decoded section was reported as broken: %v", problems)
 	}
 }
+
+func TestStaleRuleDetectorAndWarnings(t *testing.T) {
+	t.Parallel()
+
+	ruleActive := golden.TrackIgnore("tx.memo", "payment_test.go:20")
+	ruleActive.Hits = 5
+
+	ruleStale := golden.TrackIgnore("tx.time_bounds.max_time", "payment_test.go:42")
+	ruleStale.Hits = 0
+
+	rules := []*golden.TrackedIgnoreRule{ruleActive, ruleStale}
+	stale := golden.DetectStaleRules(rules)
+
+	if len(stale) != 1 {
+		t.Fatalf("DetectStaleRules got %d rules, want 1", len(stale))
+	}
+	if stale[0].Pattern != "tx.time_bounds.max_time" {
+		t.Errorf("stale rule pattern = %q, want 'tx.time_bounds.max_time'", stale[0].Pattern)
+	}
+
+	warning := golden.FormatStaleRuleWarning(stale[0].Pattern, stale[0].Location)
+	wantWarning := "WARNING: ignore rule 'tx.time_bounds.max_time' was never matched in payment_test.go:42"
+	if warning != wantWarning {
+		t.Errorf("FormatStaleRuleWarning() = %q, want %q", warning, wantWarning)
+	}
+}
+
+func TestPruneReportFormatting(t *testing.T) {
+	t.Parallel()
+
+	rules := []*golden.TrackedIgnoreRule{
+		golden.TrackIgnore("tx.time_bounds.max_time", "payment_test.go:42"),
+		golden.TrackIgnore("tx.signatures", "transfer_test.go:15"),
+	}
+
+	report := golden.PruneReport(rules)
+	for _, expected := range []string{
+		"Fixture Ignore Rules Pruning Report:",
+		"tx.time_bounds.max_time (registered at payment_test.go:42)",
+		"tx.signatures (registered at transfer_test.go:15)",
+	} {
+		if !strings.Contains(report, expected) {
+			t.Errorf("PruneReport missing %q:\n%s", expected, report)
+		}
+	}
+}
+
+func TestGoldenWithIgnorePathsTracksRegistrationLocation(t *testing.T) {
+	t.Parallel()
+
+	g := golden.New(t, golden.WithIgnorePaths("tx.memo", "tx.fee"))
+	rules := g.TrackedRules()
+
+	if len(rules) != 2 {
+		t.Fatalf("expected 2 tracked rules, got %d", len(rules))
+	}
+	if rules[0].Pattern != "tx.memo" || rules[1].Pattern != "tx.fee" {
+		t.Errorf("unexpected patterns: %+v", rules)
+	}
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Location, "lint_test.go:") {
+			t.Errorf("expected location in lint_test.go, got %q", r.Location)
+		}
+	}
+}

@@ -56,6 +56,7 @@ const (
 	keyForce       = "force"
 	keyMask        = "mask-addresses"
 	keyBatch       = "batch"
+	keyResume      = "resume"
 	keyConcurrency = "concurrency"
 	keyRate        = "rate"
 	keyOutFile     = "out-file"
@@ -283,10 +284,13 @@ func (c *config) bindBatchFlags(cmd *cobra.Command) {
 
 	flags.String(keyBatch, defaultBatch,
 		"capture every transaction hash listed in this file instead of one hash")
+	flags.Bool(keyResume, false,
+		"resume an interrupted batch from its checkpoint file")
 	flags.Duration(keyRate, defaultRate,
 		"minimum time between two captures, for endpoints that rate-limit")
 
 	c.bind(flags, keyBatch)
+	c.bind(flags, keyResume)
 	c.bind(flags, keyRate)
 }
 
@@ -562,6 +566,11 @@ func (c *config) maskAddresses() bool {
 // standard input. An empty value means no batch.
 func (c *config) batch() string {
 	return strings.TrimSpace(c.v.GetString(keyBatch))
+}
+
+// resume reports whether to resume an interrupted batch from its checkpoint.
+func (c *config) resume() bool {
+	return c.v.GetBool(keyResume)
 }
 
 // concurrency is how many captures may be in flight at once.

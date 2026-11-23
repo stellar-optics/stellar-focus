@@ -42,12 +42,20 @@ import (
 var updateFlag = flag.Bool("focus.update", false,
 	"rewrite stellar-focus golden files instead of comparing against them")
 
+// pruneIgnoresFlag is registered on the default command line so any test binary
+// importing this package accepts -focus.prune-ignores.
+var pruneIgnoresFlag = flag.Bool("focus.prune-ignores", false,
+	"evaluate and warn about unused ignore rules in golden fixtures")
+
 // Update reports whether the suite was run with -focus.update.
 //
 // Tests rarely need this directly — Assert already honours the flag — but it
 // is exported for suites that generate fixtures in some other way and want to
 // follow the same convention.
 func Update() bool { return *updateFlag }
+
+// PruneIgnores reports whether the suite was run with -focus.prune-ignores.
+func PruneIgnores() bool { return *pruneIgnoresFlag }
 
 // FormatVersion identifies the golden file layout, so a future change can be
 // detected rather than silently misread.
@@ -99,6 +107,7 @@ type Golden struct {
 	suffix           string
 	format           Format
 	opts             []focus.Option
+	trackedRules     []*TrackedIgnoreRule
 	noiseSuppression bool
 	desc             string
 	typeHnt          string
@@ -283,6 +292,10 @@ func (g *Golden) assert(
 		typeName = want.Type
 	}
 
+	if len(g.trackedRules) > 0 {
+		g.checkTrackedRules(typeName, want.XDR, actual)
+	}
+
 	// The comparison is against the stored XDR, never the decoded rendering:
 	// the decoded form exists for humans reading diffs, and treating it as
 	// authoritative would make the assertion depend on lens's formatting.
@@ -291,7 +304,55 @@ func (g *Golden) assert(
 		tb.Errorf("golden: %s is out of date.\n"+
 			"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n", path)
 	}
+
+	if PruneIgnores() && len(g.trackedRules) > 0 {
+		stale := DetectStaleRules(g.trackedRules)
+		for _, r := range stale {
+			g.logf("%s", FormatStaleRuleWarning(r.Pattern, r.Location))
+		}
+		if Update() && len(stale) > 0 {
+			g.logf("%s", PruneReport(stale))
+		}
+	}
+
 	return ok
+}
+
+func (g *Golden) trackIgnoreRule(pattern, location string) {
+	g.trackedRules = append(g.trackedRules, &TrackedIgnoreRule{
+		Pattern:  pattern,
+		Location: location,
+		Hits:     0,
+	})
+}
+
+// TrackedRules returns the ignore rules tracked by this Golden instance.
+func (g *Golden) TrackedRules() []*TrackedIgnoreRule {
+	return g.trackedRules
+}
+
+// checkTrackedRules evaluates differences between stored and fresh payloads and counts rule hits.
+func (g *Golden) checkTrackedRules(typeName, wantXDR string, actual focus.Value) {
+	stored, err1 := lens.DecodeAs(wantXDR, typeName)
+	encodedActual, _, encErr := focus.Encode(actual, typeName)
+	if encErr != nil {
+		return
+	}
+	fresh, err2 := lens.DecodeAs(encodedActual, typeName)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	diff, err := lens.Diff(stored, fresh)
+	if err != nil || len(diff.Changes) == 0 {
+		return
+	}
+	for _, ch := range diff.Changes {
+		for _, r := range g.trackedRules {
+			if focus.MatchPath(r.Pattern, ch.Path) {
+				r.Hits++
+			}
+		}
+	}
 }
 
 // options merges the suite's assertion options with a case's own.

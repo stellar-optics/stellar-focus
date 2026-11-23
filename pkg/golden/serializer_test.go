@@ -18,7 +18,7 @@ import (
 // goldenFormats is every format a fixture can be stored in. Tests that state a
 // property of "the serializers" table over it, so a fourth format cannot be
 // added without being held to the same promises.
-var goldenFormats = []golden.Format{golden.JSON, golden.YAML, golden.Text}
+var goldenFormats = []golden.Format{golden.JSON, golden.YAML, golden.Text, golden.TOML}
 
 // capturedFixture is a fixture with everything a real one carries: provenance,
 // a description, and the decoded tree lens renders for a reviewer.
@@ -82,7 +82,9 @@ func TestParseFormat(t *testing.T) {
 		{name: "yml", want: golden.YAML},
 		{name: "text", want: golden.Text},
 		{name: "txt", want: golden.Text},
-		{name: "toml", wantErr: true},
+		{name: "toml", want: golden.TOML},
+		{name: "TOML", want: golden.TOML},
+		{name: "invalid", wantErr: true},
 		{name: "", wantErr: true},
 	}
 
@@ -123,6 +125,7 @@ func TestFormatSuffixAndName(t *testing.T) {
 		{format: golden.JSON, name: "json", suffix: ".golden.json"},
 		{format: golden.YAML, name: "yaml", suffix: ".golden.yaml"},
 		{format: golden.Text, name: "text", suffix: ".golden.txt"},
+		{format: golden.TOML, name: "toml", suffix: ".golden.toml"},
 	}
 
 	for _, tc := range tests {
@@ -148,6 +151,9 @@ func TestFormatForPath(t *testing.T) {
 		{path: "testdata/env.yml", want: golden.YAML},
 		{path: "testdata/ENV.YAML", want: golden.YAML},
 		{path: "testdata/env.golden.txt", want: golden.Text},
+		{path: "testdata/env.golden.toml", want: golden.TOML},
+		{path: "testdata/env.toml", want: golden.TOML},
+		{path: "testdata/ENV.TOML", want: golden.TOML},
 		// A path written before the other formats existed, or with no
 		// extension at all, is still JSON.
 		{path: "testdata/env", want: golden.JSON},
@@ -549,12 +555,12 @@ func TestLoadAsAndSaveAsRejectAnUnknownFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "env.golden.json")
 
-	if err := golden.SaveAs(path, capturedFixture(t), "toml"); err == nil {
+	if err := golden.SaveAs(path, capturedFixture(t), "unsupported_fmt"); err == nil {
 		t.Error("SaveAs accepted an unknown format")
 	}
-	if _, err := golden.LoadAs(path, "toml"); err == nil {
+	if _, err := golden.LoadAs(path, "unsupported_fmt"); err == nil {
 		t.Error("LoadAs accepted an unknown format")
-	} else if !strings.Contains(err.Error(), "toml") {
+	} else if !strings.Contains(err.Error(), "unsupported_fmt") {
 		t.Errorf("error does not name the format: %v", err)
 	}
 }
@@ -947,4 +953,128 @@ func canonicalJSON(t *testing.T, raw []byte) any {
 		t.Fatalf("decoding %s: %v", raw, err)
 	}
 	return v
+}
+
+func TestTOMLSerializerDeterministicTableKeyOrdering(t *testing.T) {
+	t.Parallel()
+
+	serializer, err := golden.SerializerFor(golden.TOML)
+	if err != nil {
+		t.Fatalf("SerializerFor(TOML) error = %v", err)
+	}
+
+	fixture := &golden.Fixture{
+		Format:      golden.FormatVersion,
+		Type:        "TransactionEnvelope",
+		Description: "deterministic key ordering test",
+		XDR:         "AAAA",
+		Decoded: json.RawMessage(`{
+			"zeta": 1,
+			"alpha": 2,
+			"nested": {
+				"z": 10,
+				"a": 20
+			},
+			"beta": "test"
+		}`),
+	}
+
+	first, err := serializer.Marshal(fixture)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	// Verify key order: alpha before beta, beta before zeta.
+	firstStr := string(first)
+	alphaIdx := strings.Index(firstStr, "alpha = ")
+	betaIdx := strings.Index(firstStr, "beta = ")
+	zetaIdx := strings.Index(firstStr, "zeta = ")
+	if alphaIdx == -1 || betaIdx == -1 || zetaIdx == -1 {
+		t.Fatalf("keys missing from output:\n%s", firstStr)
+	}
+	if !(alphaIdx < betaIdx && betaIdx < zetaIdx) {
+		t.Errorf("keys not sorted alphabetically in TOML:\n%s", firstStr)
+	}
+
+	for i := 0; i < 5; i++ {
+		again, err := serializer.Marshal(fixture)
+		if err != nil {
+			t.Fatalf("Marshal() iteration %d error = %v", i, err)
+		}
+		if !bytes.Equal(first, again) {
+			t.Fatalf("TOML serializer is not deterministic:\n%s\nvs\n%s", first, again)
+		}
+	}
+}
+
+func TestTOMLSerializerMultilineStrings(t *testing.T) {
+	t.Parallel()
+
+	serializer, err := golden.SerializerFor(golden.TOML)
+	if err != nil {
+		t.Fatalf("SerializerFor(TOML) error = %v", err)
+	}
+
+	tomlDoc := `format = "focus/v1"
+type = "TransactionEnvelope"
+description = """
+Line one of description
+Line two of description
+"""
+xdr = "AAAA"
+`
+	fixture, err := serializer.Unmarshal([]byte(tomlDoc))
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	wantDesc := "Line one of description\nLine two of description\n"
+	if fixture.Description != wantDesc {
+		t.Errorf("Description = %q, want %q", fixture.Description, wantDesc)
+	}
+}
+
+func TestTOMLSerializerArrayOfTables(t *testing.T) {
+	t.Parallel()
+
+	serializer, err := golden.SerializerFor(golden.TOML)
+	if err != nil {
+		t.Fatalf("SerializerFor(TOML) error = %v", err)
+	}
+
+	tomlDoc := `format = "focus/v1"
+type = "TransactionEnvelope"
+xdr = "AAAA"
+
+[decoded]
+name = "batch"
+
+[[decoded.operations]]
+type = "payment"
+amount = 100
+
+[[decoded.operations]]
+type = "bump_sequence"
+amount = 200
+`
+	fixture, err := serializer.Unmarshal([]byte(tomlDoc))
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if fixture.XDR != "AAAA" || fixture.Type != "TransactionEnvelope" {
+		t.Fatalf("fixture header lost: %+v", fixture)
+	}
+
+	var tree struct {
+		Name       string `json:"name"`
+		Operations []struct {
+			Type   string `json:"type"`
+			Amount int    `json:"amount"`
+		} `json:"operations"`
+	}
+	if err := json.Unmarshal(fixture.Decoded, &tree); err != nil {
+		t.Fatalf("decoding json tree: %v", err)
+	}
+	if tree.Name != "batch" || len(tree.Operations) != 2 || tree.Operations[0].Type != "payment" || tree.Operations[1].Amount != 200 {
+		t.Errorf("operations table array misread: %+v", tree)
+	}
 }
