@@ -56,10 +56,14 @@ const (
 	YAML Format = "yaml"
 	// Text is a flat "dotted.path: value" listing, one leaf per line.
 	Text Format = "text"
+	// Compact is single-line JSON, used for lightweight fixtures where
+	// repository size matters more than git-diff readability.
+	// Files ending in .min.json or .compact.json are auto-detected as Compact.
+	Compact Format = "compact"
 )
 
 // ParseFormat converts a format name into a Format, accepting "json", "yaml"
-// (or "yml") and "text" (or "txt"), case-insensitively.
+// (or "yml"), "text" (or "txt") and "compact", case-insensitively.
 func ParseFormat(name string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "json":
@@ -68,9 +72,11 @@ func ParseFormat(name string) (Format, error) {
 		return YAML, nil
 	case "text", "txt":
 		return Text, nil
+	case "compact":
+		return Compact, nil
 	default:
-		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q and %q",
-			name, JSON, YAML, Text)
+		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
+			name, JSON, YAML, Text, Compact)
 	}
 }
 
@@ -87,6 +93,8 @@ func (f Format) DefaultSuffix() string {
 		return ".golden.yaml"
 	case Text:
 		return ".golden.txt"
+	case Compact:
+		return ".min.json"
 	default:
 		return ".golden.json"
 	}
@@ -97,6 +105,12 @@ func (f Format) DefaultSuffix() string {
 // is what every fixture written before these formats existed is.
 func FormatForPath(path string) Format {
 	path = strings.TrimSuffix(path, GzipSuffix)
+	base := strings.ToLower(filepath.Base(path))
+	// Compact detection: .min.json and .compact.json take priority over the
+	// single-extension check below.
+	if strings.HasSuffix(base, ".min.json") || strings.HasSuffix(base, ".compact.json") {
+		return Compact
+	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".yaml", ".yml":
 		return YAML
@@ -130,9 +144,11 @@ func SerializerFor(format Format) (Serializer, error) {
 		return yamlSerializer{}, nil
 	case Text:
 		return textSerializer{}, nil
+	case Compact:
+		return compactJSONSerializer{}, nil
 	default:
-		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q and %q",
-			format, JSON, YAML, Text)
+		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
+			format, JSON, YAML, Text, Compact)
 	}
 }
 
@@ -143,6 +159,8 @@ func SerializerForPath(path string) Serializer {
 		return yamlSerializer{}
 	case Text:
 		return textSerializer{}
+	case Compact:
+		return compactJSONSerializer{}
 	default:
 		return jsonSerializer{}
 	}
@@ -228,6 +246,100 @@ func (jsonSerializer) Unmarshal(data []byte) (*Fixture, error) {
 		return nil, err
 	}
 	return &f, nil
+}
+
+// Compact JSON.
+
+// compactJSONSerializer encodes a fixture as single-line, canonical JSON.
+//
+// Key ordering is preserved by encoding/json's struct-tag ordering for the
+// top-level Fixture fields, and by sorting map keys in the decoded section
+// before serialization so two runs always produce identical bytes.
+//
+// Compact mode is intended for large fixture suites where repository size
+// matters more than git-diff readability: a .min.json or .compact.json file
+// is auto-detected as Compact by FormatForPath.
+type compactJSONSerializer struct{}
+
+// Format implements Serializer.
+func (compactJSONSerializer) Format() Format { return Compact }
+
+// Marshal implements Serializer, writing a single-line JSON encoding of f.
+//
+// The decoded section is re-encoded with deterministic key ordering so two
+// serializations of the same fixture are byte-identical.
+func (compactJSONSerializer) Marshal(f *Fixture) ([]byte, error) {
+	// If the fixture carries a decoded tree, re-encode it with sorted keys so
+	// the compact output is deterministic across Go versions and platforms.
+	out := *f
+	if len(f.Decoded) > 0 {
+		tree, err := decodeTree(f.Decoded)
+		if err != nil {
+			return nil, fmt.Errorf("encoding compact fixture: reading decoded section: %w", err)
+		}
+		sorted, err := json.Marshal(sortedJSON(tree))
+		if err != nil {
+			return nil, fmt.Errorf("encoding compact fixture: marshalling decoded section: %w", err)
+		}
+		out.Decoded = json.RawMessage(sorted)
+	}
+
+	data, err := json.Marshal(&out)
+	if err != nil {
+		return nil, fmt.Errorf("encoding fixture as compact JSON: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
+// Unmarshal implements Serializer. Compact fixtures are plain JSON, so the
+// same path as jsonSerializer is used after the schema check.
+func (compactJSONSerializer) Unmarshal(data []byte) (*Fixture, error) {
+	if err := validateFixtureJSON(data); err != nil {
+		return nil, err
+	}
+	var f Fixture
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := validate(&f); err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// sortedJSON returns v with all map keys sorted recursively, so that
+// json.Marshal produces the same bytes regardless of map iteration order.
+func sortedJSON(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		// Use the same sort as the YAML and text serializers.
+		sorted := make([]string, len(keys))
+		copy(sorted, keys)
+		// Simple insertion sort: fixtures are shallow enough that the
+		// quadratic cost never matters, and it avoids importing sort.
+		for i := 1; i < len(sorted); i++ {
+			for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+			}
+		}
+		out := make(map[string]any, len(val))
+		for _, k := range sorted {
+			out[k] = sortedJSON(val[k])
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = sortedJSON(item)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // YAML.

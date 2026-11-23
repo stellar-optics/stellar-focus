@@ -34,6 +34,22 @@ func NewRPCSource(network, endpoint string, timeout time.Duration) *RPCSource {
 	}
 }
 
+// NewRPCSourceWithRetry returns an RPCSource whose HTTP transport automatically
+// retries on transient errors (429, 502, 503, 504) using the given RetryConfig.
+//
+// Use this variant when capturing against public endpoints that rate-limit
+// requests. NewRPCSource uses a plain (no-retry) HTTP client.
+func NewRPCSourceWithRetry(network, endpoint string, timeout time.Duration, cfg RetryConfig) *RPCSource {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &RPCSource{
+		client:   rpcclient.NewClient(endpoint, RetryHTTPClient(timeout, cfg)),
+		network:  network,
+		endpoint: endpoint,
+	}
+}
+
 // Name implements Source.
 func (s *RPCSource) Name() string { return "soroban-rpc" }
 

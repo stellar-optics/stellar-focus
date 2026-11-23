@@ -33,6 +33,9 @@ import (
 // Version is the build version, overridden at release time via ldflags.
 var Version = "dev"
 
+// currentRetryConfig is the retry policy applied by default when creating network sources.
+var currentRetryConfig = capture.DefaultRetryConfig
+
 // newSource builds the capture source. It is a variable so tests can
 // substitute a fake and exercise the commands without a network.
 //
@@ -44,9 +47,9 @@ var newSource = func(kind, network, endpoint string, timeout time.Duration) capt
 	case sourceFile:
 		return capture.NewFileSource(endpoint).ForNetwork(network)
 	case sourceHorizon:
-		return capture.NewHorizonSource(network, endpoint, timeout)
+		return capture.NewHorizonSourceWithRetry(network, endpoint, timeout, currentRetryConfig)
 	default:
-		return capture.NewRPCSource(network, endpoint, timeout)
+		return capture.NewRPCSourceWithRetry(network, endpoint, timeout, currentRetryConfig)
 	}
 }
 
@@ -58,6 +61,7 @@ func openSource(cfg *config) (capture.Source, error) {
 	if err != nil {
 		return nil, usageErrorf("%v", err)
 	}
+	currentRetryConfig = cfg.retryConfig()
 	src := newSource(cfg.source(), cfg.network(), endpoint, cfg.timeout())
 	if url := cfg.archiveURL(); url != "" {
 		archive := capture.NewArchivalSource(cfg.network(), url, cfg.timeout())

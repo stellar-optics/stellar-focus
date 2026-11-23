@@ -50,11 +50,33 @@ func TestConfigDefaults(t *testing.T) {
 		{"out", cfg.outDir(), "testdata"},
 		{"prefix", cfg.prefix(), ""},
 		{"force", cfg.force(), false},
+		{"max retries", cfg.maxRetries(), 5},
+		{"retry delay", cfg.retryDelay(), 500 * time.Millisecond},
 	}
 	for _, tc := range tests {
 		if tc.got != tc.want {
 			t.Errorf("%s = %v, want %v", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+func TestConfigRetryFlags(t *testing.T) {
+	clearFocusEnv(t)
+
+	cfg := newConfig()
+	cfg.v.Set(keyMaxRetries, 10)
+	cfg.v.Set(keyRetryDelay, 2*time.Second)
+
+	if got := cfg.maxRetries(); got != 10 {
+		t.Errorf("maxRetries() = %d, want 10", got)
+	}
+	if got := cfg.retryDelay(); got != 2*time.Second {
+		t.Errorf("retryDelay() = %v, want 2s", got)
+	}
+
+	rCfg := cfg.retryConfig()
+	if rCfg.MaxRetries != 10 || rCfg.BaseInterval != 2*time.Second {
+		t.Errorf("retryConfig() = %+v, want MaxRetries=10, BaseInterval=2s", rCfg)
 	}
 }
 
