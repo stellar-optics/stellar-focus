@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	github.com/stellar-optics/stellar-xdr-lens v0.2.1-0.20261009110240-58b290ed6534
 	github.com/stellar/go-stellar-sdk v0.7.3
