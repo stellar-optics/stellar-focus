@@ -75,11 +75,12 @@ func StreamDiff(r1, r2 io.Reader, w io.Writer, maxDifferences int) (differed boo
 
 		differed = true
 		reported++
-		if !has1 {
+		switch {
+		case !has1:
 			fmt.Fprintf(w, "@line %d\n- (eof)\n+ %s\n", lineno, b2)
-		} else if !has2 {
+		case !has2:
 			fmt.Fprintf(w, "@line %d\n- %s\n+ (eof)\n", lineno, b1)
-		} else {
+		default:
 			fmt.Fprintf(w, "@line %d\n- %s\n+ %s\n", lineno, b1, b2)
 		}
 

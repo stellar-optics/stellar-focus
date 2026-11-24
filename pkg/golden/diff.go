@@ -46,11 +46,12 @@ func Diff(s1, s2 string) (differed bool, out string) {
 		differed = true
 		reported++
 		if reported <= DefaultMaxStreamDifferences {
-			if !has1 {
+			switch {
+			case !has1:
 				fmt.Fprintf(&b, "@line %d\n- (eof)\n+ %s\n", i+1, l2)
-			} else if !has2 {
+			case !has2:
 				fmt.Fprintf(&b, "@line %d\n- %s\n+ (eof)\n", i+1, l1)
-			} else {
+			default:
 				fmt.Fprintf(&b, "@line %d\n- %s\n+ %s\n", i+1, l1, l2)
 			}
 		}

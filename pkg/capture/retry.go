@@ -113,6 +113,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			sleepFn(wait)
 			// Drain and close the previous response body before retrying.
 			if resp != nil {
+				//nolint:errcheck // Draining the body is best-effort before retry; read errors can be safely ignored.
 				_, _ = io.Copy(io.Discard, resp.Body)
 				resp.Body.Close()
 			}

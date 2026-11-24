@@ -1038,7 +1038,7 @@ func TestCompactJSONCanonicalKeySorting(t *testing.T) {
 	idxXDR := strings.Index(s, `"xdr"`)
 	idxDecoded := strings.Index(s, `"decoded"`)
 
-	if !(idxFormat < idxType && idxType < idxDesc && idxDesc < idxXDR && idxXDR < idxDecoded) {
+	if idxFormat >= idxType || idxType >= idxDesc || idxDesc >= idxXDR || idxXDR >= idxDecoded {
 		t.Errorf("keys not in canonical order in compact JSON: %s", s)
 	}
 }
