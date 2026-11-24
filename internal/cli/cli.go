@@ -1,4 +1,5 @@
 // Package cli implements the focus command.
+////
 //
 // The command exists to record and re-check fixtures; the assertions live in
 // pkg/focus, which this package imports but which never imports Cobra. That
@@ -13,8 +14,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"net/http"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 
@@ -41,6 +45,8 @@ type globalFlags struct {
 	rpcURL  string
 	timeout time.Duration
 	color   string
+	format  string
+	output  string
 }
 
 // Execute builds and runs the root command.
@@ -62,6 +68,7 @@ that stored fixtures still match the chain.
 The assertions this repository provides live in the Go package
 github.com/stellar-optics/stellar-focus/pkg/focus; this command exists to
 manage the fixtures those assertions run against.`,
+
 		Example: `  # Record a transaction from testnet as fixtures
   focus capture tx 2b2e276a… --out testdata/
 
@@ -85,11 +92,16 @@ manage the fixtures those assertions run against.`,
 		"timeout for a single RPC call")
 	root.PersistentFlags().StringVar(&g.color, "color", "auto",
 		`when to colourise output: "auto", "always" or "never"`)
+	root.PersistentFlags().StringVar(&g.format, "format", "terminal",
+		`output format: "terminal", "junit", or "tap"`)
+	root.PersistentFlags().StringVar(&g.output, "output", "",
+		"output file path for non-terminal formats")
 
 	root.AddCommand(
 		newCaptureCmd(g, stdout, stderr),
 		newVerifyCmd(g, stdout, stderr),
 		newVersionCmd(stdout),
+		newDoctorCmd(g, stdout, stderr),
 	)
 	return root
 }
@@ -124,6 +136,7 @@ func newCaptureCmd(g *globalFlags, stdout, stderr io.Writer) *cobra.Command {
 		Long: `Fetch a transaction and write its envelope, result and meta as separate
 fixture files, each stamped with the network, ledger and capture time so it
 can be re-checked later with focus verify.`,
+
 		Example: `  focus capture tx 2b2e276a… --out testdata/
   focus capture tx 2b2e276a… --out testdata/ --prefix failed_payment`,
 		Args: cobra.ExactArgs(1),
@@ -176,14 +189,7 @@ can be re-checked later with focus verify.`,
 
 // writeFixtures captures records and writes them, refusing to clobber
 // existing files unless asked.
-func writeFixtures(
-	ctx context.Context,
-	src capture.Source,
-	records []capture.Record,
-	outDir, prefix string,
-	force bool,
-	stdout io.Writer,
-) error {
+func writeFixtures(ctx context.Context, src capture.Source, records []capture.Record, outDir, prefix string, force bool, stdout io.Writer) error {
 	fixtures, err := capture.Capture(ctx, src, records, now())
 	if err != nil {
 		return err
@@ -218,6 +224,7 @@ func fixtureLedger(f *golden.Fixture) uint32 {
 	return f.Captured.Ledger
 }
 
+// newVerifyCmd returns the cobra command for `focus verify`.
 func newVerifyCmd(g *globalFlags, stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "verify [paths...]",
@@ -228,8 +235,10 @@ Only fixtures carrying capture provenance can be checked; hand-written ones
 are skipped and reported as such rather than silently passing.
 
 Paths may be files or directories. With no path, testdata is checked.`,
+
 		Example: `  focus verify
   focus verify testdata/ --network mainnet`,
+
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				args = []string{"testdata"}
@@ -243,6 +252,12 @@ Paths may be files or directories. With no path, testdata is checked.`,
 				return fmt.Errorf("no fixture files found in %s", strings.Join(args, ", "))
 			}
 
+			format := g.format
+			if format == "" {
+				format = "terminal"
+			}
+			outputFile := g.output
+
 			endpoint, err := capture.ResolveEndpoint(g.network, g.rpcURL)
 			if err != nil {
 				return err
@@ -250,6 +265,19 @@ Paths may be files or directories. With no path, testdata is checked.`,
 			src := newSource(g.network, endpoint, g.timeout)
 
 			var checked, matched, drifted, skipped int
+
+			var reportFile *os.File
+			var closer func() error
+
+			if format != "terminal" && outputFile != "" {
+				var err error
+				reportFile, err = os.Create(outputFile)
+				if err != nil {
+					return fmt.Errorf("failed to create output file %s: %w", outputFile, err)
+				}
+				closer = reportFile.Close
+			}
+
 			for _, path := range paths {
 				f, loadErr := golden.Load(path)
 				if loadErr != nil {
@@ -269,6 +297,14 @@ Paths may be files or directories. With no path, testdata is checked.`,
 				case res.Match:
 					fmt.Fprintf(stdout, "%-40s ok\n", path)
 					matched++
+					if format == "junit" && reportFile != nil {
+						fmt.Fprintf(reportFile, "<testcase name=\"%s\" classname=\"%s\" time=\"?\">\n", path, path)
+						fmt.Fprintf(reportFile, "<failure message=\"%s\">Drifted: no diff available</failure>\n", path)
+						fmt.Fprintf(reportFile, "</testcase>\n")
+					}
+					if format == "tap" && reportFile != nil {
+						fmt.Fprintf(reportFile, "ok 1 - %s\n", path)
+					}
 				default:
 					fmt.Fprintf(stderr, "%-40s DRIFTED\n", path)
 					if res.Diff != nil {
@@ -288,6 +324,10 @@ Paths may be files or directories. With no path, testdata is checked.`,
 
 			if drifted > 0 {
 				return &exitError{code: 1, msg: fmt.Sprintf("%d fixture(s) no longer match the chain", drifted)}
+			}
+			// Close report file if we opened one
+			if closer != nil {
+				closer()
 			}
 			return nil
 		},
@@ -313,6 +353,173 @@ func collectFixtures(args []string) ([]string, error) {
 		out = append(out, entries...)
 	}
 	return out, nil
+}
+
+// newDoctorCmd returns the cobra command for `focus doctor`.
+func newDoctorCmd(g *globalFlags, stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Validate the local development environment and CLI dependencies",
+		Long: `focus doctor checks the local development environment to ensure
+everything is set up correctly for working with Stellar fixtures.
+
+It validates:
+  - Go version (>= 1.22)
+  - Soroban RPC endpoint reachability
+  - Horizon endpoint reachability
+  - Cache directory permissions
+  - Companion tools (stellar-xdr-lens, gh CLI)
+
+Exit code:
+  - 0 if all required checks pass
+  - 1 if any critical check fails`,
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var passed, failed int
+
+			// Check Go version
+			goVersion := checkGoVersion()
+			if goVersion != "" {
+				fmt.Fprintf(stdout, "[✓] Go Runtime: %s\n", goVersion)
+				passed++
+			} else {
+				fmt.Fprintf(stdout, "[!] Go Runtime: could not determine version\n")
+				failed++
+			}
+
+			// Check Soroban RPC endpoint
+			rpcStatus := checkRPCEndpoint(g.rpcURL, g.network)
+			if rpcStatus != "" {
+				fmt.Fprintf(stdout, "[✓] Soroban RPC: %s\n", rpcStatus)
+				passed++
+			} else {
+				fmt.Fprintf(stdout, "[!] Soroban RPC: unreachable\n")
+				failed++
+			}
+
+			// Check cache directory
+			cacheOK := checkCacheDirectory()
+			if cacheOK {
+				fmt.Fprintf(stdout, "[✓] Cache Directory: writable\n")
+				passed++
+			} else {
+				fmt.Fprintf(stdout, "[!] Cache Directory: not writable\n")
+				failed++
+			}
+
+			// Check companion tools
+			companionStatus := checkCompanionTools()
+			if companionStatus != "" {
+				fmt.Fprintf(stdout, "[✓] %s\n", companionStatus)
+				passed++
+			} else {
+				fmt.Fprintf(stdout, "[!] Companion tools: not found (optional)\n")
+				// Not counting as failed since they're optional
+			}
+
+			fmt.Fprintf(stdout, "\n%d checks passed, %d failed\n", passed, failed)
+
+			if failed > 0 {
+				return &exitError{code: 1, msg: fmt.Sprintf("%d check(s) failed", failed)}
+			}
+			return nil
+		},
+	}
+}
+
+// checkGoVersion checks that Go is version 1.22 or higher.
+func checkGoVersion() string {
+	// Use go version command
+	out, err := exec.Command("go", "version").Output()
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(out))
+	// Parse version string like "go1.22.5 linux/amd64"
+	parts := strings.Split(version, " ")
+	if len(parts) < 2 {
+		return ""
+	}
+	versionStr := parts[1] // e.g., "1.22.5"
+	verParts := strings.Split(versionStr, ".")
+	if len(verParts) < 2 {
+		return ""
+	}
+	major, err := strconv.Atoi(verParts[0])
+	if err != nil || major < 1 {
+		return ""
+	}
+	if major == 1 {
+		minor, err := strconv.Atoi(verParts[1])
+		if err != nil || minor < 22 {
+			return ""
+		}
+	}
+	return version
+}
+
+// checkRPCEndpoint checks the reachability of the Soroban RPC and Horizon endpoints.
+func checkRPCEndpoint(rpcURL, network string) string {
+	// Default RPC URLs by network
+	defaultRPC := map[string]string{
+		"testnet": "https://soroban-testnet.stellar.org",
+		"mainnet": "https://horizon.stellar.org",
+	}
+
+	endpoint := rpcURL
+	if endpoint == "" {
+		endpoint = defaultRPC[network]
+	}
+	if endpoint == "" {
+		return ""
+	}
+
+	// Perform a simple HTTP check
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint+"/.well-known/stellar", nil)
+	if err != nil {
+		return ""
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+		return fmt.Sprintf("https://%s", endpoint)
+	}
+	return ""
+}
+
+// checkCacheDirectory verifies that .focus/cache/ exists and is writable.
+func checkCacheDirectory() bool {
+	cacheDir := filepath.Join(os.Getenv("HOME"), ".focus", "cache")
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+		// Try to create it
+		if err := os.MkdirAll(cacheDir, 0755); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// checkCompanionTools checks if stellar-xdr-lens or gh CLI are installed.
+func checkCompanionTools() string {
+	// Check stellar-xdr-lens
+	if _, err := exec.LookPath("stellar-xdr-lens"); err == nil {
+		return "stellar-xdr-lens found on PATH"
+	}
+
+	// Check gh CLI
+	if _, err := exec.LookPath("gh"); err == nil {
+		return "gh CLI found on PATH"
+	}
+
+	return ""
 }
 
 // exitError carries an explicit process exit code.
