@@ -1111,3 +1111,201 @@ func TestVerifyAcceptsAPattern(t *testing.T) {
 		t.Errorf("pattern did not match the fixtures:\n%s", stdout)
 	}
 }
+
+// unformattedFixture writes a canonical fixture, then damages its encoding the
+// way a hand-edit or a Windows checkout does, returning the canonical bytes it
+// should be restored to.
+func unformattedFixture(t *testing.T) (path string, canonical []byte) {
+	t.Helper()
+
+	path = filepath.Join(t.TempDir(), "envelope.golden.json")
+	if err := golden.Save(path, staleFixture(t)); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	canonical, err := golden.CanonicalBytes(path)
+	if err != nil {
+		t.Fatalf("CanonicalBytes() error = %v", err)
+	}
+
+	// CRLF line endings plus trailing spaces: valid JSON, non-canonical
+	// bytes.
+	mangled := strings.ReplaceAll(string(canonical), "\n", "  \r\n")
+	if err := os.WriteFile(path, []byte(mangled), 0o600); err != nil {
+		t.Fatalf("writing the unformatted fixture: %v", err)
+	}
+	return path, canonical
+}
+
+// TestFmtCanonicalizesAFixtureInPlace is the command's contract: the file is
+// rewritten with canonical whitespace and nothing else about it changes.
+func TestFmtCanonicalizesAFixtureInPlace(t *testing.T) {
+	path, canonical := unformattedFixture(t)
+
+	stdout, _, err := run(t, "fmt", path)
+	if err != nil {
+		t.Fatalf("fmt failed: %v", err)
+	}
+	if !strings.Contains(stdout, "updated") {
+		t.Errorf("fmt did not report the rewrite:\n%s", stdout)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the formatted fixture: %v", err)
+	}
+	if !bytes.Equal(after, canonical) {
+		t.Errorf("formatted bytes differ from canonical form:\n--- got ---\n%s\n--- want ---\n%s", after, canonical)
+	}
+	if strings.ContainsAny(string(after), "\r") {
+		t.Error("formatted fixture still carries CR line endings")
+	}
+
+	// The data is untouched: formatting is not a refresh.
+	formatted, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("loading the formatted fixture: %v", err)
+	}
+	if formatted.XDR == "" || formatted.Type != "TransactionEnvelope" {
+		t.Errorf("formatting lost fixture data: %+v", formatted)
+	}
+	if !strings.Contains(string(formatted.Decoded), "stale") {
+		t.Errorf("formatting refreshed the decoded section:\n%s", formatted.Decoded)
+	}
+}
+
+// TestFmtLeavesCanonicalFixturesAlone checks that running fmt over a clean
+// directory produces no diff.
+func TestFmtLeavesCanonicalFixturesAlone(t *testing.T) {
+	path, canonical := unformattedFixture(t)
+	if _, _, err := run(t, "fmt", path); err != nil {
+		t.Fatalf("fmt failed: %v", err)
+	}
+
+	stdout, _, err := run(t, "fmt", path)
+	if err != nil {
+		t.Fatalf("fmt on a canonical fixture failed: %v", err)
+	}
+	if !strings.Contains(stdout, "unchanged") {
+		t.Errorf("canonical fixture was not reported unchanged:\n%s", stdout)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	if !bytes.Equal(after, canonical) {
+		t.Error("a canonical fixture was rewritten")
+	}
+}
+
+// TestFmtCheckFailsOnAnUnformattedFixture is the CI contract: --check exits
+// with status 1 and writes nothing.
+func TestFmtCheckFailsOnAnUnformattedFixture(t *testing.T) {
+	path, _ := unformattedFixture(t)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+
+	stdout, _, err := run(t, "fmt", "--check", path)
+	if err == nil {
+		t.Fatal("fmt --check passed for an unformatted fixture")
+	}
+	if code, _ := ExitCode(err); code != ExitFailure {
+		t.Errorf("exit code = %d, want %d", code, ExitFailure)
+	}
+	if !strings.Contains(stdout, "would change") {
+		t.Errorf("--check did not name the fixture as unformatted:\n%s", stdout)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("--check wrote to the fixture")
+	}
+}
+
+// TestFmtCheckAcceptsCanonicalFixtures checks the other half of --check: a
+// formatted tree exits zero so CI can trust it.
+func TestFmtCheckAcceptsCanonicalFixtures(t *testing.T) {
+	path, _ := unformattedFixture(t)
+	if _, _, err := run(t, "fmt", path); err != nil {
+		t.Fatalf("fmt failed: %v", err)
+	}
+
+	stdout, _, err := run(t, "fmt", "--check", path)
+	if err != nil {
+		t.Fatalf("fmt --check failed for a canonical fixture: %v", err)
+	}
+	if !strings.Contains(stdout, "unchanged") {
+		t.Errorf("--check did not report the fixture as canonical:\n%s", stdout)
+	}
+}
+
+// TestFmtSortsYAMLKeys checks that canonicalization applies the format's key
+// order rather than preserving a hand-edit's.
+func TestFmtSortsYAMLKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.golden.yaml")
+	if err := golden.SaveAs(path, staleFixture(t), golden.YAML); err != nil {
+		t.Fatalf("SaveAs() error = %v", err)
+	}
+	canonical, err := golden.CanonicalBytes(path)
+	if err != nil {
+		t.Fatalf("CanonicalBytes() error = %v", err)
+	}
+
+	// Move the xdr line above the format line: the reader accepts any key
+	// order, the writer emits one.
+	lines := strings.Split(string(canonical), "\n")
+	var reordered []string
+	var xdrLine string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "xdr: ") {
+			xdrLine = line
+			continue
+		}
+		reordered = append(reordered, line)
+	}
+	if xdrLine == "" {
+		t.Fatal("fixture has no xdr line")
+	}
+	mangled := xdrLine + "\n" + strings.Join(reordered, "\n")
+	if err := os.WriteFile(path, []byte(mangled), 0o600); err != nil {
+		t.Fatalf("writing the reordered fixture: %v", err)
+	}
+
+	if _, _, err := run(t, "fmt", path); err != nil {
+		t.Fatalf("fmt failed: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	if !bytes.Equal(after, canonical) {
+		t.Errorf("YAML keys were not restored to canonical order:\n--- got ---\n%s\n--- want ---\n%s", after, canonical)
+	}
+}
+
+// TestFmtReportsABrokenFixture checks that a fixture fmt cannot parse is an
+// error with a non-zero exit, not a silent skip.
+func TestFmtReportsABrokenFixture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.golden.json")
+	if err := os.WriteFile(path, []byte(`{"format": "focus/v1",`), 0o600); err != nil {
+		t.Fatalf("writing the broken fixture: %v", err)
+	}
+
+	_, stderr, err := run(t, "fmt", dir)
+	if err == nil {
+		t.Fatal("fmt succeeded for an unparseable fixture")
+	}
+	if code, _ := ExitCode(err); code != ExitFailure {
+		t.Errorf("exit code = %d, want %d", code, ExitFailure)
+	}
+	if !strings.Contains(stderr, "ERROR") {
+		t.Errorf("the broken fixture was not reported:\n%s", stderr)
+	}
+}

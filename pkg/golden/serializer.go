@@ -31,6 +31,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -56,12 +57,14 @@ const (
 	YAML Format = "yaml"
 	// Text is a flat "dotted.path: value" listing, one leaf per line.
 	Text Format = "text"
-	// TOML is readable, zero-heavy-dependency TOML serialization.
-	TOML Format = "toml"
+	// Compact is single-line JSON, used for lightweight fixtures where
+	// repository size matters more than git-diff readability.
+	// Files ending in .min.json or .compact.json are auto-detected as Compact.
+	Compact Format = "compact"
 )
 
 // ParseFormat converts a format name into a Format, accepting "json", "yaml"
-// (or "yml"), "text" (or "txt") and "toml", case-insensitively.
+// (or "yml"), "text" (or "txt") and "compact", case-insensitively.
 func ParseFormat(name string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "json":
@@ -70,11 +73,11 @@ func ParseFormat(name string) (Format, error) {
 		return YAML, nil
 	case "text", "txt":
 		return Text, nil
-	case "toml":
-		return TOML, nil
+	case "compact":
+		return Compact, nil
 	default:
 		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
-			name, JSON, YAML, Text, TOML)
+			name, JSON, YAML, Text, Compact)
 	}
 }
 
@@ -91,8 +94,8 @@ func (f Format) DefaultSuffix() string {
 		return ".golden.yaml"
 	case Text:
 		return ".golden.txt"
-	case TOML:
-		return ".golden.toml"
+	case Compact:
+		return ".min.json"
 	default:
 		return ".golden.json"
 	}
@@ -103,6 +106,12 @@ func (f Format) DefaultSuffix() string {
 // is what every fixture written before these formats existed is.
 func FormatForPath(path string) Format {
 	path = strings.TrimSuffix(path, GzipSuffix)
+	base := strings.ToLower(filepath.Base(path))
+	// Compact detection: .min.json and .compact.json take priority over the
+	// single-extension check below.
+	if strings.HasSuffix(base, ".min.json") || strings.HasSuffix(base, ".compact.json") {
+		return Compact
+	}
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".yaml", ".yml":
 		return YAML
@@ -138,11 +147,11 @@ func SerializerFor(format Format) (Serializer, error) {
 		return yamlSerializer{}, nil
 	case Text:
 		return textSerializer{}, nil
-	case TOML:
-		return tomlSerializer{}, nil
+	case Compact:
+		return compactJSONSerializer{}, nil
 	default:
 		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
-			format, JSON, YAML, Text, TOML)
+			format, JSON, YAML, Text, Compact)
 	}
 }
 
@@ -153,8 +162,8 @@ func SerializerForPath(path string) Serializer {
 		return yamlSerializer{}
 	case Text:
 		return textSerializer{}
-	case TOML:
-		return tomlSerializer{}
+	case Compact:
+		return compactJSONSerializer{}
 	default:
 		return jsonSerializer{}
 	}
@@ -190,6 +199,72 @@ func NormalizeWhitespace(data []byte) []byte {
 		return nil
 	}
 	return []byte(strings.Join(out, "\n") + "\n")
+}
+
+// CanonicalBytes returns the bytes a fixture file should contain: the fixture
+// it stores, re-serialized by the serializer its path implies.
+//
+// Serializer output is already normalized — LF line endings, no trailing
+// whitespace, one final newline — and deterministic — struct field order in
+// JSON, sorted keys in YAML and the text form — so this is the canonical form
+// of the file. The file itself is not touched.
+//
+// The decoded section is kept as it is; refreshing a stale tree is a separate
+// operation (see Refresh), and formatting it here would rewrite data the
+// caller did not ask to change.
+func CanonicalBytes(path string) ([]byte, error) {
+	f, err := Load(path)
+	if err != nil {
+		return nil, err
+	}
+	return SerializerForPath(path).Marshal(f)
+}
+
+// FormatFile rewrites path in canonical form and reports whether anything
+// changed. A file that is already canonical is not rewritten, so formatting a
+// whole testdata directory leaves an empty diff.
+func FormatFile(path string) (bool, error) {
+	canonical, err := CanonicalBytes(path)
+	if err != nil {
+		return false, err
+	}
+	current, err := storedBytes(path)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(current, canonical) {
+		return false, nil
+	}
+	if err := WriteFile(path, canonical); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CheckFile reports whether FormatFile would rewrite path, without touching
+// it. It is what --check runs, so a CI job can fail on unformatted fixtures
+// while leaving them exactly as they are.
+func CheckFile(path string) (bool, error) {
+	canonical, err := CanonicalBytes(path)
+	if err != nil {
+		return false, err
+	}
+	current, err := storedBytes(path)
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(current, canonical), nil
+}
+
+// storedBytes returns the bytes a file is compared by: its raw content for a
+// plain fixture, so a CRLF checkout or a stray trailing space is reported as
+// unformatted. A compressed file is compared by its decompressed content,
+// because how the bytes are compressed is storage rather than formatting.
+func storedBytes(path string) ([]byte, error) {
+	if IsCompressed(path) {
+		return ReadFile(path)
+	}
+	return os.ReadFile(path)
 }
 
 // validate rejects a fixture this version cannot read. Both checks exist so a
@@ -240,6 +315,100 @@ func (jsonSerializer) Unmarshal(data []byte) (*Fixture, error) {
 		return nil, err
 	}
 	return &f, nil
+}
+
+// Compact JSON.
+
+// compactJSONSerializer encodes a fixture as single-line, canonical JSON.
+//
+// Key ordering is preserved by encoding/json's struct-tag ordering for the
+// top-level Fixture fields, and by sorting map keys in the decoded section
+// before serialization so two runs always produce identical bytes.
+//
+// Compact mode is intended for large fixture suites where repository size
+// matters more than git-diff readability: a .min.json or .compact.json file
+// is auto-detected as Compact by FormatForPath.
+type compactJSONSerializer struct{}
+
+// Format implements Serializer.
+func (compactJSONSerializer) Format() Format { return Compact }
+
+// Marshal implements Serializer, writing a single-line JSON encoding of f.
+//
+// The decoded section is re-encoded with deterministic key ordering so two
+// serializations of the same fixture are byte-identical.
+func (compactJSONSerializer) Marshal(f *Fixture) ([]byte, error) {
+	// If the fixture carries a decoded tree, re-encode it with sorted keys so
+	// the compact output is deterministic across Go versions and platforms.
+	out := *f
+	if len(f.Decoded) > 0 {
+		tree, err := decodeTree(f.Decoded)
+		if err != nil {
+			return nil, fmt.Errorf("encoding compact fixture: reading decoded section: %w", err)
+		}
+		sorted, err := json.Marshal(sortedJSON(tree))
+		if err != nil {
+			return nil, fmt.Errorf("encoding compact fixture: marshalling decoded section: %w", err)
+		}
+		out.Decoded = json.RawMessage(sorted)
+	}
+
+	data, err := json.Marshal(&out)
+	if err != nil {
+		return nil, fmt.Errorf("encoding fixture as compact JSON: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
+// Unmarshal implements Serializer. Compact fixtures are plain JSON, so the
+// same path as jsonSerializer is used after the schema check.
+func (compactJSONSerializer) Unmarshal(data []byte) (*Fixture, error) {
+	if err := validateFixtureJSON(data); err != nil {
+		return nil, err
+	}
+	var f Fixture
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("invalid JSON: %w", err)
+	}
+	if err := validate(&f); err != nil {
+		return nil, err
+	}
+	return &f, nil
+}
+
+// sortedJSON returns v with all map keys sorted recursively, so that
+// json.Marshal produces the same bytes regardless of map iteration order.
+func sortedJSON(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		// Use the same sort as the YAML and text serializers.
+		sorted := make([]string, len(keys))
+		copy(sorted, keys)
+		// Simple insertion sort: fixtures are shallow enough that the
+		// quadratic cost never matters, and it avoids importing sort.
+		for i := 1; i < len(sorted); i++ {
+			for j := i; j > 0 && sorted[j] < sorted[j-1]; j-- {
+				sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
+			}
+		}
+		out := make(map[string]any, len(val))
+		for _, k := range sorted {
+			out[k] = sortedJSON(val[k])
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = sortedJSON(item)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // YAML.

@@ -955,126 +955,165 @@ func canonicalJSON(t *testing.T, raw []byte) any {
 	return v
 }
 
-func TestTOMLSerializerDeterministicTableKeyOrdering(t *testing.T) {
+// TestCompactJSONFormatAutoDetection verifies that fixture paths ending in
+// .min.json or .compact.json are auto-detected as Compact format (issue #345).
+func TestCompactJSONFormatAutoDetection(t *testing.T) {
 	t.Parallel()
 
-	serializer, err := golden.SerializerFor(golden.TOML)
+	cases := []struct {
+		path string
+		want golden.Format
+	}{
+		{"testdata/payment.min.json", golden.Compact},
+		{"testdata/payment.compact.json", golden.Compact},
+		{"testdata/payment.golden.json", golden.JSON},
+		{"testdata/payment.golden.yaml", golden.YAML},
+		{"testdata/payment.golden.txt", golden.Text},
+	}
+
+	for _, tc := range cases {
+		got := golden.FormatForPath(tc.path)
+		if got != tc.want {
+			t.Errorf("FormatForPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+		ser := golden.SerializerForPath(tc.path)
+		if ser.Format() != tc.want {
+			t.Errorf("SerializerForPath(%q).Format() = %q, want %q", tc.path, ser.Format(), tc.want)
+		}
+	}
+}
+
+// TestCompactJSONSingleLine verifies that compact JSON produces a single-line
+// output (one terminating newline only).
+func TestCompactJSONSingleLine(t *testing.T) {
+	t.Parallel()
+
+	fixture := trickyFixture()
+	ser, err := golden.SerializerFor(golden.Compact)
 	if err != nil {
-		t.Fatalf("SerializerFor(TOML) error = %v", err)
+		t.Fatalf("SerializerFor(Compact) error = %v", err)
 	}
 
-	fixture := &golden.Fixture{
-		Format:      golden.FormatVersion,
-		Type:        "TransactionEnvelope",
-		Description: "deterministic key ordering test",
-		XDR:         "AAAA",
-		Decoded: json.RawMessage(`{
-			"zeta": 1,
-			"alpha": 2,
-			"nested": {
-				"z": 10,
-				"a": 20
-			},
-			"beta": "test"
-		}`),
-	}
-
-	first, err := serializer.Marshal(fixture)
+	data, err := ser.Marshal(fixture)
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
 
-	// Verify key order: alpha before beta, beta before zeta.
-	firstStr := string(first)
-	alphaIdx := strings.Index(firstStr, "alpha = ")
-	betaIdx := strings.Index(firstStr, "beta = ")
-	zetaIdx := strings.Index(firstStr, "zeta = ")
-	if alphaIdx == -1 || betaIdx == -1 || zetaIdx == -1 {
-		t.Fatalf("keys missing from output:\n%s", firstStr)
-	}
-	if !(alphaIdx < betaIdx && betaIdx < zetaIdx) {
-		t.Errorf("keys not sorted alphabetically in TOML:\n%s", firstStr)
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("compact JSON has %d lines, want exactly 1:\n%s", len(lines), string(data))
 	}
 
-	for i := 0; i < 5; i++ {
-		again, err := serializer.Marshal(fixture)
-		if err != nil {
-			t.Fatalf("Marshal() iteration %d error = %v", i, err)
-		}
-		if !bytes.Equal(first, again) {
-			t.Fatalf("TOML serializer is not deterministic:\n%s\nvs\n%s", first, again)
-		}
-	}
-}
-
-func TestTOMLSerializerMultilineStrings(t *testing.T) {
-	t.Parallel()
-
-	serializer, err := golden.SerializerFor(golden.TOML)
-	if err != nil {
-		t.Fatalf("SerializerFor(TOML) error = %v", err)
-	}
-
-	tomlDoc := `format = "focus/v1"
-type = "TransactionEnvelope"
-description = """
-Line one of description
-Line two of description
-"""
-xdr = "AAAA"
-`
-	fixture, err := serializer.Unmarshal([]byte(tomlDoc))
+	// Must round-trip correctly.
+	unmarshaled, err := ser.Unmarshal(data)
 	if err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
-	wantDesc := "Line one of description\nLine two of description\n"
-	if fixture.Description != wantDesc {
-		t.Errorf("Description = %q, want %q", fixture.Description, wantDesc)
+	if unmarshaled.XDR != fixture.XDR {
+		t.Errorf("XDR = %q, want %q", unmarshaled.XDR, fixture.XDR)
 	}
 }
 
-func TestTOMLSerializerArrayOfTables(t *testing.T) {
+// TestCompactJSONCanonicalKeySorting verifies that map keys are sorted
+// deterministically in compact JSON mode.
+func TestCompactJSONCanonicalKeySorting(t *testing.T) {
 	t.Parallel()
 
-	serializer, err := golden.SerializerFor(golden.TOML)
+	fixture := trickyFixture()
+	ser, _ := golden.SerializerFor(golden.Compact)
+
+	data1, err := ser.Marshal(fixture)
 	if err != nil {
-		t.Fatalf("SerializerFor(TOML) error = %v", err)
+		t.Fatalf("Marshal 1 error = %v", err)
 	}
-
-	tomlDoc := `format = "focus/v1"
-type = "TransactionEnvelope"
-xdr = "AAAA"
-
-[decoded]
-name = "batch"
-
-[[decoded.operations]]
-type = "payment"
-amount = 100
-
-[[decoded.operations]]
-type = "bump_sequence"
-amount = 200
-`
-	fixture, err := serializer.Unmarshal([]byte(tomlDoc))
+	data2, err := ser.Marshal(fixture)
 	if err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
-	}
-	if fixture.XDR != "AAAA" || fixture.Type != "TransactionEnvelope" {
-		t.Fatalf("fixture header lost: %+v", fixture)
+		t.Fatalf("Marshal 2 error = %v", err)
 	}
 
-	var tree struct {
-		Name       string `json:"name"`
-		Operations []struct {
-			Type   string `json:"type"`
-			Amount int    `json:"amount"`
-		} `json:"operations"`
+	if !bytes.Equal(data1, data2) {
+		t.Error("two compact serializations produced different bytes (non-deterministic key ordering)")
 	}
-	if err := json.Unmarshal(fixture.Decoded, &tree); err != nil {
-		t.Fatalf("decoding json tree: %v", err)
+
+	// Verify top-level struct key order matches Fixture declaration order:
+	// "format", "type", "description", "xdr", "decoded"
+	s := string(data1)
+	idxFormat := strings.Index(s, `"format"`)
+	idxType := strings.Index(s, `"type"`)
+	idxDesc := strings.Index(s, `"description"`)
+	idxXDR := strings.Index(s, `"xdr"`)
+	idxDecoded := strings.Index(s, `"decoded"`)
+
+	if idxFormat >= idxType || idxType >= idxDesc || idxDesc >= idxXDR || idxXDR >= idxDecoded {
+		t.Errorf("keys not in canonical order in compact JSON: %s", s)
 	}
-	if tree.Name != "batch" || len(tree.Operations) != 2 || tree.Operations[0].Type != "payment" || tree.Operations[1].Amount != 200 {
-		t.Errorf("operations table array misread: %+v", tree)
+}
+
+// TestWithCompactOption verifies that WithCompact(true) sets the fixture
+// format to Compact and WithCompact(false) resets it to JSON (issue #345).
+func TestWithCompactOption(t *testing.T) {
+	t.Parallel()
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithCompact(true))
+	path := g.Path("testcase")
+	if !strings.HasSuffix(path, ".min.json") {
+		t.Errorf("Path with WithCompact(true) = %q, want ending with .min.json", path)
 	}
+
+	g2 := golden.New(tb, golden.WithCompact(true), golden.WithCompact(false))
+	path2 := g2.Path("testcase")
+	if !strings.HasSuffix(path2, ".golden.json") {
+		t.Errorf("Path with WithCompact(false) = %q, want ending with .golden.json", path2)
+	}
+}
+
+// BenchmarkIndentedVsCompactJSON compares disk space and read/write speeds
+// between indented and compact JSON fixtures (issue #345).
+func BenchmarkIndentedVsCompactJSON(b *testing.B) {
+	fixture := trickyFixture()
+
+	serIndented, _ := golden.SerializerFor(golden.JSON)
+	serCompact, _ := golden.SerializerFor(golden.Compact)
+
+	indentedBytes, err := serIndented.Marshal(fixture)
+	if err != nil {
+		b.Fatal(err)
+	}
+	compactBytes, err := serCompact.Marshal(fixture)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	reduction := 100.0 * (1.0 - float64(len(compactBytes))/float64(len(indentedBytes)))
+	b.Logf("Fixture size: Indented=%d bytes, Compact=%d bytes (%.1f%% reduction)",
+		len(indentedBytes), len(compactBytes), reduction)
+
+	b.Run("Marshal/Indented", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serIndented.Marshal(fixture)
+		}
+	})
+
+	b.Run("Marshal/Compact", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serCompact.Marshal(fixture)
+		}
+	})
+
+	b.Run("Unmarshal/Indented", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serIndented.Unmarshal(indentedBytes)
+		}
+	})
+
+	b.Run("Unmarshal/Compact", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serCompact.Unmarshal(compactBytes)
+		}
+	})
 }

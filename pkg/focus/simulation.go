@@ -1,12 +1,42 @@
 package focus
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
 	rpcproto "github.com/stellar/go-stellar-sdk/protocols/rpc"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-focus/pkg/simulate"
 )
+
+// AssertNoFootprintConflicts asserts that the given Soroban transactions have no resource
+// footprint collisions (ReadWrite or WriteWrite) that would prevent concurrent execution in the same ledger.
+func AssertNoFootprintConflicts(t TB, txs []xdr.TransactionEnvelope) bool {
+	t.Helper()
+	conflicts := simulate.DetectFootprintConflicts(txs)
+	if len(conflicts) == 0 {
+		return true
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "AssertNoFootprintConflicts: found %d footprint conflict(s) across %d transaction(s):\n\n",
+		len(conflicts), len(txs))
+	for i, c := range conflicts {
+		raw, err := c.Key.MarshalBinary()
+		var keyB64 string
+		if err != nil {
+			keyB64 = "<invalid-key>"
+		} else {
+			keyB64 = base64.StdEncoding.EncodeToString(raw)
+		}
+		fmt.Fprintf(&b, "  [%d] tx %d and tx %d: %s conflict on key %s (%s)\n",
+			i, c.TxAIndex, c.TxBIndex, c.ConflictType, describeLedgerKey(c.Key), keyB64)
+	}
+	t.Errorf("%s", strings.TrimRight(b.String(), "\n"))
+	return false
+}
 
 // AssertSimulationResourcesWithin checks that the resources a Soroban
 // simulation reported stay within the given budgets.
