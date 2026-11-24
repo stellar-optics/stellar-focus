@@ -45,39 +45,40 @@ const (
 // The one exception is keyOutFile: encode writes one file where capture
 // writes a directory, so its --out is stored under a key of its own.
 const (
-	keyConfig      = "config"
-	keyNetwork     = "network"
-	keyRPCURL      = "rpc-url"
-	keySource      = "source"
-	keyTimeout     = "timeout"
-	keyColor       = "color"
-	keyOut         = "out"
-	keyPrefix      = "prefix"
-	keyForce       = "force"
-	keyMask        = "mask-addresses"
-	keyBatch       = "batch"
-	keyConcurrency = "concurrency"
-	keyRate        = "rate"
-	keyOutFile     = "out-file"
-	keyType        = "type"
-	keyDescription = "description"
-	keyPass        = "passphrase"
-	keyFileSrc     = "file-source"
-	keySanit       = "sanitize"
-	keyMemo        = "mask-memo"
-	keyMemoAlias   = "sanitize-memos"
-	keyData        = "scrub-data"
-	keyKeys        = "scrub-keys"
-	keyArchive     = "archive-url"
-	keySince       = "since"
-	keyFilter      = "filter"
-	keyDriftedOnly = "drifted-only"
-	keyVerifyCache = "verify-cache"
-	keyMinOps      = "min-ops"
-	keyOnlySoroban = "only-soroban"
-	keyFailedOnly  = "failed-only"
-	keyMaxRetries  = "max-retries"
-	keyRetryDelay  = "retry-delay"
+	keyConfig       = "config"
+	keyNetwork      = "network"
+	keyRPCURL       = "rpc-url"
+	keySource       = "source"
+	keyTimeout      = "timeout"
+	keyColor        = "color"
+	keyOut          = "out"
+	keyPrefix       = "prefix"
+	keyForce        = "force"
+	keyMask         = "mask-addresses"
+	keyBatch        = "batch"
+	keyConcurrency  = "concurrency"
+	keyRate         = "rate"
+	keyOutFile      = "out-file"
+	keyType         = "type"
+	keyDescription  = "description"
+	keyPass         = "passphrase"
+	keyFileSrc      = "file-source"
+	keySanit        = "sanitize"
+	keyMemo         = "mask-memo"
+	keyMemoAlias    = "sanitize-memos"
+	keyData         = "scrub-data"
+	keyKeys         = "scrub-keys"
+	keyArchive      = "archive-url"
+	keySince        = "since"
+	keyFilter       = "filter"
+	keyDriftedOnly  = "drifted-only"
+	keyVerifyCache  = "verify-cache"
+	keyMinOps       = "min-ops"
+	keyOnlySoroban  = "only-soroban"
+	keyFailedOnly   = "failed-only"
+	keyMaxRetries   = "max-retries"
+	keyRetryDelay   = "retry-delay"
+	keyExtractSpecs = "extract-specs"
 )
 
 // The capture sources the command can talk to.
@@ -231,6 +232,8 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 		"maximum number of HTTP retries on transient errors (429, 502, 503, 504)")
 	flags.Duration(keyRetryDelay, defaultRetryDelay,
 		"delay before the first HTTP retry attempt")
+	flags.Bool(keyExtractSpecs, false,
+		"automatically dump ScSpecEntry interfaces during capture as <tx_hash>.spec.json")
 
 	c.bind(flags, keyOut)
 	c.bind(flags, keyPrefix)
@@ -243,6 +246,7 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyKeys)
 	c.bind(flags, keyMaxRetries)
 	c.bind(flags, keyRetryDelay)
+	c.bind(flags, keyExtractSpecs)
 }
 
 // bindFilterFlags declares the flags that narrow which transactions a capture
@@ -628,4 +632,9 @@ func (c *config) retryConfig() capture.RetryConfig {
 		BaseInterval: c.retryDelay(),
 		MaxInterval:  30 * time.Second,
 	}
+}
+
+// extractSpecs reports whether --extract-specs was requested.
+func (c *config) extractSpecs() bool {
+	return c.v.GetBool(keyExtractSpecs)
 }

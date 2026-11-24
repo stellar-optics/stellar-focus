@@ -142,6 +142,7 @@ precedence.`,
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
 		newDoctorCmd(cfg, stdout),
+		newStatsCmd(stdout),
 	)
 	return root
 }
