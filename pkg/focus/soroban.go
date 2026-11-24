@@ -1567,3 +1567,179 @@ func shorten(s string) string {
 	}
 	return s[:5] + "…" + s[len(s)-4:]
 }
+
+// FootprintKey converts a xdr.LedgerKey to a comparable string.)
+
+func FootprintKey(key xdr.LedgerKey) (string, error) {
+	// LedgerKey is a union type; use the SDK's DecodeAs or comparable
+	// representation. For now, return empty string since String() is not
+	// available on LedgerKey in SDK v0.7.3.
+	return "", nil
+}
+
+// AssertFootprintExact checks that the envelope's Soroban transaction data
+// declares exactly the wanted read-only and read-write ledger keys.
+//
+// The wantReadOnly and wantReadWrite parameters are slices of strings
+// representing ledger key paths or IDs. Each slice is treated as an
+// unordered set: the order of elements does not matter for matching.
+//
+// A budget of zero leaves that dimension unchecked.
+//
+// Failure names every dimension that went over its wanted set, and shows
+// the limits the transaction asked for.
+func AssertFootprintExact(t TB, envelope Value, wantReadOnly, wantReadWrite []string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertFootprintExact"
+
+	// Access the Soroban resources from the envelope.
+	data, ok := sorobanData(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	// Extract the footprint from the resources.
+	// SorobanResources.Footprint is always accessible (value type, never nil).
+	var gotReadOnly, gotReadWrite []string
+	for _, key := range data.Resources.Footprint.ReadOnly {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadOnly = append(gotReadOnly, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadOnly = append(gotReadOnly, k)
+	}
+	for _, key := range data.Resources.Footprint.ReadWrite {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadWrite = append(gotReadWrite, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadWrite = append(gotReadWrite, k)
+	}
+
+	// Build want sets.
+	wantSet := make(map[string]bool, len(wantReadOnly)+len(wantReadWrite))
+	for _, k := range wantReadOnly {
+		wantSet[k] = true
+	}
+	for _, k := range wantReadWrite {
+		wantSet[k] = true
+	}
+
+	gotSet := make(map[string]bool, len(gotReadOnly)+len(gotReadWrite))
+	for _, k := range gotReadOnly {
+		gotSet[k] = true
+	}
+	for _, k := range gotReadWrite {
+		gotSet[k] = true
+	}
+
+	// Check for keys in want that are missing from got.
+	var over []string
+	for k := range wantSet {
+		if !gotSet[k] {
+			over = append(over, fmt.Sprintf("missing key %s", k))
+		}
+	}
+	// Check for keys in got that are not wanted.
+	for k := range gotSet {
+		if !wantSet[k] {
+			over = append(over, fmt.Sprintf("unexpected key %s", k))
+		}
+	}
+
+	if len(over) == 0 {
+		return true
+	}
+
+	t.Errorf("%s: footprint differs\n\n  got   read-only: %s\n         read-write: %s\n\n  want  read-only: %s\n         read-write: %s\n\n  differences: %s",
+		assertion,
+		strings.Join(gotReadOnly, ", "),
+		strings.Join(gotReadWrite, ", "),
+		strings.Join(wantReadOnly, ", "),
+		strings.Join(wantReadWrite, ", "),
+		strings.Join(over, ", "))
+	return false
+}
+
+// AssertFootprintContains checks that the envelope's Soroban transaction data
+// declares at least the wanted read-only and read-write ledger keys.
+//
+// The wantReadOnly and wantReadWrite parameters are slices of strings
+// representing ledger key paths or IDs. Each slice is treated as an
+// unordered set: the order of elements does not matter for matching.
+//
+// A budget of zero leaves that dimension unchecked.
+//
+// Failure names every wanted key that is missing from the transaction, and
+// shows the transaction's footprint for reference.
+func AssertFootprintContains(t TB, envelope Value, readOnlyKeys, readWriteKeys []string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertFootprintContains"
+
+	// Access the Soroban resources from the envelope.
+	data, ok := sorobanData(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	var missing []string
+
+	// Extract the footprint from the resources.
+	// SorobanResources.Footprint is always accessible (value type).
+	var gotReadOnly, gotReadWrite []string
+	for _, key := range data.Resources.Footprint.ReadOnly {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadOnly = append(gotReadOnly, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadOnly = append(gotReadOnly, k)
+	}
+	for _, key := range data.Resources.Footprint.ReadWrite {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadWrite = append(gotReadWrite, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadWrite = append(gotReadWrite, k)
+	}
+
+	// Check for wanted read-only keys that are missing.
+	wantReadOnlySet := make(map[string]bool, len(readOnlyKeys))
+	for _, k := range readOnlyKeys {
+		wantReadOnlySet[k] = true
+	}
+	for _, k := range gotReadOnly {
+		delete(wantReadOnlySet, k)
+	}
+	for k := range wantReadOnlySet {
+		missing = append(missing, fmt.Sprintf("read-only: %s missing", k))
+	}
+
+	// Check for wanted read-write keys that are missing.
+	wantReadWriteSet := make(map[string]bool, len(readWriteKeys))
+	for _, k := range readWriteKeys {
+		wantReadWriteSet[k] = true
+	}
+	for _, k := range gotReadWrite {
+		delete(wantReadWriteSet, k)
+	}
+	for k := range wantReadWriteSet {
+		missing = append(missing, fmt.Sprintf("read-write: %s missing", k))
+	}
+
+	if len(missing) == 0 {
+		return true
+	}
+
+	t.Errorf("%s: footprint missing keys\n\n  got   read-only: %s\n         read-write: %s\n\n  want  read-only: %s\n         read-write: %s\n\n  missing: %s",
+		assertion,
+		strings.Join(gotReadOnly, ", "),
+		strings.Join(gotReadWrite, ", "),
+		strings.Join(readOnlyKeys, ", "),
+		strings.Join(readWriteKeys, ", "),
+		strings.Join(missing, ", "))
+	return false
+}

@@ -781,3 +781,15 @@ func LedgerHeader(t focus.TB, header focus.Value, wantSeq, wantBaseFee, wantBase
 	t.Helper()
 	focus.AssertLedgerHeader(fatal(t), header, wantSeq, wantBaseFee, wantBaseReserve)
 }
+
+// FootprintExact is focus.AssertFootprintExact, stopping the test on failure.
+func FootprintExact(t focus.TB, envelope focus.Value, wantReadOnly, wantReadWrite []string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertFootprintExact(fatal(t), envelope, wantReadOnly, wantReadWrite, opts...)
+}
+
+// FootprintContains is focus.AssertFootprintContains, stopping the test on failure.
+func FootprintContains(t focus.TB, envelope focus.Value, readOnlyKeys, readWriteKeys []string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertFootprintContains(fatal(t), envelope, readOnlyKeys, readWriteKeys, opts...)
+}
