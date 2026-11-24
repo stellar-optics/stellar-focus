@@ -31,6 +31,23 @@ func NewHorizonSource(network, endpoint string, timeout time.Duration) *HorizonS
 	}
 }
 
+// NewHorizonSourceWithRetry returns a HorizonSource whose HTTP transport
+// automatically retries on transient errors (429, 502, 503, 504) using the
+// given RetryConfig.
+//
+// Use this variant when capturing against public endpoints that rate-limit
+// requests. NewHorizonSource uses a plain (no-retry) HTTP client.
+func NewHorizonSourceWithRetry(network, endpoint string, timeout time.Duration, cfg RetryConfig) *HorizonSource {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &HorizonSource{
+		network:  network,
+		endpoint: strings.TrimRight(endpoint, "/"),
+		client:   RetryHTTPClient(timeout, cfg),
+	}
+}
+
 func (s *HorizonSource) Name() string     { return "horizon" }
 func (s *HorizonSource) Network() string  { return s.network }
 func (s *HorizonSource) Endpoint() string { return s.endpoint }
