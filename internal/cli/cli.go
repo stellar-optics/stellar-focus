@@ -138,6 +138,7 @@ precedence.`,
 		newLedgerKeyCmd(stdout),
 		newVerifyCmd(cfg, stdout, stderr),
 		newRefreshCmd(stdout, stderr),
+		newFmtCmd(stdout, stderr),
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
 		newDoctorCmd(cfg, stdout),
@@ -882,4 +883,116 @@ func changedLinesLineByLine(oldLines, newLines []string) []diffLine {
 		}
 	}
 	return out
+}
+
+// newFmtCmd builds the command that rewrites golden fixtures in canonical
+// form.
+//
+// It is the gofmt of fixtures: the data is already valid, but its encoding can
+// drift — a hand-edit leaves four-space indentation, a Windows checkout leaves
+// CRLF, a merge reorders YAML keys. Re-serializing with the format's own
+// serializer settles all of that, and --check lets CI fail on drift without
+// rewriting anything.
+func newFmtCmd(stdout, stderr io.Writer) *cobra.Command {
+	var check bool
+
+	cmd := &cobra.Command{
+		Use:   "fmt [paths...]",
+		Short: "Reformat golden fixtures in place",
+		Long: `Reformat golden fixture files in place.
+
+Every file is parsed and re-serialized by the canonical serializer for its
+format: JSON uses the field order the writer defines with two-space
+indentation, YAML and the text form sort their keys, and every line ending is
+LF with trailing whitespace removed. The fixture's data is not refreshed — a
+stale decoded tree stays stale until focus refresh — only its encoding is
+normalized.
+
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are formatted too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is formatted.
+
+With --check nothing is written: the command exits with status 1 when any
+fixture is not formatted, which is what a CI job should run.`,
+		Example: `  focus fmt testdata/
+  focus fmt testdata/ --check
+  focus fmt testdata/payment.golden.json`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{defaultVerifyDir}
+			}
+
+			paths, err := collectFixtures(args)
+			if err != nil {
+				return failureErrorf("%v", err)
+			}
+			if len(paths) == 0 {
+				return failureErrorf("no fixture files found in %s", strings.Join(args, ", "))
+			}
+
+			var changed, unchanged, errored int
+			for _, path := range paths {
+				formatted, err := formatFixture(path, check)
+				if err != nil {
+					fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, err)
+					errored++
+					continue
+				}
+				if formatted {
+					word := "updated"
+					if check {
+						word = "would change"
+					}
+					fmt.Fprintf(stdout, "%-40s %s\n", path, word)
+					changed++
+					continue
+				}
+				fmt.Fprintf(stdout, "%-40s unchanged\n", path)
+				unchanged++
+			}
+
+			fmt.Fprintf(stdout, "\n%d checked: %d %s, %d unchanged",
+				len(paths), changed, fmtVerb(check), unchanged)
+			if errored > 0 {
+				fmt.Fprintf(stdout, ", %d errored", errored)
+			}
+			fmt.Fprintln(stdout)
+
+			if errored > 0 {
+				return failureErrorf("%d fixture(s) could not be formatted", errored)
+			}
+			if check && changed > 0 {
+				return failureErrorf("%d fixture(s) are not formatted", changed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&check, "check", false,
+		"exit with status 1 if any file is not formatted (CI-friendly)")
+
+	return cmd
+}
+
+// formatFixture canonicalizes one fixture, or — in check mode — reports
+// whether it would change and writes nothing.
+func formatFixture(path string, check bool) (bool, error) {
+	if check {
+		return golden.CheckFile(path)
+	}
+	return golden.FormatFile(path)
+}
+
+// fmtVerb names what the command did, which is not the same word in a check
+// run as in a formatting one.
+func fmtVerb(check bool) string {
+	if check {
+		return "would change"
+	}
+	return "updated"
 }
