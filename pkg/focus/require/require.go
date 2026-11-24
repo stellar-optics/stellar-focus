@@ -144,6 +144,24 @@ func NoTimeBounds(t focus.TB, envelope focus.Value) {
 	focus.AssertNoTimeBounds(fatal(t), envelope)
 }
 
+// ExtraSigners is focus.AssertExtraSigners, stopping the test on failure.
+func ExtraSigners(t focus.TB, envelope focus.Value, wantSigners ...string) {
+	t.Helper()
+	focus.AssertExtraSigners(fatal(t), envelope, wantSigners...)
+}
+
+// SequenceAge is focus.AssertSequenceAge, stopping the test on failure.
+func SequenceAge(t focus.TB, envelope focus.Value, wantMinAge time.Duration, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSequenceAge(fatal(t), envelope, wantMinAge, opts...)
+}
+
+// AuthInvocationTree is focus.AssertAuthInvocationTree, stopping the test on failure.
+func AuthInvocationTree(t focus.TB, xdrInput any, rootContract string, rootFunction string, subInvocations ...focus.ExpectedInvocation) {
+	t.Helper()
+	focus.AssertAuthInvocationTree(fatal(t), xdrInput, rootContract, rootFunction, subInvocations...)
+}
+
 // LedgerboundsValid is focus.AssertLedgerboundsValid, stopping the test on
 // failure.
 func LedgerboundsValid(t focus.TB, envelope focus.Value, minLedger, maxLedger uint32) {
