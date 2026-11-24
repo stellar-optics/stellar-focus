@@ -243,7 +243,9 @@ func TestRetryTransportPreservesBodyOnRetry(t *testing.T) {
 func TestRetryTransportRespectsRetryAfterHTTPDate(t *testing.T) {
 	t.Parallel()
 
-	targetTime := time.Now().Add(2 * time.Second)
+	// HTTP dates have one-second precision. Add enough padding so the assertion
+	// remains valid after formatting the target and handling the request.
+	targetTime := time.Now().Add(5 * time.Second)
 	var calls int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
