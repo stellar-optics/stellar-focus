@@ -763,3 +763,39 @@ func LedgerHeader(t focus.TB, header focus.Value, wantSeq, wantBaseFee, wantBase
 	t.Helper()
 	focus.AssertLedgerHeader(fatal(t), header, wantSeq, wantBaseFee, wantBaseReserve)
 }
+
+// InvokeHostFunctionArgs is focus.AssertInvokeHostFunctionArgs, stopping on failure.
+func InvokeHostFunctionArgs(t focus.TB, op xdr.Operation, wantContractID, wantFunction string, wantArgs []any, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertInvokeHostFunctionArgs(fatal(t), op, wantContractID, wantFunction, wantArgs, opts...)
+}
+
+// SetTrustLineFlags is focus.AssertSetTrustLineFlags, stopping on failure.
+func SetTrustLineFlags(t focus.TB, op xdr.Operation, trustor string, asset xdr.Asset, wantSet, wantClear uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSetTrustLineFlags(fatal(t), op, trustor, asset, wantSet, wantClear, opts...)
+}
+
+// RevokeSponsorship is focus.AssertRevokeSponsorship, stopping on failure.
+func RevokeSponsorship(t focus.TB, op xdr.Operation, wantType xdr.RevokeSponsorshipType, matcher func(xdr.RevokeSponsorshipOp) bool, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSponsorship(fatal(t), op, wantType, matcher, opts...)
+}
+
+// RevokeAccountSponsorship is focus.AssertRevokeAccountSponsorship, stopping on failure.
+func RevokeAccountSponsorship(t focus.TB, op xdr.Operation, accountID string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeAccountSponsorship(fatal(t), op, accountID, opts...)
+}
+
+// RevokeSignerSponsorship is focus.AssertRevokeSignerSponsorship, stopping on failure.
+func RevokeSignerSponsorship(t focus.TB, op xdr.Operation, accountID string, signerKey xdr.SignerKey, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSignerSponsorship(fatal(t), op, accountID, signerKey, opts...)
+}
+
+// AccountFlags is focus.AssertAccountFlags, stopping on failure.
+func AccountFlags(t focus.TB, op xdr.Operation, wantSet, wantClear xdr.AccountFlags, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertAccountFlags(fatal(t), op, wantSet, wantClear, opts...)
+}

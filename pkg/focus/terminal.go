@@ -8,7 +8,47 @@ import (
 	"strings"
 
 	lensformat "github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
+
+func accountFlagNames(flags xdr.AccountFlags) string {
+	return namedFlags(uint32(flags), []struct {
+		bit  uint32
+		name string
+	}{
+		{uint32(xdr.AccountFlagsAuthRequiredFlag), "AUTH_REQUIRED"},
+		{uint32(xdr.AccountFlagsAuthRevocableFlag), "AUTH_REVOCABLE"},
+		{uint32(xdr.AccountFlagsAuthImmutableFlag), "AUTH_IMMUTABLE"},
+		{uint32(xdr.AccountFlagsAuthClawbackEnabledFlag), "AUTH_CLAWBACK_ENABLED"},
+	})
+}
+
+func trustLineFlagNames(flags uint32) string {
+	return namedFlags(flags, []struct {
+		bit  uint32
+		name string
+	}{
+		{uint32(xdr.TrustLineFlagsAuthorizedFlag), "AUTHORIZED"},
+		{uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag), "MAINTAIN_LIABILITIES"},
+		{uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag), "CLAWBACK_ENABLED"},
+	})
+}
+
+func namedFlags(flags uint32, names []struct {
+	bit  uint32
+	name string
+}) string {
+	var found []string
+	for _, flag := range names {
+		if flags&flag.bit != 0 {
+			found = append(found, flag.name)
+		}
+	}
+	if len(found) == 0 {
+		return "[]"
+	}
+	return "[" + strings.Join(found, ", ") + "]"
+}
 
 // Terminal rendering for assertion failures.
 //
