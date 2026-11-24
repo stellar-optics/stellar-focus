@@ -304,3 +304,81 @@ func AssertSponsorshipTransition(t TestingT, metaInput any, targetKey string, wa
 		indent(describeEntryChanges(changes, keyID)))
 	return false
 }
+
+// AssertRevokeSponsorship checks the type and target of a revoke-sponsorship
+// operation. A nil matcher checks only the operation type.
+func AssertRevokeSponsorship(
+	t TestingT, op xdr.Operation, wantType xdr.RevokeSponsorshipType,
+	matcher func(xdr.RevokeSponsorshipOp) bool, opts ...Option,
+) bool {
+	t.Helper()
+	const assertion = "AssertRevokeSponsorship"
+	_ = newConfig(opts...)
+
+	if op.Body.Type != xdr.OperationTypeRevokeSponsorship || op.Body.RevokeSponsorshipOp == nil {
+		t.Errorf("%s: expected sponsorship type %s, got operation %s (sponsorship type unavailable)",
+			assertion, revokeSponsorshipTypeName(wantType), operationTypeName(op.Body.Type))
+		return false
+	}
+	actual := *op.Body.RevokeSponsorshipOp
+	if actual.Type != wantType {
+		t.Errorf("%s: sponsorship type is %s, want %s",
+			assertion, revokeSponsorshipTypeName(actual.Type), revokeSponsorshipTypeName(wantType))
+		return false
+	}
+	if matcher != nil && !matcher(actual) {
+		t.Errorf("%s: revocation target did not match; expected sponsorship type %s, got %s",
+			assertion, revokeSponsorshipTypeName(wantType), revokeSponsorshipTypeName(actual.Type))
+		return false
+	}
+	return true
+}
+
+// AssertRevokeAccountSponsorship checks that an operation revokes sponsorship
+// for accountID.
+func AssertRevokeAccountSponsorship(t TestingT, op xdr.Operation, accountID string, opts ...Option) bool {
+	t.Helper()
+	account, err := xdr.AddressToAccountId(accountID)
+	if err != nil {
+		t.Errorf("AssertRevokeAccountSponsorship: account ID could not be read: %v", err)
+		return false
+	}
+	key := xdr.LedgerKey{
+		Type:    xdr.LedgerEntryTypeAccount,
+		Account: &xdr.LedgerKeyAccount{AccountId: account},
+	}
+	return AssertRevokeSponsorship(t, op, xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+		func(actual xdr.RevokeSponsorshipOp) bool {
+			got, ok := actual.GetLedgerKey()
+			return ok && got.Equals(key)
+		}, opts...)
+}
+
+// AssertRevokeSignerSponsorship checks that an operation revokes sponsorship
+// for the account's signer key.
+func AssertRevokeSignerSponsorship(
+	t TestingT, op xdr.Operation, accountID string, signerKey xdr.SignerKey, opts ...Option,
+) bool {
+	t.Helper()
+	account, err := xdr.AddressToAccountId(accountID)
+	if err != nil {
+		t.Errorf("AssertRevokeSignerSponsorship: account ID could not be read: %v", err)
+		return false
+	}
+	return AssertRevokeSponsorship(t, op, xdr.RevokeSponsorshipTypeRevokeSponsorshipSigner,
+		func(actual xdr.RevokeSponsorshipOp) bool {
+			signer, ok := actual.GetSigner()
+			return ok && signer.AccountId.Equals(account) && signer.SignerKey.Equals(signerKey)
+		}, opts...)
+}
+
+func revokeSponsorshipTypeName(value xdr.RevokeSponsorshipType) string {
+	switch value {
+	case xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry:
+		return "REVOKE_SPONSORSHIP_LEDGER_ENTRY"
+	case xdr.RevokeSponsorshipTypeRevokeSponsorshipSigner:
+		return "REVOKE_SPONSORSHIP_SIGNER"
+	default:
+		return value.String()
+	}
+}

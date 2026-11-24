@@ -378,6 +378,12 @@ func SorobanResources(t focus.TB, envelope focus.Value, maxInstructions uint32, 
 	focus.AssertSorobanResources(fatal(t), envelope, maxInstructions, readBytes, writeBytes)
 }
 
+// InvokeHostFunctionArgs is focus.AssertInvokeHostFunctionArgs, stopping the test on failure.
+func InvokeHostFunctionArgs(t focus.TB, op xdr.Operation, wantContractID, wantFunction string, wantArgs []any, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertInvokeHostFunctionArgs(fatal(t), op, wantContractID, wantFunction, wantArgs, opts...)
+}
+
 // ResourceFee is focus.AssertResourceFee, stopping the test on failure.
 func ResourceFee(t focus.TB, envelope focus.Value, wantFee int64) {
 	t.Helper()
@@ -716,6 +722,18 @@ func TrustlineFlags(t focus.TestingT, metaOrEntry any, account string, asset str
 	focus.AssertTrustlineFlags(fatal(t), metaOrEntry, account, asset, wantFlags, opts...)
 }
 
+// SetTrustLineFlags is focus.AssertSetTrustLineFlags, stopping the test on failure.
+func SetTrustLineFlags(t focus.TestingT, op xdr.Operation, wantTrustor string, wantAsset xdr.Asset, wantSet, wantClear uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSetTrustLineFlags(fatal(t), op, wantTrustor, wantAsset, wantSet, wantClear, opts...)
+}
+
+// AccountFlags is focus.AssertAccountFlags, stopping the test on failure.
+func AccountFlags(t focus.TestingT, op xdr.Operation, wantSet, wantClear xdr.AccountFlags, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertAccountFlags(fatal(t), op, wantSet, wantClear, opts...)
+}
+
 // ClawbackRevocation is focus.AssertClawbackRevocation, stopping the test on failure.
 func ClawbackRevocation(t focus.TestingT, metaInput any, fromAccount, asset string, wantClawbackAmount int64, opts ...focus.Option) {
 	t.Helper()
@@ -732,6 +750,24 @@ func FeeBumpInnerResultCode(t focus.TestingT, resultInput any, wantInnerCode str
 func SponsorshipTransition(t focus.TestingT, metaInput any, targetKey string, wantPrevSponsor, wantNewSponsor string, opts ...focus.Option) {
 	t.Helper()
 	focus.AssertSponsorshipTransition(fatal(t), metaInput, targetKey, wantPrevSponsor, wantNewSponsor, opts...)
+}
+
+// RevokeSponsorship is focus.AssertRevokeSponsorship, stopping the test on failure.
+func RevokeSponsorship(t focus.TestingT, op xdr.Operation, wantType xdr.RevokeSponsorshipType, matcher func(xdr.RevokeSponsorshipOp) bool, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSponsorship(fatal(t), op, wantType, matcher, opts...)
+}
+
+// RevokeAccountSponsorship is focus.AssertRevokeAccountSponsorship, stopping the test on failure.
+func RevokeAccountSponsorship(t focus.TestingT, op xdr.Operation, accountID string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeAccountSponsorship(fatal(t), op, accountID, opts...)
+}
+
+// RevokeSignerSponsorship is focus.AssertRevokeSignerSponsorship, stopping the test on failure.
+func RevokeSignerSponsorship(t focus.TestingT, op xdr.Operation, accountID string, signerKey xdr.SignerKey, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSignerSponsorship(fatal(t), op, accountID, signerKey, opts...)
 }
 
 // PassiveOffer is focus.AssertPassiveOffer, stopping the test on failure.

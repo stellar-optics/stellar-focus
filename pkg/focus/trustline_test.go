@@ -321,3 +321,44 @@ func TestAssertTrustlineFlags(t *testing.T) {
 		}
 	})
 }
+
+func TestAssertSetTrustLineFlags(t *testing.T) {
+	t.Parallel()
+
+	asset := mustCreditAsset(t, "USDC")
+	set := uint32(xdr.TrustLineFlagsAuthorizedFlag) | uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag)
+	clear := uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag)
+	op := xdr.Operation{Body: xdr.OperationBody{
+		Type: xdr.OperationTypeSetTrustLineFlags,
+		SetTrustLineFlagsOp: &xdr.SetTrustLineFlagsOp{
+			Trustor:    mustAccountID(t, testDest),
+			Asset:      asset,
+			SetFlags:   xdr.Uint32(set),
+			ClearFlags: xdr.Uint32(clear),
+		},
+	}}
+
+	t.Run("matches trustor, asset, and masks", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		if !focus.AssertSetTrustLineFlags(tb, op, testDest, asset, set, clear) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.SetTrustLineFlags(t, op, testDest, asset, set, clear)
+	})
+
+	t.Run("reports human-readable set and clear differences", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		wantSet := uint32(xdr.TrustLineFlagsAuthorizedFlag)
+		wantClear := uint32(xdr.TrustLineFlagsAuthorizedFlag)
+		if focus.AssertSetTrustLineFlags(tb, op, testDest, asset, wantSet, wantClear) {
+			t.Fatal("assertion passed with different flag masks")
+		}
+		for _, want := range []string{"set flags are", "AUTHORIZED|CLAWBACK_ENABLED", "clear flags are", "MAINTAIN_LIABILITIES"} {
+			if !strings.Contains(tb.Output(), want) {
+				t.Errorf("message does not contain %q:\n%s", want, tb.Output())
+			}
+		}
+	})
+}
