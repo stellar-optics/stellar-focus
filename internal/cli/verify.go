@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,10 @@ const (
 	// formatJSON prints a single JSON document, for a script that has to
 	// decide what to do about the result.
 	formatJSON = "json"
+	// formatJUnit prints JUnit XML, for a CI test reporter.
+	formatJUnit = "junit"
+	// formatTAP prints TAP version 13, for a CI test reporter.
+	formatTAP = "tap"
 )
 
 // The statuses a fixture can be reported with in the JSON report.
@@ -122,7 +127,7 @@ type VerifyDiff struct {
 }
 
 func newVerifyCmd(cfg *config, stdout, stderr io.Writer) *cobra.Command {
-	var format string
+	var format, output string
 
 	cmd := &cobra.Command{
 		Use:   "verify [paths...]",
@@ -163,9 +168,14 @@ fields that changed and the value on each side of them for a fixture that
 drifted. It is meant for a pipeline that has to act on the result — a
 pull-request comment, a step summary, a test report — rather than read it.
 
+With --format junit or --format tap, the report is rendered for a CI test
+reporter: one test case per fixture, drift reported as a failure, and a
+fixture that could not be checked reported as an error. --output writes the
+report to a file instead of standard output, so the terminal stays quiet.
+
 Exit status is 0 when every checked fixture still matches, 2 when at least one
 has drifted, and 1 when a fixture could not be checked at all. The exit
-status is the same in either format.`,
+status is the same in every format.`,
 		Example: `  focus verify
   focus verify testdata/ --network mainnet
   focus verify 'testdata/**/*.golden.json'
@@ -175,28 +185,54 @@ status is the same in either format.`,
   focus verify testdata/ --drifted-only
   focus verify testdata/ --network mainnet \
     --archive-url https://history.stellar.org/prd/core-live/core_live_001
-  focus verify testdata/ --format json`,
+  focus verify testdata/ --format json
+  focus verify testdata/ --format junit --output focus-junit.xml
+  focus verify testdata/ --format tap --output focus.tap`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validVerifyFormat(format); err != nil {
 				return err
 			}
-
-			report, err := verifyFixtures(cmd, cfg, stdout, stderr, args, format == formatJSON)
-			if format == formatJSON {
-				if err != nil {
-					report.Error = err.Error()
-				}
-				if writeErr := writeVerifyReport(stdout, report); writeErr != nil {
-					return writeErr
-				}
+			if output != "" && format == formatText {
+				return usageErrorf("--output needs --format json, junit or tap")
 			}
-			return err
+
+			machine := format != formatText
+			report, runErr := verifyFixtures(cmd, cfg, stdout, stderr, args, machine)
+
+			w := stdout
+			if output != "" {
+				file, err := os.Create(output)
+				if err != nil {
+					return failureErrorf("writing %s: %v", output, err)
+				}
+				defer file.Close()
+				w = file
+			}
+
+			var writeErr error
+			switch format {
+			case formatJSON:
+				if runErr != nil {
+					report.Error = runErr.Error()
+				}
+				writeErr = writeVerifyReport(w, report)
+			case formatJUnit:
+				writeErr = writeJUnit(w, report)
+			case formatTAP:
+				writeErr = writeTAP(w, report)
+			}
+			if writeErr != nil {
+				return writeErr
+			}
+			return runErr
 		},
 	}
 
 	cfg.bindVerifyFlags(cmd)
 	cmd.Flags().StringVar(&format, "format", formatText,
-		"output format: text for a human, json for a script")
+		"output format: text, json, junit or tap")
+	cmd.Flags().StringVar(&output, "output", "",
+		"write the report to this file instead of standard output")
 
 	return cmd
 }
@@ -207,10 +243,11 @@ status is the same in either format.`,
 // what the choices are.
 func validVerifyFormat(format string) error {
 	switch format {
-	case formatText, formatJSON:
+	case formatText, formatJSON, formatJUnit, formatTAP:
 		return nil
 	default:
-		return usageErrorf("format must be %q or %q, got %q", formatText, formatJSON, format)
+		return usageErrorf("format must be %q, %q, %q or %q, got %q",
+			formatText, formatJSON, formatJUnit, formatTAP, format)
 	}
 }
 
@@ -240,7 +277,7 @@ func verifyFixtures(
 	cfg *config,
 	stdout, stderr io.Writer,
 	args []string,
-	asJSON bool,
+	machine bool,
 ) (*VerifyReport, error) {
 	report := &VerifyReport{Results: []VerifyItemResult{}}
 
@@ -279,7 +316,7 @@ func verifyFixtures(
 
 	var checked, matched, drifted, skipped, errored, filtered int
 	for _, ch := range checks {
-		if !asJSON {
+		if !machine {
 			fmt.Fprint(ch.target, ch.line)
 			if ch.diff != "" {
 				fmt.Fprint(stderr, ch.diff)
@@ -308,7 +345,7 @@ func verifyFixtures(
 		report.Results = append(report.Results, ch.item)
 	}
 
-	if err := cache.save(cfg.verifyCachePath()); err != nil && !asJSON {
+	if err := cache.save(cfg.verifyCachePath()); err != nil && !machine {
 		// The cache only saves work, so failing to write it is worth
 		// saying but is not worth failing the run over.
 		fmt.Fprintf(stderr, "warning: could not write the verification cache: %v\n", err)
@@ -323,7 +360,7 @@ func verifyFixtures(
 	report.Errored = errored
 	report.Filtered = filtered
 
-	if !asJSON {
+	if !machine {
 		fmt.Fprintf(stdout, "\n%d checked: %d ok, %d drifted, %d skipped",
 			checked, matched, drifted, skipped)
 		if errored > 0 {
