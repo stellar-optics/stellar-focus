@@ -11,6 +11,7 @@
 //	focus capture tx <hash>          record a transaction as fixtures
 //	focus capture ledger-entry <key> record a ledger entry
 //	focus verify [paths...]          re-check stored fixtures against the chain
+//	focus assert <tx-xdr>            interactively generate assertions for a transaction
 //
 // See https://github.com/stellar-optics/stellar-focus for full documentation.
 package main
@@ -23,7 +24,10 @@ import (
 )
 
 func main() {
-	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr)
+	// `focus assert` and `focus golden` are assembled in cmd/focus and registered
+	// with the root command, keeping interactive generators and golden tooling
+	// beside main while internal/cli stays focused on fixtures.
+	err := cli.Execute(os.Args[1:], os.Stdout, os.Stderr, newAssertCmd(), newGoldenCmd())
 	code, printable := cli.ExitCode(err)
 	if printable && err != nil {
 		fmt.Fprintln(os.Stderr, "focus:", err)

@@ -169,11 +169,11 @@ func deploymentMeta(t *testing.T, changes ...xdr.LedgerEntryChange) string {
 // richContract builds the deployment every passing test starts from: an owner
 // and several values in instance storage, plus persistent and temporary
 // entries and a second contract's data to prove it is ignored.
-func richContract(t *testing.T) (contract, other, meta string) {
+func richContract(t *testing.T) (contract, meta string) {
 	t.Helper()
 
 	contract = constructorContractID(t, 0x10)
-	other = constructorContractID(t, 0x40)
+	other := constructorContractID(t, 0x40)
 
 	instance := contractInstanceEntry(t, contract,
 		xdr.ScMapEntry{Key: scSymbol("Owner"), Val: scAddress(t, testSource)},
@@ -198,13 +198,13 @@ func richContract(t *testing.T) (contract, other, meta string) {
 		createdChange(temporary),
 		createdChange(unrelated),
 	)
-	return contract, other, meta
+	return contract, meta
 }
 
 func TestAssertConstructorStatePasses(t *testing.T) {
 	t.Parallel()
 
-	contract, _, meta := richContract(t)
+	contract, meta := richContract(t)
 	_, lensValue, err := focus.Encode(scU32(1000), "ScVal")
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
@@ -291,7 +291,7 @@ func TestAssertConstructorStatePasses(t *testing.T) {
 func TestAssertConstructorStateFailureMessages(t *testing.T) {
 	t.Parallel()
 
-	contract, _, meta := richContract(t)
+	contract, meta := richContract(t)
 
 	tests := []struct {
 		name     string
@@ -824,7 +824,7 @@ func mapPtr(v xdr.ScMap) **xdr.ScMap {
 func TestRequireConstructorMirrors(t *testing.T) {
 	t.Parallel()
 
-	contract, _, meta := richContract(t)
+	contract, meta := richContract(t)
 
 	t.Run("constructor state passes", func(t *testing.T) {
 		t.Parallel()

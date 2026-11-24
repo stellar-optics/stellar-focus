@@ -55,7 +55,93 @@ type ledgerbounds struct {
 // through to the inner transaction.
 func AssertTimeboundsValid(t TB, envelope Value, minTime, maxTime int64) bool {
 	t.Helper()
-	const assertion = "AssertTimeboundsValid"
+	return assertTimeBounds(t, "AssertTimeboundsValid", envelope, minTime, maxTime)
+}
+
+// AssertTimeBounds checks that the envelope declares exactly the wanted time
+// bounds, in Unix seconds.
+//
+// It asks the same question as AssertTimeboundsValid, under the name the
+// precondition assertions use elsewhere, and answers it the same way: a
+// bound of zero means "unbounded", so 0, 0 asserts that the transaction
+// declares no time bounds at all, and a max time of zero asserts that it
+// never expires.
+//
+// A V0 envelope, which carries its time bounds in the older field, is read
+// the same way, and a fee-bump envelope is read through to the inner
+// transaction — the one whose validity the protocol checks.
+func AssertTimeBounds(t TB, envelope Value, wantMinTime, wantMaxTime int64) bool {
+	t.Helper()
+	return assertTimeBounds(t, "AssertTimeBounds", envelope, wantMinTime, wantMaxTime)
+}
+
+// AssertTimeBoundsWindow checks that the transaction's time bounds span
+// exactly the wanted duration.
+//
+// The window is the time between the earliest and the latest moment the
+// transaction is valid for — the length of time a sender gives the network
+// to include it. A transaction that declares no bounds, or only one side of
+// them, has no window, and the assertion fails saying so.
+//
+// The window is measured in whole seconds, the unit the protocol stores time
+// bounds in, so a duration with a sub-second part never matches.
+func AssertTimeBoundsWindow(t TB, envelope Value, wantDuration time.Duration) bool {
+	t.Helper()
+	const assertion = "AssertTimeBoundsWindow"
+
+	got, ok := timeboundsFrom(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	// A window needs both ends: without them there is no length to measure.
+	if !got.Set || got.MinTime == 0 || got.MaxTime == 0 {
+		t.Errorf("%s: the transaction declares no time window\n\n  got   %s\n"+
+			"  want  a window of %s\n\n"+
+			"A window is the time between the earliest and the latest moment the "+
+			"transaction is valid for, so it needs both of its bounds.",
+			assertion, describeTimebounds(got), describeWindow(wantDuration))
+		return false
+	}
+
+	gotWindow := time.Duration(got.MaxTime-got.MinTime) * time.Second
+	if gotWindow == wantDuration {
+		return true
+	}
+
+	t.Errorf("%s: the time window is %s, want %s\n\n  got   %s\n  want  a window of %s",
+		assertion, describeWindow(gotWindow), describeWindow(wantDuration),
+		describeTimebounds(got), describeWindow(wantDuration))
+	return false
+}
+
+// AssertNoTimeBounds checks that the transaction declares no time bounds.
+//
+// A transaction with no time bounds is valid indefinitely: it never expires.
+// The protocol's own way of saying the same thing — a bound of zero on both
+// sides — counts as no bounds, because that is what the protocol means by
+// it.
+func AssertNoTimeBounds(t TB, envelope Value) bool {
+	t.Helper()
+	const assertion = "AssertNoTimeBounds"
+
+	got, ok := timeboundsFrom(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+	if !got.Set || (got.MinTime == 0 && got.MaxTime == 0) {
+		return true
+	}
+
+	t.Errorf("%s: the transaction declares time bounds\n\n  got   %s\n  want  no time bounds (valid indefinitely)",
+		assertion, describeTimebounds(got))
+	return false
+}
+
+// assertTimeBounds is the shared body of the time-bound assertions: it reads
+// the bounds, compares them as a whole and reports the difference.
+func assertTimeBounds(t TB, assertion string, envelope Value, minTime, maxTime int64) bool {
+	t.Helper()
 
 	got, ok := timeboundsFrom(t, assertion, envelope)
 	if !ok {
@@ -71,7 +157,7 @@ func AssertTimeboundsValid(t TB, envelope Value, minTime, maxTime int64) bool {
 	fmt.Fprintf(&b, "  want  %s\n\n", describeTimebounds(timebounds{
 		MinTime: minTime, MaxTime: maxTime, Set: minTime != 0 || maxTime != 0,
 	}))
-	b.WriteString(indent(strings.Join(timeboundDiffLines(got, minTime, maxTime), "\n"), "  "))
+	b.WriteString(indent(strings.Join(timeboundDiffLines(got, minTime, maxTime), "\n")))
 	t.Errorf("%s", b.String())
 	return false
 }
@@ -86,7 +172,27 @@ func AssertTimeboundsValid(t TB, envelope Value, minTime, maxTime int64) bool {
 // 0..0.
 func AssertLedgerboundsValid(t TB, envelope Value, minLedger, maxLedger uint32) bool {
 	t.Helper()
-	const assertion = "AssertLedgerboundsValid"
+	return assertLedgerBounds(t, "AssertLedgerboundsValid", envelope, minLedger, maxLedger)
+}
+
+// AssertLedgerBounds checks that the envelope declares exactly the wanted
+// ledger bounds.
+//
+// It asks the same question as AssertLedgerboundsValid, under the name the
+// precondition assertions use elsewhere, and answers it the same way: a
+// bound of zero means "unbounded", so 0, 0 asserts that the transaction
+// declares no ledger bounds at all.
+//
+// Ledger bounds exist only in V2 preconditions, so a transaction that
+// declares none reads as 0..0.
+func AssertLedgerBounds(t TB, envelope Value, wantMinLedger, wantMaxLedger uint32) bool {
+	t.Helper()
+	return assertLedgerBounds(t, "AssertLedgerBounds", envelope, wantMinLedger, wantMaxLedger)
+}
+
+// assertLedgerBounds is the shared body of the ledger-bound assertions.
+func assertLedgerBounds(t TB, assertion string, envelope Value, minLedger, maxLedger uint32) bool {
+	t.Helper()
 
 	got, ok := ledgerboundsFrom(t, assertion, envelope)
 	if !ok {
@@ -102,7 +208,7 @@ func AssertLedgerboundsValid(t TB, envelope Value, minLedger, maxLedger uint32) 
 	fmt.Fprintf(&b, "  want  %s\n\n", describeLedgerbounds(ledgerbounds{
 		MinLedger: minLedger, MaxLedger: maxLedger, Set: minLedger != 0 || maxLedger != 0,
 	}))
-	b.WriteString(indent(strings.Join(ledgerboundDiffLines(got, minLedger, maxLedger), "\n"), "  "))
+	b.WriteString(indent(strings.Join(ledgerboundDiffLines(got, minLedger, maxLedger), "\n")))
 	t.Errorf("%s", b.String())
 	return false
 }
@@ -189,6 +295,12 @@ func describeLedgerbounds(b ledgerbounds) string {
 	default:
 		return fmt.Sprintf("ledger bounds %d..%d", b.MinLedger, b.MaxLedger)
 	}
+}
+
+// describeWindow renders a duration both as the whole seconds the protocol
+// counts in and as the length a person reads it as.
+func describeWindow(d time.Duration) string {
+	return fmt.Sprintf("%ds (%s)", int64(d/time.Second), d)
 }
 
 // timeboundDiffLines names each time bound that differs, both as a timestamp

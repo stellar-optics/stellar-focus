@@ -12,6 +12,11 @@
 //	go test ./... -focus.update
 //
 // The flag is namespaced so it never collides with a project's own -update.
+//
+// Fixtures may be stored gzip-compressed (a .golden.json.gz suffix writes
+// them that way), and reads are transparent about it; content is compared
+// after line-ending normalization, so a checkout on Windows asserts the same
+// as one on Linux.
 package golden
 
 import (
@@ -25,7 +30,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 	lensformat "github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
+	"github.com/stellar/go-stellar-sdk/network"
 
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
@@ -69,23 +76,36 @@ type Fixture struct {
 
 // Provenance records where a captured fixture came from, so a stale fixture
 // can be traced and re-verified.
+//
+// NetworkPassphrase is recorded alongside the network name because the name
+// alone is ambiguous: a transaction hash and its signatures are bound to the
+// passphrase, and two private networks can share a name but not a
+// passphrase.
 type Provenance struct {
-	Network  string `json:"network"`
-	Ledger   uint32 `json:"ledger,omitempty"`
-	TxHash   string `json:"txHash,omitempty"`
-	At       string `json:"at"`
-	Endpoint string `json:"endpoint,omitempty"`
+	Network           string `json:"network"`
+	NetworkPassphrase string `json:"networkPassphrase,omitempty"`
+	Ledger            uint32 `json:"ledger,omitempty"`
+	TxHash            string `json:"txHash,omitempty"`
+	At                string `json:"at"`
+	Endpoint          string `json:"endpoint,omitempty"`
+	Anonymized        bool   `json:"anonymized,omitempty"`
+	Sanitized         bool   `json:"sanitized,omitempty"`
 }
 
 // Golden compares values against golden files on disk.
 type Golden struct {
-	t       focus.TB
-	dir     string
-	suffix  string
-	format  Format
-	opts    []focus.Option
-	desc    string
-	typeHnt string
+	t                focus.TB
+	dir              string
+	suffix           string
+	format           Format
+	opts             []focus.Option
+	noiseSuppression bool
+	desc             string
+	typeHnt          string
+	vars             any
+	// diffContext is how many unchanged sibling fields a failure diff shows
+	// around each difference. nil means the focus default.
+	diffContext *int
 }
 
 // Opt configures a Golden.
@@ -118,6 +138,26 @@ func WithOptions(opts ...focus.Option) Opt {
 	return func(g *Golden) { g.opts = append(g.opts, opts...) }
 }
 
+// WithDiffContext sets how many unchanged sibling fields a golden mismatch
+// shows around each changed field. The default is three; zero disables the
+// surrounding context and shows only the differences themselves.
+//
+// A large fixture that differs by one field should not bury that field in
+// hundreds of lines of unchanged output, so the context is trimmed around the
+// difference and any omitted fields are noted in the message.
+func WithDiffContext(lines int) Opt {
+	return func(g *Golden) {
+		n := max(lines, 0)
+		g.diffContext = &n
+	}
+}
+
+// WithNoiseSuppression controls automatic normalization of volatile XDR fields.
+// It is enabled by default; disable it when a test intentionally checks them.
+func WithNoiseSuppression(enabled bool) Opt {
+	return func(g *Golden) { g.noiseSuppression = enabled }
+}
+
 // WithDescription sets the description written into new golden files.
 func WithDescription(d string) Opt {
 	return func(g *Golden) { g.desc = d }
@@ -129,9 +169,17 @@ func WithType(typeName string) Opt {
 	return func(g *Golden) { g.typeHnt = typeName }
 }
 
+// WithVariables supplies data used to interpolate templates in loaded fixtures.
+func WithVariables(variables any) Opt {
+	return func(g *Golden) { g.vars = variables }
+}
+
 // New returns a Golden bound to a test.
 func New(t focus.TB, opts ...Opt) *Golden {
-	g := &Golden{t: t, dir: "testdata", suffix: JSON.DefaultSuffix(), format: JSON}
+	g := &Golden{
+		t: t, dir: "testdata", suffix: JSON.DefaultSuffix(), format: JSON,
+		noiseSuppression: true,
+	}
 	for _, o := range opts {
 		o(g)
 	}
@@ -154,26 +202,80 @@ func (g *Golden) Path(name string) string {
 // what to do next.
 func (g *Golden) Assert(name string, actual focus.Value) bool {
 	g.t.Helper()
+	return g.assert(g.t, name, actual, "", nil)
+}
 
+// Require compares a value against the named golden file and stops the test
+// when it does not match.
+//
+// It is the fatal counterpart of Assert, for the tests where everything
+// after the comparison would be meaningless: a fixture that does not exist,
+// a decode that failed, a transaction that was never built.
+//
+// The diagnostic is the one Assert reports — the same diff, in the same
+// layout, with the same -focus.update instructions — but it is delivered as
+// a single fatal message, so a test that stops still shows the reader
+// everything a test that continued would have shown.
+func (g *Golden) Require(name string, actual focus.Value) bool {
+	g.t.Helper()
+
+	// The comparison reports through a TB, and the report has to survive
+	// the failure, so the messages are collected and delivered together.
+	buffer := &messageBuffer{TB: g.t}
+	ok := g.assert(buffer, name, actual, "", nil)
+	if !ok {
+		g.t.Fatalf("%s", buffer.text())
+	}
+	return ok
+}
+
+// assert compares a value against the named golden file, reporting through
+// tb.
+//
+// description and extra are supplied by AssertAll: a plain Assert writes the
+// suite's description into a new fixture and uses the suite's options only.
+func (g *Golden) assert(
+	tb focus.TB,
+	name string,
+	actual focus.Value,
+	description string,
+	extra []focus.Option,
+) bool {
+	g.t.Helper()
+	tb.Helper()
 	path := g.Path(name)
 
 	if Update() {
-		if err := g.write(path, actual); err != nil {
-			g.t.Errorf("golden: updating %s: %v", path, err)
+		if err := g.write(path, actual, description); err != nil {
+			tb.Errorf("golden: updating %s: %v", path, err)
 			return false
 		}
 		return true
 	}
 
 	want, err := LoadAs(path, g.format)
+	if errors.Is(err, os.ErrNotExist) {
+		// A compressed twin counts: a repository that gzipped its fixtures
+		// should not have to reconfigure every assertion to keep passing.
+		if gz, gzErr := LoadAs(path+GzipSuffix, g.format); gzErr == nil {
+			path, want, err = path+GzipSuffix, gz, nil
+		}
+	}
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			g.t.Errorf("golden: %s does not exist yet.\n"+
+			tb.Errorf("golden: %s does not exist yet.\n"+
 				"Create it by running:\n\n    go test ./... -focus.update\n", path)
 			return false
 		}
-		g.t.Errorf("golden: reading %s: %v", path, err)
+		tb.Errorf("golden: reading %s: %v", path, err)
 		return false
+	}
+	if g.vars != nil {
+		want, err = InterpolateFixture(want, g.vars)
+		if err != nil {
+			tb.Errorf("golden: interpolating %s: %v", path, err)
+			return false
+		}
 	}
 
 	typeName := g.typeHnt
@@ -184,21 +286,277 @@ func (g *Golden) Assert(name string, actual focus.Value) bool {
 	// The comparison is against the stored XDR, never the decoded rendering:
 	// the decoded form exists for humans reading diffs, and treating it as
 	// authoritative would make the assertion depend on lens's formatting.
-	ok := focus.AssertEqualAs(g.t, typeName, want.XDR, actual, g.opts...)
+	ok := focus.AssertEqualAs(tb, typeName, want.XDR, actual, g.options(extra)...)
 	if !ok {
-		g.t.Errorf("golden: %s is out of date.\n"+
+		tb.Errorf("golden: %s is out of date.\n"+
 			"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n", path)
 	}
 	return ok
 }
 
+// options merges the suite's assertion options with a case's own.
+//
+// The case's options come last, so a case can add to what the suite already
+// asks for. focus options accumulate rather than replace one another, so
+// nothing is overridden by the order; the order is only about reading.
+func (g *Golden) options(extra []focus.Option) []focus.Option {
+	opts := make([]focus.Option, 0, len(g.opts)+len(extra)+1)
+	if g.noiseSuppression {
+		opts = append(opts, noiseSuppressionOptions()...)
+	}
+	opts = append(opts, g.opts...)
+	opts = append(opts, extra...)
+	if g.diffContext != nil {
+		opts = append(opts, focus.WithDiffContext(*g.diffContext))
+	}
+	return opts
+}
+
+// messageBuffer collects the messages an assertion reports instead of
+// reporting them.
+//
+// It exists so that a fatal assertion can deliver its whole diagnostic as
+// one message. The diff and the command that re-records the fixture have to
+// reach the reader together: a reader who gets only the diff does not know
+// what to do about it, and a reader who gets only the remedy does not know
+// what changed.
+type messageBuffer struct {
+	focus.TB
+	messages []string
+}
+
+// Errorf records the message rather than reporting it.
+func (buf *messageBuffer) Errorf(format string, args ...any) {
+	buf.messages = append(buf.messages, fmt.Sprintf(format, args...))
+}
+
+// Fatalf records the message rather than reporting it.
+//
+// A comparison never fails fatally, so nothing should reach this; recording
+// keeps the whole diagnostic in one place if that ever changes.
+func (buf *messageBuffer) Fatalf(format string, args ...any) {
+	buf.messages = append(buf.messages, fmt.Sprintf(format, args...))
+}
+
+// text returns the collected messages, in the order they were reported and
+// with the same layout they would have had on the terminal.
+func (buf *messageBuffer) text() string {
+	var b strings.Builder
+	for _, m := range buf.messages {
+		b.WriteString(m)
+		if !strings.HasSuffix(m, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 // write records a value as a golden file.
-func (g *Golden) write(path string, actual focus.Value) error {
-	fixture, err := Build(actual, g.typeHnt, g.desc, nil)
+//
+// A description given for one case overrides the suite's own, so a table can
+// say what each of its fixtures is for.
+func (g *Golden) write(path string, actual focus.Value, description string) error {
+	if description == "" {
+		description = g.desc
+	}
+	fixture, err := Build(actual, g.typeHnt, description, nil)
 	if err != nil {
 		return err
 	}
 	return SaveAs(path, fixture, g.format)
+}
+
+// Case is one entry of a table-driven golden test.
+//
+// The description and the options travel with the entry rather than with the
+// suite, so a failure can say which entry failed and what it was for — the
+// context a list of bare names cannot carry.
+type Case struct {
+	// Name is the golden file's base name, without a suffix.
+	Name string
+	// Value is the XDR compared against the golden file.
+	Value focus.Value
+	// Description is a note recorded in the fixture when it is written, and
+	// shown beside the entry in the failure summary.
+	Description string
+	// Options are assertion options for this entry alone, merged over the
+	// suite's own options.
+	Options []focus.Option
+}
+
+// AssertAll compares every case of a table against its golden file.
+//
+// Every case runs even when an earlier one fails: a table that stops at the
+// first failure hides how much of the table is broken. The result is false
+// when any case failed.
+//
+// A failure reports the whole table, so the broken entry can be found without
+// scanning filenames:
+//
+//	golden: table summary — 3 case(s), 1 failed:
+//	  [1/3] payment_v1: ok
+//	  [2/3] payment_v2: DRIFTED (a payment that moved)
+//	  [3/3] payment_v3: ok
+//
+// and each failure is repeated with the entry's index, name and description
+// attached, so the diff that follows says which entry it belongs to.
+//
+// A case whose fixture the .focusignore file at the fixture root excludes is
+// left out of the table entirely, in update mode as well as when comparing: a
+// draft that is not ready to be verified should neither fail the suite nor be
+// re-recorded by -focus.update.
+func (g *Golden) AssertAll(cases []Case) bool {
+	g.t.Helper()
+
+	ignores, err := LoadIgnore(g.dir)
+	if err != nil {
+		g.t.Errorf("golden: %v", err)
+		return false
+	}
+	cases, skipped := g.unignored(cases, ignores)
+	if skipped > 0 {
+		g.logf("golden: %d of %d case(s) skipped by %s",
+			skipped, skipped+len(cases), IgnoreFileName)
+	}
+
+	results := make([]caseResult, 0, len(cases))
+	failed := 0
+	for i, c := range cases {
+		result := g.runCase(i+1, c)
+		if !result.ok {
+			failed++
+		}
+		results = append(results, result)
+	}
+
+	summary := tableSummary(results, failed)
+	if failed == 0 {
+		g.logf("%s", summary)
+		return true
+	}
+
+	g.t.Errorf("%s", summary)
+	for _, r := range results {
+		for _, msg := range r.messages {
+			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
+		}
+	}
+	return false
+}
+
+// unignored drops the cases whose fixture .focusignore excludes, and reports
+// how many were dropped.
+func (g *Golden) unignored(cases []Case, ignores *Ignore) ([]Case, int) {
+	kept := make([]Case, 0, len(cases))
+	skipped := 0
+	for _, c := range cases {
+		if ignores.Matches(g.Path(c.Name)) {
+			skipped++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, skipped
+}
+
+// runCase runs one case of a table and collects what it reported.
+func (g *Golden) runCase(index int, c Case) caseResult {
+	g.t.Helper()
+
+	rec := &recorder{tb: g.t}
+	ok := g.assert(rec, c.Name, c.Value, c.Description, c.Options)
+
+	result := caseResult{index: index, name: c.Name, description: c.Description, ok: ok}
+	result.messages = append(result.messages, rec.errs...)
+	result.messages = append(result.messages, rec.fatals...)
+	return result
+}
+
+// logf writes to the test log when the TB has one.
+//
+// focus.TB is deliberately small — Helper, Errorf, Fatalf and Name — so there
+// is no way to report a passing summary through it without failing the test.
+// A TB that also offers Logf gets the summary for free; one that does not
+// simply does not see it.
+func (g *Golden) logf(format string, args ...any) {
+	if l, ok := g.t.(interface{ Logf(string, ...any) }); ok {
+		l.Logf(format, args...)
+	}
+}
+
+// caseResult is what one case of a table did.
+type caseResult struct {
+	// index is the case's position in the table, counting from one.
+	index int
+	// name is the case's golden file name.
+	name string
+	// description is the case's note, when it has one.
+	description string
+	// ok reports whether the case matched its golden file.
+	ok bool
+	// messages are the failures the case reported.
+	messages []string
+}
+
+// label names the case in a failure message.
+func (r caseResult) label(total int) string {
+	label := fmt.Sprintf("[%d/%d] %s", r.index, total, r.name)
+	if r.description != "" {
+		label += " (" + r.description + ")"
+	}
+	return label
+}
+
+// status is the word the summary table uses for the case.
+func (r caseResult) status() string {
+	if r.ok {
+		return "ok"
+	}
+	return "DRIFTED"
+}
+
+// tableSummary renders the table of cases and how each of them went.
+func tableSummary(results []caseResult, failed int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "golden: table summary — %d case(s), %d failed:", len(results), failed)
+	for _, r := range results {
+		fmt.Fprintf(&b, "\n  [%d/%d] %s: %s", r.index, len(results), r.name, r.status())
+		if r.description != "" {
+			fmt.Fprintf(&b, " (%s)", r.description)
+		}
+	}
+	return b.String()
+}
+
+// recorder captures what an assertion reports, so a table-driven failure can
+// be re-emitted with the entry's identity attached to it.
+//
+// Assertions report through TB.Errorf and have no other channel, so the
+// context a table needs — the entry's index, name and description — can only
+// be added by intercepting that channel.
+type recorder struct {
+	tb     focus.TB
+	errs   []string
+	fatals []string
+}
+
+// Helper implements focus.TB.
+func (r *recorder) Helper() { r.tb.Helper() }
+
+// Name implements focus.TB.
+func (r *recorder) Name() string { return r.tb.Name() }
+
+// Errorf implements focus.TB, recording the message rather than reporting it.
+func (r *recorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// Fatalf implements focus.TB, recording the message rather than aborting.
+//
+// The assertions this package uses report through Errorf, so nothing here
+// ends a test early; a fatal would be replayed as an ordinary failure.
+func (r *recorder) Fatalf(format string, args ...any) {
+	r.fatals = append(r.fatals, fmt.Sprintf(format, args...))
 }
 
 // Build turns a value into a Fixture, decoding it for the human-readable
@@ -219,21 +577,120 @@ func Build(v focus.Value, typeName, description string, provenance *Provenance) 
 
 	// The decoded section is lens's own JSON, so it matches what
 	// `lens decode --json` prints for the same payload.
+	rendered, err := renderDecoded(decoded)
+	if err != nil {
+		return nil, err
+	}
+	fixture.Decoded = rendered
+
+	return fixture, nil
+}
+
+// renderDecoded renders a decoded value as the JSON tree a fixture stores.
+func renderDecoded(decoded *lens.Value) (json.RawMessage, error) {
 	var buf bytes.Buffer
 	f := lensformat.NewJSONFormatter(lensformat.WithIndent("  "))
 	if err := f.Format(&buf, decoded); err != nil {
 		return nil, fmt.Errorf("rendering decoded form: %w", err)
 	}
-	fixture.Decoded = json.RawMessage(bytes.TrimSpace(buf.Bytes()))
+	return json.RawMessage(bytes.TrimSpace(buf.Bytes())), nil
+}
 
-	return fixture, nil
+// Refresh re-renders the decoded section of a fixture from the XDR it stores.
+//
+// The XDR is the source of truth and the decoded tree beside it is what a
+// human reads in a pull request. When the formatter improves, or the
+// protocol gains a field, that tree goes stale — and re-recording the
+// fixtures to fix it would re-record the data too. Refresh touches only the
+// decoded section: the format, the type, the description, the XDR and the
+// capture provenance keep their values.
+//
+// It reports whether the file on disk changed. A fixture whose decoded
+// section is already current is left alone, so the command is safe to run
+// over a whole testdata directory.
+func Refresh(path string) (bool, error) {
+	format := FormatForPath(path)
+
+	fixture, err := LoadAs(path, format)
+	if err != nil {
+		return false, err
+	}
+
+	decoded, err := RefreshedDecoded(fixture)
+	if err != nil {
+		return false, err
+	}
+
+	refreshed := *fixture
+	refreshed.Decoded = decoded
+
+	serializer, err := SerializerFor(format)
+	if err != nil {
+		return false, err
+	}
+	data, err := serializer.Marshal(&refreshed)
+	if err != nil {
+		return false, fmt.Errorf("rendering %s: %w", path, err)
+	}
+
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(current, data) {
+		return false, nil
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return false, fmt.Errorf("writing %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// RefreshedDecoded returns the decoded section a fixture would carry after a
+// refresh, without writing anything.
+//
+// It is what a dry run shows: the tree the fixture would have, next to the
+// one it has.
+func RefreshedDecoded(f *Fixture) (json.RawMessage, error) {
+	if f == nil {
+		return nil, errors.New("fixture is nil")
+	}
+	if f.Type == "" {
+		return nil, errors.New("fixture has no type, so there is nothing to decode")
+	}
+	if strings.TrimSpace(f.XDR) == "" {
+		return nil, errors.New("fixture has no XDR, so there is nothing to decode")
+	}
+
+	decoded, err := lens.DecodeAs(f.XDR, f.Type)
+	if err != nil {
+		return nil, fmt.Errorf("decoding %s: %w", f.Type, err)
+	}
+	return renderDecoded(decoded)
 }
 
 // Load reads a golden file, choosing the format from its extension. An
 // unrecognised extension is read as JSON, which is what every fixture written
 // before the other formats existed is.
 func Load(path string) (*Fixture, error) {
-	return LoadAs(path, FormatForPath(path))
+	raw, err := ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	format := FormatForPath(path)
+	if bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+		format = JSON
+	}
+	serializer, err := SerializerFor(format)
+	if err != nil {
+		return nil, err
+	}
+	f, err := serializer.Unmarshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return f, nil
 }
 
 // LoadAs reads a golden file in an explicit format.
@@ -245,7 +702,7 @@ func LoadAs(path string, format Format) (*Fixture, error) {
 		return nil, err
 	}
 
-	raw, err := os.ReadFile(path)
+	raw, err := ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -276,23 +733,39 @@ func SaveAs(path string, f *Fixture, format Format) error {
 	if err != nil {
 		return err
 	}
+	return WriteFile(path, data)
+}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("writing %s: %w", path, err)
-	}
-	return nil
+// KnownPassphrases maps the network names a capture records to the
+// passphrase those networks sign with.
+//
+// Only public networks are listed. A standalone or private network has a
+// passphrase of its own, which the capture source reports or the caller
+// supplies.
+var KnownPassphrases = map[string]string{
+	"testnet":   network.TestNetworkPassphrase,
+	"mainnet":   network.PublicNetworkPassphrase,
+	"futurenet": network.FutureNetworkPassphrase,
+}
+
+// PassphraseFor returns the passphrase of a known network, or an empty
+// string for a network it does not recognise.
+func PassphraseFor(networkName string) string {
+	return KnownPassphrases[networkName]
 }
 
 // NewProvenance records a capture at the given time.
-func NewProvenance(network, endpoint string, ledger uint32, txHash string, at time.Time) *Provenance {
+//
+// The network passphrase is filled in when the network is one of
+// KnownPassphrases; for any other network it is left empty for the caller to
+// set from the source or from an explicit value.
+func NewProvenance(networkName, endpoint string, ledger uint32, txHash string, at time.Time) *Provenance {
 	return &Provenance{
-		Network:  network,
-		Ledger:   ledger,
-		TxHash:   txHash,
-		At:       at.UTC().Format(time.RFC3339),
-		Endpoint: endpoint,
+		Network:           networkName,
+		NetworkPassphrase: PassphraseFor(networkName),
+		Ledger:            ledger,
+		TxHash:            txHash,
+		At:                at.UTC().Format(time.RFC3339),
+		Endpoint:          endpoint,
 	}
 }

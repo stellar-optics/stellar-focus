@@ -73,7 +73,7 @@ func AssertAccountDataEqual(t TB, meta Value, key string, value Value) bool {
 	candidates := presentEntriesNamed(entries, key)
 	if len(candidates) == 0 {
 		t.Errorf("%s: the transaction left no account data named %q\n\n%s",
-			assertion, key, indent(describeDataEntries(entries), "  "))
+			assertion, key, indent(describeDataEntries(entries)))
 		return false
 	}
 	for _, e := range candidates {
@@ -88,7 +88,7 @@ func AssertAccountDataEqual(t TB, meta Value, key string, value Value) bool {
 	}
 	t.Errorf("%s: %d accounts have data named %q, none holding %s\n\n%s",
 		assertion, len(candidates), key, renderDataValue(want),
-		indent(describeDataEntries(candidates), "  "))
+		indent(describeDataEntries(candidates)))
 	return false
 }
 
@@ -122,7 +122,7 @@ func AssertAccountDataEqualFor(t TB, meta Value, account Value, key string, valu
 	}
 
 	t.Errorf("%s: the transaction left no data named %q on account %s\n\n%s",
-		assertion, key, shorten(addr), indent(describeAccountDataEntries(entries, addr), "  "))
+		assertion, key, shorten(addr), indent(describeAccountDataEntries(entries, addr)))
 	return false
 }
 
@@ -159,11 +159,11 @@ func AssertAccountDataDeleted(t TB, meta Value, key string) bool {
 
 	if touched {
 		t.Errorf("%s: account data %q still exists after this transaction\n\n%s",
-			assertion, key, indent(describeDataEntries(entries), "  "))
+			assertion, key, indent(describeDataEntries(entries)))
 		return false
 	}
 	t.Errorf("%s: no account data named %q was removed by this transaction\n\n%s",
-		assertion, key, indent(describeDataEntries(entries), "  "))
+		assertion, key, indent(describeDataEntries(entries)))
 	return false
 }
 
@@ -296,7 +296,7 @@ func dataMismatchMessage(assertion string, got dataEntry, want []byte, all []dat
 		assertion, got.name, shorten(got.account),
 		renderDataValue(got.value), renderDataValue(want))
 	fmt.Fprintf(&b, "  %s\n", describeDataDifference(got.value, want))
-	b.WriteString(indent(describeDataEntries(all), "  "))
+	b.WriteString(indent(describeDataEntries(all)))
 	return b.String()
 }
 

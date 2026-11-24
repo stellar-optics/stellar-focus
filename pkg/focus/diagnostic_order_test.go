@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // testDiagnosticLedger and testDiagnosticCloseTime are the timeline a
@@ -105,10 +106,10 @@ func logEvent(msg string, inSuccessfulCall bool) xdr.DiagnosticEvent {
 
 // contractEventInDiag is a contract event as it appears in the diagnostic
 // stream, which is where the events of a failed call survive.
-func contractEventInDiag(topic string, data uint32, inSuccessfulCall bool) xdr.DiagnosticEvent {
+func contractEventInDiag(inSuccessfulCall bool) xdr.DiagnosticEvent {
 	id := testContractID
-	return diagnosticEvent(diagContractEvent(xdr.ContractEventTypeContract, &id, diagU32(data),
-		diagSymbol(topic)), inSuccessfulCall)
+	return diagnosticEvent(diagContractEvent(xdr.ContractEventTypeContract, &id, diagU32(7),
+		diagSymbol("transfer")), inSuccessfulCall)
 }
 
 // systemEvent is emitted by the protocol rather than a contract, so it
@@ -168,7 +169,7 @@ func nestedStream(t *testing.T) []xdr.DiagnosticEvent {
 	t.Helper()
 	return []xdr.DiagnosticEvent{
 		fnCall("transfer", true),
-		contractEventInDiag("transfer", 7, true),
+		contractEventInDiag(true),
 		logEvent("minting", true),
 		fnCall("mint", true),
 		fnReturn("mint", diagU32(1), true),
@@ -234,8 +235,8 @@ func TestDiagnosticEvents(t *testing.T) {
 	if events[6].ContractID != "" {
 		t.Errorf("the system event belongs to %q, want no contract", events[6].ContractID)
 	}
-	if events[1].Data.Type != xdr.ScValTypeScvU32 {
-		t.Errorf("event 1 carries a %s payload, want u32", events[1].Data.Type)
+	if data, ok := events[1].Data.(xdr.ScVal); !ok || data.Type != xdr.ScValTypeScvU32 {
+		t.Errorf("event 1 carries a %v payload, want u32", events[1].Data)
 	}
 }
 
@@ -247,7 +248,7 @@ func TestDiagnosticEventsRecordsFailedCalls(t *testing.T) {
 
 	meta := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger),
 		fnCall("transfer", false),
-		contractEventInDiag("transfer", 7, false),
+		contractEventInDiag(false),
 		fnReturn("transfer", diagVoid(), false),
 	)
 
@@ -374,7 +375,7 @@ func TestAssertDiagnosticEventOrderMessages(t *testing.T) {
 
 	meta := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger),
 		fnCall("transfer", true),
-		contractEventInDiag("transfer", 7, true),
+		contractEventInDiag(true),
 		fnReturn("transfer", diagU32(7), true),
 	)
 	empty := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger))
@@ -668,7 +669,7 @@ func TestDiagnosticEventKindNames(t *testing.T) {
 		{"fn_return", fnReturn("transfer", diagVoid(), true), focus.DiagnosticFnReturn},
 		{"log", logEvent("hello", true), "log"},
 		{"system event", systemEvent(true), focus.DiagnosticSystem},
-		{"contract event", contractEventInDiag("transfer", 7, true), focus.DiagnosticContract},
+		{"contract event", contractEventInDiag(true), focus.DiagnosticContract},
 		{"an unnamed diagnostic event", diagnosticEvent(
 			diagContractEvent(xdr.ContractEventTypeDiagnostic, nil, diagVoid(), diagU32(1)), true),
 			focus.DiagnosticOther},
@@ -689,4 +690,78 @@ func TestDiagnosticEventKindNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAssertContractLogMessage(t *testing.T) {
+	t.Parallel()
+
+	meta := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger),
+		fnCall("deposit", true),
+		logEvent("user 101 deposited 500 tokens successfully", true),
+		fnReturn("deposit", diagVoid(), true),
+	)
+
+	t.Run("matches literal substring in diagnostic log", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertContractLogMessage(tb, meta, "deposited 500") {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.ContractLogMessage(t, meta, "deposited 500")
+	})
+
+	t.Run("matches regular expression enclosed in slashes", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertContractLogMessage(tb, meta, `/user \d+ deposited/`) {
+			t.Errorf("assertion failed with regex:\n%s", tb.Output())
+		}
+		require.ContractLogMessage(t, meta, `/user \d+ deposited/`)
+	})
+
+	t.Run("fails and dumps captured events when no match is found", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertContractLogMessage(tb, meta, "withdrew") {
+			t.Fatal("assertion passed when log message was absent")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, `no diagnostic log message matched "withdrew"`) {
+			t.Errorf("message did not report missing pattern:\n%s", msg)
+		}
+		if !strings.Contains(msg, "captured diagnostic event(s)") || !strings.Contains(msg, "user 101 deposited") {
+			t.Errorf("message did not dump captured events:\n%s", msg)
+		}
+	})
+
+	t.Run("fails when regex is invalid", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertContractLogMessage(tb, meta, "/[unclosed/") {
+			t.Fatal("assertion passed with invalid regex")
+		}
+		if !strings.Contains(tb.Output(), "invalid regular expression") {
+			t.Errorf("message did not report invalid regex:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("fails when transaction has no diagnostic events", func(t *testing.T) {
+		t.Parallel()
+
+		emptyMeta := diagnosticMeta(t, pinChanges(t, testDiagnosticLedger))
+		tb := faketb.New()
+		if focus.AssertContractLogMessage(tb, emptyMeta, "hello") {
+			t.Fatal("assertion passed on empty diagnostic stream")
+		}
+		if !strings.Contains(tb.Output(), "emitted no diagnostic events") {
+			t.Errorf("message did not report empty events:\n%s", tb.Output())
+		}
+	})
 }

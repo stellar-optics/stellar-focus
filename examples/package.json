@@ -1,0 +1,28 @@
+{
+  "name": "stellar-focus-lifecycle-example",
+  "version": "1.0.0",
+  "description": "Full lifecycle example using Stellar SDK on testnet",
+  "main": "dist/lifecycle.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/lifecycle.js",
+    "dev": "ts-node lifecycle.ts"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "testnet",
+    "lifecycle"
+  ],
+  "author": "stellar-optics",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}

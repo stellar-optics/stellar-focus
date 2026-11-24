@@ -104,8 +104,8 @@ func TestAssertEntryCreatedEmptyMeta(t *testing.T) {
 func TestAssertEntryModified(t *testing.T) {
 	t.Parallel()
 
-	before := trustlineEntryValue(t, testDest, "USDC", 100, 1000)
-	after := trustlineEntryValue(t, testDest, "USDC", 500, 1000)
+	before := trustlineEntryValue(t, 100, 1000)
+	after := trustlineEntryValue(t, 500, 1000)
 	key := ledgerKeyOf(t, after)
 
 	t.Run("passes for an update", func(t *testing.T) {
@@ -145,7 +145,7 @@ func TestAssertEntryModified(t *testing.T) {
 func TestAssertEntryDeleted(t *testing.T) {
 	t.Parallel()
 
-	trustline := trustlineEntryValue(t, testDest, "USDC", 100, 1000)
+	trustline := trustlineEntryValue(t, 100, 1000)
 	key := ledgerKeyOf(t, trustline)
 
 	t.Run("passes for a removal", func(t *testing.T) {
@@ -174,6 +174,151 @@ func TestAssertEntryDeleted(t *testing.T) {
 			t.Errorf("message does not name the wanted entry:\n%s", msg)
 		}
 	})
+}
+
+func TestAssertLedgerEntryState(t *testing.T) {
+	t.Parallel()
+
+	acct := accountEntryValue(t, testDest, 10_0000000, xdr.NewThreshold(1, 0, 0, 0))
+	key := ledgerKeyOf(t, acct)
+	_, lensKey, err := focus.Encode(key, "LedgerKey")
+	if err != nil {
+		t.Fatalf("encoding the key: %v", err)
+	}
+
+	t.Run("created accepts every key form", func(t *testing.T) {
+		t.Parallel()
+
+		meta := metaV2(t, []xdr.LedgerEntryChange{createdChange(acct)})
+		forms := []focus.Value{key, acct, mustMarshal(t, key), lensKey, testDest}
+		for _, form := range forms {
+			t.Run("", func(t *testing.T) {
+				t.Parallel()
+				tb := faketb.New()
+				if !focus.AssertLedgerEntryState(tb, meta, form, focus.StateCreated) {
+					t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+				}
+			})
+		}
+	})
+
+	t.Run("restored counts as created", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertLedgerEntryState(tb, metaV2(t, []xdr.LedgerEntryChange{restoredChange(acct)}), key, focus.StateCreated) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("updated", func(t *testing.T) {
+		t.Parallel()
+
+		before := trustlineEntryValue(t, 100, 1000)
+		after := trustlineEntryValue(t, 500, 1000)
+		key := ledgerKeyOf(t, after)
+		meta := metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(after)})
+		tb := faketb.New()
+		if !focus.AssertLedgerEntryState(tb, meta, key, focus.StateUpdated) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("deleted", func(t *testing.T) {
+		t.Parallel()
+
+		trustline := trustlineEntryValue(t, 100, 1000)
+		key := ledgerKeyOf(t, trustline)
+		meta := metaV2(t, []xdr.LedgerEntryChange{stateChange(trustline), removedChange(key)})
+		tb := faketb.New()
+		if !focus.AssertLedgerEntryState(tb, meta, key, focus.StateDeleted) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("each state rejects the others", func(t *testing.T) {
+		t.Parallel()
+
+		key := ledgerKeyOf(t, acct)
+
+		tests := []struct {
+			name string
+			meta string
+			want focus.EntryStateTransition
+		}{
+			{"created entry is not updated", metaV2(t, []xdr.LedgerEntryChange{createdChange(acct)}), focus.StateUpdated},
+			{"updated entry is not deleted", metaV2(t, []xdr.LedgerEntryChange{stateChange(acct), updatedChange(acct)}), focus.StateDeleted},
+			{"deleted entry is not created", metaV2(t, []xdr.LedgerEntryChange{stateChange(acct), removedChange(key)}), focus.StateCreated},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				tb := faketb.New()
+				if focus.AssertLedgerEntryState(tb, tc.meta, key, tc.want) {
+					t.Fatal("assertion passed for the wrong state")
+				}
+				msg, err := tb.Message()
+				if err != nil {
+					t.Fatalf("%v", err)
+				}
+				if !strings.Contains(msg, "no ledger entry was "+tc.want.String()) {
+					t.Errorf("message does not name the wanted transition:\n%s", msg)
+				}
+			})
+		}
+	})
+}
+
+// TestAssertLedgerEntryStateFailureMessage checks that a miss names the entry
+// that was wanted and shows what the transaction did instead.
+func TestAssertLedgerEntryStateFailureMessage(t *testing.T) {
+	t.Parallel()
+
+	before := accountEntryValue(t, testSource, 100_0000000, xdr.NewThreshold(1, 0, 0, 0))
+	after := accountEntryValue(t, testSource, 90_0000000, xdr.NewThreshold(1, 0, 0, 0))
+	meta := metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(after)})
+	key := ledgerKeyOf(t, after)
+
+	tb := faketb.New()
+	if focus.AssertLedgerEntryState(tb, meta, key, focus.StateCreated) {
+		t.Fatal("assertion passed for an entry that was only modified")
+	}
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	for _, want := range []string{
+		"AssertLedgerEntryState: no ledger entry was created for account GCJNH…ZST6",
+		"ledger changes present (2)",
+		"[0] before",
+		"[1] modified",
+		"1000000000 (100.0000000 XLM)",
+		"900000000 (90.0000000 XLM)",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message does not contain %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestAssertLedgerEntryStateEmptyMeta(t *testing.T) {
+	t.Parallel()
+
+	acct := accountEntryValue(t, testDest, 10_0000000, xdr.NewThreshold(1, 0, 0, 0))
+	key := ledgerKeyOf(t, acct)
+
+	tb := faketb.New()
+	if focus.AssertLedgerEntryState(tb, metaV2(t), key, focus.StateCreated) {
+		t.Fatal("assertion passed with no ledger changes at all")
+	}
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(msg, "carries no ledger entry changes") {
+		t.Errorf("message does not say the meta has no changes:\n%s", msg)
+	}
 }
 
 // TestLedgerKeyRendering covers the entry kinds a failure listing may have to

@@ -1,148 +1,110 @@
-// JUnit XML output formatter for focus verify.
-//
-// Generates JUnit XML compatible with CI/test result parsers.
-// See: https://testng.org/doc/jet.html#writingtestngxml
 package cli
 
+// JUnit XML output for focus verify.
+//
+// CI systems parse JUnit XML to draw inline annotations and failure charts, so
+// the document has to be schema-shaped rather than merely well-formed: a
+// <testsuites> root, a <testsuite> per run and a <testcase> per fixture, with
+// drift reported as a <failure>, an uncheckable fixture as an <error>, and a
+// fixture that was not checked as <skipped>.
+
 import (
+	"encoding/xml"
 	"fmt"
-	"os"
+	"io"
+	"strings"
 )
 
-// JUnitWriter writes JUnit XML output to a writer.
-type JUnitWriter struct {
-	file *os.File
+// junitTestSuites is the document root.
+type junitTestSuites struct {
+	XMLName xml.Name         `xml:"testsuites"`
+	Suites  []junitTestSuite `xml:"testsuite"`
 }
 
-// NewJUnitWriter creates a new JUnitWriter that writes to the given file.
-// If file is nil, output goes to stderr.
-func NewJUnitWriter(file *os.File) *JUnitWriter {
-	if file == nil {
-		return &JUnitWriter{file: nil}
-	}
-	return &JUnitWriter{file: file}
+// junitTestSuite is one verification run.
+type junitTestSuite struct {
+	Name     string          `xml:"name,attr"`
+	Tests    int             `xml:"tests,attr"`
+	Failures int             `xml:"failures,attr"`
+	Errors   int             `xml:"errors,attr"`
+	Skipped  int             `xml:"skipped,attr"`
+	Time     string          `xml:"time,attr"`
+	Cases    []junitTestCase `xml:"testcase"`
 }
 
-// WriteTestSuite writes a complete JUnit testsuite element.
-//
-// Parameters:
-//   - name: the test suite name
-//   - tests: total number of tests
-//   - failures: total number of failures
-//   - testsRun: number of tests that were actually run/executed
-func (w *JUnitWriter) WriteTestSuite(name string, tests, failures, testsRun int) error {
-	var s string
-	if w.file == nil {
-		s = fmt.Sprintf("<testsuite name=\"%s\" tests=\"%d\" failures=\"%d\" tests-run=\"%d\">\n", name, tests, failures, testsRun)
-	} else {
-		s = fmt.Sprintf("<testsuite name=\"%s\" tests=\"%d\" failures=\"%d\" tests-run=\"%d\">\n", name, tests, failures, testsRun)
-	}
-	if w.file == nil {
-		_, _ = fmt.Fprint(os.Stderr, s)
-	} else {
-		_, _ = fmt.Fprint(w.file, s)
-	}
-	return nil
+// junitTestCase is one fixture.
+type junitTestCase struct {
+	Name      string        `xml:"name,attr"`
+	Classname string        `xml:"classname,attr"`
+	Time      string        `xml:"time,attr"`
+	Failure   *junitMessage `xml:"failure,omitempty"`
+	Error     *junitMessage `xml:"error,omitempty"`
+	Skipped   *junitMessage `xml:"skipped,omitempty"`
 }
 
-// WriteTestCase writes a single JUnit testcase element.
-//
-// Parameters:
-//   - name: the test case name
-//   - classname: the class name (typically the fixture path or test identifier)
-//   - time: the execution time in seconds (can be "0" if unknown)
-//   - failureMessage: optional failure message; empty if test passed
-func (w *JUnitWriter) WriteTestCase(name, classname, time, failureMessage string) error {
-	var s string
-	if w.file == nil {
-		if failureMessage == "" {
-			s = fmt.Sprintf("<testcase name=\"%s\" classname=\"%s\" time=\"%s\"/>\n", name, classname, time)
-		} else {
-			s = fmt.Sprintf("<testcase name=\"%s\" classname=\"%s\" time=\"%s\"><failure message=\"%s\"/></testcase>\n", name, classname, time, failureMessage)
+// junitMessage is the body of a failure, error or skip.
+type junitMessage struct {
+	Message string `xml:"message,attr"`
+	Text    string `xml:",chardata"`
+}
+
+// writeJUnit renders a verification report as JUnit XML.
+func writeJUnit(w io.Writer, report *VerifyReport) error {
+	suite := junitTestSuite{
+		Name:  "focus-verify",
+		Tests: len(report.Results),
+		Time:  "0",
+	}
+
+	for _, item := range report.Results {
+		testCase := junitTestCase{
+			Name:      item.Path,
+			Classname: "focus.verify",
+			Time:      "0",
 		}
-	} else {
-		if failureMessage == "" {
-			s = fmt.Sprintf("<testcase name=\"%s\" classname=\"%s\" time=\"%s\"/>\n", name, classname, time)
-		} else {
-			s = fmt.Sprintf("<testcase name=\"%s\" classname=\"%s\" time=\"%s\"><failure message=\"%s\"/></testcase>\n", name, classname, time, failureMessage)
+
+		switch item.Status {
+		case statusDrifted:
+			suite.Failures++
+			testCase.Failure = &junitMessage{
+				Message: "fixture drifted from the chain",
+				Text:    describeDiffs(item),
+			}
+		case statusErrored:
+			suite.Errors++
+			testCase.Error = &junitMessage{Message: item.Error}
+		case statusSkipped, statusFiltered:
+			suite.Skipped++
+			testCase.Skipped = &junitMessage{Message: item.Error}
 		}
-	}
-	if w.file == nil {
-		_, _ = fmt.Fprint(os.Stderr, s)
-	} else {
-		_, _ = fmt.Fprint(w.file, s)
-	}
-	return nil
-}
 
-// WriteEndTestSuite writes the closing testsuite element.
-func (w *JUnitWriter) WriteEndTestSuite() error {
-	var s string
-	if w.file == nil {
-		s = "</testsuite>\n"
-	} else {
-		s = "</testsuite>\n"
+		suite.Cases = append(suite.Cases, testCase)
 	}
-	if w.file == nil {
-		_, _ = fmt.Fprint(os.Stderr, s)
-	} else {
-		_, _ = fmt.Fprint(w.file, s)
-	}
-	return nil
-}
 
-// Close closes the underlying file if one was provided.
-func (w *JUnitWriter) Close() error {
-	if w.file != nil {
-		return w.file.Close()
-	}
-	return nil
-}
+	document := junitTestSuites{Suites: []junitTestSuite{suite}}
 
-// WriteSummary writes a complete JUnit XML report for focus verify results.
-// This is a convenience method that writes the full XML structure.
-func WriteSummary(w *JUnitWriter, checked, matched, drifted, skipped int) error {
-	if err := w.WriteTestSuite("focus-verify", checked, drifted, checked); err != nil {
+	encoder := xml.NewEncoder(w)
+	encoder.Indent("", "  ")
+	if err := encoder.Encode(document); err != nil {
+		return fmt.Errorf("rendering the JUnit report: %w", err)
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
 		return err
 	}
-
-	// Write test cases
-	for i := 0; i < checked; i++ {
-		// We don't have individual test case names here, so we'll write a placeholder
-		// In a full implementation, each fixture would be a test case
-		if err := w.WriteTestCase("fixture-"+fmt.Sprintf("%d", i), "focus-verify", "0", ""); err != nil {
-			return err
-		}
-	}
-
-	if err := w.WriteEndTestSuite(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
-// WriteReport writes a complete JUnit XML report to the given writer/file.
-// This is the main entry point for generating JUnit XML output from focus verify.
-func WriteReport(w *JUnitWriter, checked, matched, drifted, skipped int) error {
-	if err := w.WriteTestSuite("focus-verify", checked, drifted, checked); err != nil {
-		return err
+// describeDiffs renders the differences of a drifted fixture for the failure
+// body, one line per changed field.
+func describeDiffs(item VerifyItemResult) string {
+	if len(item.Diffs) == 0 {
+		return "the fixture no longer matches the chain"
 	}
 
-	// Write test cases - each checked fixture becomes a test case
-	for i := 0; i < checked; i++ {
-		failureMsg := ""
-		if drifted > 0 && i < drifted {
-			failureMsg = "Fixture drifted from chain"
-		}
-		if err := w.WriteTestCase("fixture-"+fmt.Sprintf("%d", i), "focus-verify", "0", failureMsg); err != nil {
-			return err
-		}
+	var b strings.Builder
+	b.WriteString("the fixture no longer matches the chain:\n")
+	for _, diff := range item.Diffs {
+		fmt.Fprintf(&b, "%s %s: %v -> %v\n", diff.Path, diff.Op, diff.Before, diff.After)
 	}
-
-	if err := w.WriteEndTestSuite(); err != nil {
-		return err
-	}
-
-	return nil
+	return b.String()
 }

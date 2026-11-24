@@ -2,11 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/internal/fakesource"
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
@@ -15,15 +22,26 @@ import (
 
 const testHash = "2b2e276a8f99a2927580eca2c8d665c0adaef9526476f5549269798380a66648"
 
+// lastSourceKind records the kind of source the command asked for, so a test
+// can check that --source reached the source factory.
+var lastSourceKind string
+
 // withFake swaps the capture source and the clock so the commands run offline
 // and produce byte-stable output.
 func withFake(t *testing.T, src *fakesource.Source) {
 	t.Helper()
 
 	originalSource, originalNow := newSource, now
-	newSource = func(string, string, time.Duration) capture.Source { return src }
+	newSource = func(kind, _, _ string, _ time.Duration) capture.Source {
+		lastSourceKind = kind
+		return src
+	}
 	now = func() time.Time { return time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC) }
 	t.Cleanup(func() { newSource, now = originalSource, originalNow })
+
+	// The verification cache is a local artifact, so a test run keeps it in
+	// a temporary directory rather than leaving one in the working tree.
+	t.Setenv("FOCUS_VERIFY_CACHE", filepath.Join(t.TempDir(), "verify-cache.json"))
 }
 
 func run(t *testing.T, args ...string) (stdout, stderr string, err error) {
@@ -35,7 +53,7 @@ func run(t *testing.T, args ...string) (stdout, stderr string, err error) {
 
 func fixtureXDR(t *testing.T, name string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+	b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "fuzz", "testdata", name))
 	if err != nil {
 		t.Fatalf("reading %s: %v", name, err)
 	}
@@ -52,6 +70,94 @@ func sourceWithTx(t *testing.T) *fakesource.Source {
 			Ledger: 1234, TxHash: testHash},
 	}
 	return src
+}
+
+func TestCaptureSimulateWritesTheResponse(t *testing.T) {
+	src := fakesource.New(capture.NetworkTestnet, "https://fake.example")
+	src.Simulations["envelopeXDR"] = &protocol.SimulateTransactionResponse{
+		LatestLedger:   777,
+		MinResourceFee: 42,
+	}
+	withFake(t, src)
+	dir := t.TempDir()
+
+	stdout, _, err := run(t, "capture", "simulate", "envelopeXDR", "--out", dir)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	path := filepath.Join(dir, "simulation.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("simulation capture was not written: %v", err)
+	}
+	loaded, err := capture.LoadCaptureSimulation(path)
+	if err != nil {
+		t.Fatalf("LoadCaptureSimulation: %v", err)
+	}
+	if loaded.Resp.LatestLedger != 777 || loaded.Resp.MinResourceFee != 42 {
+		t.Errorf("recorded response is wrong: %+v", loaded.Resp)
+	}
+	if loaded.Request == nil || loaded.Request.Transaction != "envelopeXDR" {
+		t.Errorf("recorded request is wrong: %+v", loaded.Request)
+	}
+	if !strings.Contains(stdout, "wrote") {
+		t.Errorf("simulate printed nothing useful:\n%s", stdout)
+	}
+}
+
+func TestCaptureWASMWritesBinaryAndMetadata(t *testing.T) {
+	const contractID = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	wasm := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	sum := sha256.Sum256(wasm)
+	var hash xdr.Hash
+	copy(hash[:], sum[:])
+
+	entry := xdr.LedgerEntryData{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.ContractCodeEntry{
+			Ext:  xdr.ContractCodeEntryExt{V: 0},
+			Hash: hash,
+			Code: wasm,
+		},
+	}
+	raw, err := entry.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshalling entry: %v", err)
+	}
+
+	key, err := capture.ContractCodeKey(contractID)
+	if err != nil {
+		t.Fatalf("ContractCodeKey: %v", err)
+	}
+	src := fakesource.New(capture.NetworkTestnet, "https://fake.example")
+	src.Entries[key] = []capture.Record{{
+		Name: "wasm", Type: "ContractCode", Ledger: 55,
+		XDR: base64.StdEncoding.EncodeToString(raw),
+	}}
+	withFake(t, src)
+	dir := t.TempDir()
+
+	stdout, _, err := run(t, "capture", "wasm", contractID, "--out", dir)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	metadataPath, wasmPath := (&capture.WASMCapture{ContractID: contractID}).Paths(dir)
+	for _, path := range []string{metadataPath, wasmPath} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s was not written: %v", path, err)
+		}
+	}
+	saved, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("reading saved WASM: %v", err)
+	}
+	if string(saved) != string(wasm) {
+		t.Error("saved WASM differs from the captured bytes")
+	}
+	if !strings.Contains(stdout, "wrote") {
+		t.Errorf("wasm printed nothing useful:\n%s", stdout)
+	}
 }
 
 func TestCaptureTxWritesFixtures(t *testing.T) {
@@ -81,6 +187,36 @@ func TestCaptureTxWritesFixtures(t *testing.T) {
 	}
 }
 
+// TestCaptureUsesTheChosenSource checks that --source reaches the source
+// factory, which is the whole point of the flag.
+func TestCaptureUsesTheChosenSource(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"the default", nil, "rpc"},
+		{"rpc", []string{"--source", "rpc"}, "rpc"},
+		{"horizon", []string{"--source", "horizon"}, "horizon"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearFocusEnv(t)
+			withFake(t, sourceWithTx(t))
+			lastSourceKind = ""
+
+			args := append([]string{"capture", "tx", testHash, "--out", t.TempDir()}, tc.args...)
+			if _, _, err := run(t, args...); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if lastSourceKind != tc.want {
+				t.Errorf("the command asked for the %q source, want %q", lastSourceKind, tc.want)
+			}
+		})
+	}
+}
+
 func TestCaptureRespectsPrefix(t *testing.T) {
 	withFake(t, sourceWithTx(t))
 	dir := t.TempDir()
@@ -90,6 +226,24 @@ func TestCaptureRespectsPrefix(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "failed_swap_envelope.golden.json")); err != nil {
 		t.Errorf("prefixed fixture was not written: %v", err)
+	}
+}
+
+func TestCaptureMasksAddressesWhenRequested(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+	dir := t.TempDir()
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir, "--mask-addresses"); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	fixture, err := golden.Load(filepath.Join(dir, "envelope.golden.json"))
+	if err != nil {
+		t.Fatalf("loading masked fixture: %v", err)
+	}
+	if fixture.Captured == nil || !fixture.Captured.Anonymized {
+		t.Fatal("masked fixture provenance does not record anonymization")
+	}
+	if fixture.XDR == fixtureXDR(t, "tx_failed.env.txt") {
+		t.Fatal("--mask-addresses did not change the captured XDR")
 	}
 }
 
@@ -143,6 +297,219 @@ func TestVerifyReportsMatchingFixtures(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "ok") || !strings.Contains(stdout, "2 checked") {
 		t.Errorf("verify output is not a usable summary:\n%s", stdout)
+	}
+}
+
+// TestVerifyJSONFormatEmitsAReport is the reason the format exists: a
+// pipeline has to be able to read the result without parsing a terminal.
+func TestVerifyJSONFormatEmitsAReport(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+	dir := t.TempDir()
+
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+		t.Fatalf("capture failed: %v", err)
+	}
+
+	stdout, _, err := run(t, "verify", dir, "--format", "json")
+	if err != nil {
+		t.Fatalf("verify --format json failed: %v", err)
+	}
+
+	var report VerifyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+
+	if report.Total != 2 || report.Matched != 2 {
+		t.Errorf("report = %+v, want 2 fixtures and 2 matches", report)
+	}
+	if report.Drifted != 0 || report.Skipped != 0 || report.Errored != 0 {
+		t.Errorf("report counts drifted=%d skipped=%d errored=%d, want none",
+			report.Drifted, report.Skipped, report.Errored)
+	}
+	if len(report.Results) != 2 {
+		t.Fatalf("report has %d results, want 2:\n%s", len(report.Results), stdout)
+	}
+
+	for _, result := range report.Results {
+		if result.Status != statusMatched {
+			t.Errorf("%s has status %q, want %q", result.Path, result.Status, statusMatched)
+		}
+		if result.Type == "" {
+			t.Errorf("%s does not name the XDR type it holds", result.Path)
+		}
+		if !strings.HasSuffix(result.Path, ".golden.json") {
+			t.Errorf("%s is not a fixture path", result.Path)
+		}
+	}
+}
+
+// TestVerifyJSONFormatSuppressesTheHumanReport checks that the JSON is the
+// whole output: a document with a progress line mixed into it is not a
+// document.
+func TestVerifyJSONFormatSuppressesTheHumanReport(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+	dir := t.TempDir()
+
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+		t.Fatalf("capture failed: %v", err)
+	}
+
+	stdout, stderr, err := run(t, "verify", dir, "--format", "json")
+	if err != nil {
+		t.Fatalf("verify --format json failed: %v", err)
+	}
+
+	for _, unwanted := range []string{"checked:", "ok\n", "SKIP", "DRIFTED"} {
+		if strings.Contains(stdout, unwanted) {
+			t.Errorf("the JSON output contains human-readable text %q:\n%s", unwanted, stdout)
+		}
+	}
+	if stderr != "" {
+		t.Errorf("the JSON run wrote to stderr:\n%s", stderr)
+	}
+
+	var report VerifyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+}
+
+// TestVerifyJSONFormatNamesTheDriftedFields checks that a drifted fixture
+// says what changed, so a report can quote it.
+func TestVerifyJSONFormatNamesTheDriftedFields(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+	dir := t.TempDir()
+
+	if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+		t.Fatalf("capture failed: %v", err)
+	}
+
+	// The chain now returns something else for the same hash.
+	src.Transactions[testHash] = []capture.Record{
+		{Name: "envelope", Type: "TransactionEnvelope", XDR: fixtureXDR(t, "tx_success.env.txt"),
+			Ledger: 1234, TxHash: testHash},
+		{Name: "result", Type: "TransactionResult", XDR: fixtureXDR(t, "tx_failed.res.txt"),
+			Ledger: 1234, TxHash: testHash},
+	}
+
+	stdout, _, err := run(t, "verify", dir, "--format", "json")
+	if err == nil {
+		t.Fatal("verify reported success despite drift")
+	}
+	if code, _ := ExitCode(err); code != ExitDrift {
+		t.Errorf("exit code %d, want %d", code, ExitDrift)
+	}
+
+	var report VerifyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+	if report.Drifted != 1 {
+		t.Errorf("report counts %d drifted, want 1:\n%s", report.Drifted, stdout)
+	}
+
+	var drifted *VerifyItemResult
+	for i := range report.Results {
+		if report.Results[i].Status == statusDrifted {
+			drifted = &report.Results[i]
+		}
+	}
+	if drifted == nil {
+		t.Fatalf("no drifted fixture in the report:\n%s", stdout)
+	}
+	if drifted.DiffCount == 0 || len(drifted.DiffPaths) != drifted.DiffCount {
+		t.Errorf("drifted fixture reports %d differences and %d paths, want the same non-zero count:\n%s",
+			drifted.DiffCount, len(drifted.DiffPaths), stdout)
+	}
+	if drifted.Type != "TransactionEnvelope" {
+		t.Errorf("drifted fixture has type %q, want TransactionEnvelope", drifted.Type)
+	}
+}
+
+// TestVerifyJSONFormatKeepsTheExitCodes checks that the format changes what
+// is printed and nothing else: a CI job's pass and fail must not depend on
+// how the result is rendered.
+func TestVerifyJSONFormatKeepsTheExitCodes(t *testing.T) {
+	t.Run("drift", func(t *testing.T) {
+		src := sourceWithTx(t)
+		withFake(t, src)
+		dir := t.TempDir()
+
+		if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+			t.Fatalf("capture failed: %v", err)
+		}
+		src.Transactions[testHash] = driftedRecords(t)
+
+		_, _, err := run(t, "verify", dir, "--format", "json")
+		if err == nil {
+			t.Fatal("verify reported success despite drift")
+		}
+		if code, _ := ExitCode(err); code != ExitDrift {
+			t.Errorf("exit code %d, want %d", code, ExitDrift)
+		}
+	})
+
+	t.Run("uncheckable", func(t *testing.T) {
+		src := sourceWithTx(t)
+		withFake(t, src)
+		dir := t.TempDir()
+
+		if _, _, err := run(t, "capture", "tx", testHash, "--out", dir); err != nil {
+			t.Fatalf("capture failed: %v", err)
+		}
+		src.Err = errors.New("endpoint unreachable")
+
+		_, _, err := run(t, "verify", dir, "--format", "json")
+		if err == nil {
+			t.Fatal("verify reported success when no fixture could be checked")
+		}
+		if code, _ := ExitCode(err); code != ExitFailure {
+			t.Errorf("exit code %d, want %d", code, ExitFailure)
+		}
+	})
+}
+
+// TestVerifyJSONFormatReportsAFailedRun checks that a run that could not
+// check anything still produces a document: a pipeline that reads the
+// output should not have to handle an empty file.
+func TestVerifyJSONFormatReportsAFailedRun(t *testing.T) {
+	withFake(t, sourceWithTx(t))
+
+	stdout, _, err := run(t, "verify", t.TempDir(), "--format", "json")
+	if err == nil {
+		t.Fatal("verify succeeded with no fixtures to check")
+	}
+
+	var report VerifyReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, stdout)
+	}
+	if report.Error == "" {
+		t.Errorf("the report does not say what went wrong:\n%s", stdout)
+	}
+}
+
+// TestVerifyRejectsAnUnknownFormat checks that a typo is refused before any
+// work is done, and that it says what the choices are.
+func TestVerifyRejectsAnUnknownFormat(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	_, _, err := run(t, "verify", t.TempDir(), "--format", "yaml")
+	if err == nil {
+		t.Fatal("an unknown format was accepted")
+	}
+	if !IsUsage(err) {
+		t.Errorf("error %v is not a usage error", err)
+	}
+	if !strings.Contains(err.Error(), "text") || !strings.Contains(err.Error(), "json") {
+		t.Errorf("error does not name the formats there are: %v", err)
+	}
+	if src.Calls != 0 {
+		t.Errorf("the network was contacted %d time(s) for an invalid format", src.Calls)
 	}
 }
 
@@ -232,6 +599,157 @@ func TestUnknownNetworkIsRejectedBeforeAnyRequest(t *testing.T) {
 	}
 }
 
+// TestRefreshRewritesOnlyTheDecodedSection is the promise the command makes:
+// the XDR is the source of truth, so a refresh may not touch it.
+func TestRefreshRewritesOnlyTheDecodedSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.golden.json")
+
+	fixture := staleFixture(t)
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "refresh", dir)
+	if err != nil {
+		t.Fatalf("refresh failed: %v", err)
+	}
+	if !strings.Contains(stdout, "updated") {
+		t.Errorf("refresh did not report the update:\n%s", stdout)
+	}
+
+	refreshed, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("loading the refreshed fixture: %v", err)
+	}
+	if refreshed.XDR != fixture.XDR {
+		t.Error("the refresh changed the XDR")
+	}
+	if refreshed.Type != fixture.Type {
+		t.Errorf("the refresh changed the type: %q", refreshed.Type)
+	}
+	if refreshed.Description != fixture.Description {
+		t.Errorf("the refresh changed the description: %q", refreshed.Description)
+	}
+	if refreshed.Captured == nil || refreshed.Captured.TxHash != testHash {
+		t.Error("the refresh lost the capture provenance")
+	}
+	if strings.Contains(string(refreshed.Decoded), "stale") {
+		t.Errorf("the decoded section was not refreshed:\n%s", refreshed.Decoded)
+	}
+}
+
+// TestRefreshLeavesCurrentFixturesAlone checks that a refresh is safe to run
+// over a whole testdata directory: a fixture that is already current is not
+// rewritten, so the pull request stays empty.
+func TestRefreshLeavesCurrentFixturesAlone(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.golden.json")
+
+	fixture, err := golden.Build(fixtureXDR(t, "tx_failed.env.txt"), "TransactionEnvelope", "current", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+
+	stdout, _, err := run(t, "refresh", dir)
+	if err != nil {
+		t.Fatalf("refresh failed: %v", err)
+	}
+	if !strings.Contains(stdout, "unchanged") {
+		t.Errorf("refresh did not report the fixture as unchanged:\n%s", stdout)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("a current fixture was rewritten")
+	}
+}
+
+// TestRefreshDryRunChangesNothing checks that the dry run shows what would
+// change without touching a byte.
+func TestRefreshDryRunChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.golden.json")
+
+	fixture := staleFixture(t)
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+
+	stdout, _, err := run(t, "refresh", dir, "--dry-run")
+	if err != nil {
+		t.Fatalf("refresh --dry-run failed: %v", err)
+	}
+	if !strings.Contains(stdout, "would change") {
+		t.Errorf("the dry run did not say what would change:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "- ") || !strings.Contains(stdout, "+ ") {
+		t.Errorf("the dry run did not show the difference:\n%s", stdout)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("the dry run wrote to the fixture")
+	}
+}
+
+// TestRefreshReportsAFixtureItCannotDecode checks that a broken fixture is
+// reported rather than skipped: a refresh that quietly passes over a file it
+// could not read is a refresh that leaves the file stale.
+func TestRefreshReportsAFixtureItCannotDecode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.golden.json")
+
+	fixture := staleFixture(t)
+	fixture.XDR = "!!! not xdr !!!"
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stdout, stderr, err := run(t, "refresh", dir)
+	if err == nil {
+		t.Fatal("refresh succeeded on a fixture it could not decode")
+	}
+	if code, _ := ExitCode(err); code != ExitFailure {
+		t.Errorf("refresh exited %d, want %d", code, ExitFailure)
+	}
+	if !strings.Contains(stderr, "ERROR") {
+		t.Errorf("the broken fixture was not reported:\n%s%s", stdout, stderr)
+	}
+}
+
+// staleFixture builds a fixture whose decoded section is out of date, as it
+// is after the formatter changes.
+func staleFixture(t *testing.T) *golden.Fixture {
+	t.Helper()
+
+	fixture, err := golden.Build(fixtureXDR(t, "tx_failed.env.txt"), "TransactionEnvelope", "stale",
+		golden.NewProvenance(capture.NetworkTestnet, "https://fake.example", 1234, testHash,
+			time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)))
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	fixture.Decoded = json.RawMessage(`{"stale": true}`)
+	return fixture
+}
+
 func TestVersionCommand(t *testing.T) {
 	stdout, _, err := run(t, "version")
 	if err != nil {
@@ -239,6 +757,26 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if strings.TrimSpace(stdout) == "" {
 		t.Error("version printed nothing")
+	}
+}
+
+func TestLedgerKeyAccountCommand(t *testing.T) {
+	const address = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+	wantKey, err := capture.NewAccountLedgerKey(address)
+	if err != nil {
+		t.Fatalf("NewAccountLedgerKey() error = %v", err)
+	}
+	want, err := capture.EncodeLedgerKey(wantKey)
+	if err != nil {
+		t.Fatalf("EncodeLedgerKey() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "ledger-key", "account", address)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if strings.TrimSpace(stdout) != want {
+		t.Fatalf("ledger-key output = %q, want %q", strings.TrimSpace(stdout), want)
 	}
 }
 
@@ -251,5 +789,325 @@ func TestBareInvocationPrintsHelp(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("help does not mention %q", want)
 		}
+	}
+}
+
+// TestLintAcceptsACleanFixture checks the ordinary case: a fixture nobody
+// has touched is clean, and the command says so.
+func TestLintAcceptsACleanFixture(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "envelope.golden.json")
+
+	fixture, err := golden.Build(fixtureXDR(t, "tx_failed.env.txt"), "TransactionEnvelope", "clean", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	stdout, _, err := run(t, "lint", dir)
+	if err != nil {
+		t.Fatalf("lint reported a problem with a clean fixture: %v", err)
+	}
+	if !strings.Contains(stdout, "ok") {
+		t.Errorf("lint did not report the fixture as clean:\n%s", stdout)
+	}
+}
+
+// TestLintReportsCorruptedFixtures is the reason the command exists: a
+// fixture damaged by a hand-edit or a bad merge is caught here rather than
+// when a test fails weeks later.
+func TestLintReportsCorruptedFixtures(t *testing.T) {
+	dir := t.TempDir()
+
+	broken := map[string]string{
+		"invalid-json.golden.json": `{"format": "focus/v1", "type": "TransactionEnvelope",}`,
+		"bad-base64.golden.json":   `{"format": "focus/v1", "type": "TransactionEnvelope", "xdr": "!!! not base64 !!!"}`,
+		"wrong-type.golden.json":   `{"format": "focus/v1", "type": "TransactionResult", "xdr": "AAAA"}`,
+		"old-format.golden.json":   `{"format": "focus/v0", "type": "TransactionEnvelope", "xdr": "AAAA"}`,
+	}
+	for name, content := range broken {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatalf("writing %s: %v", name, err)
+		}
+	}
+
+	stdout, stderr, err := run(t, "lint", dir)
+	if err == nil {
+		t.Fatal("lint succeeded on corrupted fixtures")
+	}
+	if code, _ := ExitCode(err); code != ExitFailure {
+		t.Errorf("lint exited %d, want %d", code, ExitFailure)
+	}
+	for _, name := range []string{"invalid-json", "bad-base64", "wrong-type", "old-format"} {
+		if !strings.Contains(stderr, name) {
+			t.Errorf("the broken fixture %s was not reported:\n%s%s", name, stdout, stderr)
+		}
+	}
+	// The message must say what is wrong, not only that something is.
+	if !strings.Contains(stderr, "not valid base64") {
+		t.Errorf("the problems are not explained:\n%s", stderr)
+	}
+}
+
+// TestLintReportsAnEmptyDirectory checks that the command says so rather
+// than passing a check that never ran.
+func TestLintReportsAnEmptyDirectory(t *testing.T) {
+	_, _, err := run(t, "lint", t.TempDir())
+	if err == nil {
+		t.Fatal("lint succeeded with no fixtures to check")
+	}
+	if !strings.Contains(err.Error(), "no fixture files") {
+		t.Errorf("error is not specific: %v", err)
+	}
+}
+
+// TestLintFindsNestedFixtures checks that the same nested fixtures verify
+// finds are linted too: a fixture in a subdirectory is still a fixture.
+func TestLintFindsNestedFixtures(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "soroban")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(dir, "envelope.golden.json"),
+		filepath.Join(nested, "result.golden.json"),
+	} {
+		fixture, err := golden.Build(fixtureXDR(t, "tx_failed.env.txt"), "TransactionEnvelope", "clean", nil)
+		if err != nil {
+			t.Fatalf("Build() error = %v", err)
+		}
+		if err := golden.Save(path, fixture); err != nil {
+			t.Fatalf("Save() error = %v", err)
+		}
+	}
+
+	stdout, stderr, err := run(t, "lint", dir)
+	if err != nil {
+		t.Fatalf("lint reported a problem with clean fixtures: %v\n%s", err, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 clean") {
+		t.Errorf("the nested fixture was not linted:\n%s", stdout)
+	}
+}
+
+// mustWriteFixture writes an empty file, for tests that care about which
+// paths a scan finds rather than what is in them.
+func mustWriteFixture(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+}
+
+// TestCollectFixturesFindsNestedDirectories is the case the old scan missed:
+// a suite that keeps its fixtures in subdirectories must have all of them
+// checked, not just the ones at the top.
+func TestCollectFixturesFindsNestedDirectories(t *testing.T) {
+	dir := t.TempDir()
+
+	top := filepath.Join(dir, "envelope.golden.json")
+	nested := filepath.Join(dir, "soroban", "result.golden.json")
+	deeper := filepath.Join(dir, "envelopes", "payments", "v2.golden.json")
+	mustWriteFixture(t, top)
+	mustWriteFixture(t, nested)
+	mustWriteFixture(t, deeper)
+	mustWriteFixture(t, filepath.Join(dir, "notes.txt"))
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+
+	found := map[string]bool{}
+	for _, path := range paths {
+		found[path] = true
+	}
+	for _, want := range []string{top, nested, deeper} {
+		if !found[want] {
+			t.Errorf("%s was not collected:\n%v", want, paths)
+		}
+	}
+	if found[filepath.Join(dir, "notes.txt")] {
+		t.Errorf("a file that is not a fixture was collected:\n%v", paths)
+	}
+}
+
+// TestCollectFixturesSkipsHiddenDirectories checks that version-control and
+// editor directories are left alone.
+func TestCollectFixturesSkipsHiddenDirectories(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, filepath.Join(dir, ".git", "hidden.golden.json"))
+	mustWriteFixture(t, filepath.Join(dir, ".scratch", "hidden.golden.json"))
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursFocusignore checks that a suite can keep
+// throwaway fixtures next to the real ones without them being checked.
+func TestCollectFixturesHonoursFocusignore(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	ignored := filepath.Join(dir, "bench", "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, ignored)
+
+	ignoreFile := filepath.Join(dir, ".focusignore")
+	if err := os.WriteFile(ignoreFile,
+		[]byte("# scratch fixtures\nbench\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursFocusignoreInTheWorkingDirectory checks that the
+// ignore file at the root of a project applies to a relative scan.
+func TestCollectFixturesHonoursFocusignoreInTheWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join("testdata", "envelope.golden.json")
+	ignored := filepath.Join("testdata", "bench", "envelope.golden.json")
+	mustWriteFixture(t, filepath.Join(dir, kept))
+	mustWriteFixture(t, filepath.Join(dir, ignored))
+
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"),
+		[]byte("testdata/bench\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	t.Chdir(dir)
+
+	paths, err := collectFixtures([]string{"testdata"})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesHonoursWildcardIgnoreRules checks that a rule may carry
+// wildcards, and that it then matches the path it names.
+func TestCollectFixturesHonoursWildcardIgnoreRules(t *testing.T) {
+	dir := t.TempDir()
+
+	kept := filepath.Join(dir, "envelope.golden.json")
+	ignored := filepath.Join(dir, "bench", "envelope.golden.json")
+	mustWriteFixture(t, kept)
+	mustWriteFixture(t, ignored)
+
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"),
+		[]byte("be*\n"), 0o644); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	paths, err := collectFixtures([]string{dir})
+	if err != nil {
+		t.Fatalf("collectFixtures(dir): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != kept {
+		t.Errorf("scan = %v, want only %s", paths, kept)
+	}
+}
+
+// TestCollectFixturesMatchesGlobPatterns checks that a pattern reaches into
+// nested directories.
+func TestCollectFixturesMatchesGlobPatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	top := filepath.Join(dir, "envelope.golden.json")
+	nested := filepath.Join(dir, "soroban", "result.golden.json")
+	mustWriteFixture(t, top)
+	mustWriteFixture(t, nested)
+
+	paths, err := collectFixtures([]string{filepath.Join(dir, "**", "*.golden.json")})
+	if err != nil {
+		t.Fatalf("collectFixtures(pattern): %v", err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("pattern matched %v, want both fixtures", paths)
+	}
+
+	// A pattern without "**" stays in one directory.
+	paths, err = collectFixtures([]string{filepath.Join(dir, "*.golden.json")})
+	if err != nil {
+		t.Fatalf("collectFixtures(pattern): %v", err)
+	}
+	if len(paths) != 1 || paths[0] != top {
+		t.Errorf("pattern matched %v, want only %s", paths, top)
+	}
+}
+
+// TestCollectFixturesReportsAMissingPath checks that a path that is not
+// there is an error rather than a silent no-op.
+func TestCollectFixturesReportsAMissingPath(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := collectFixtures([]string{filepath.Join(dir, "nope")}); err == nil {
+		t.Error("a missing path was accepted")
+	}
+}
+
+// TestVerifyChecksNestedFixtures is the end of the story: a suite whose
+// fixtures live in subdirectories is checked in full.
+func TestVerifyChecksNestedFixtures(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "soroban")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("creating %s: %v", nested, err)
+	}
+	captureIntoDir(t, dir)
+	captureIntoDir(t, nested)
+
+	stdout, stderr, err := run(t, "verify", dir)
+	if err != nil {
+		t.Fatalf("verify: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "4 checked: 4 ok") {
+		t.Errorf("nested fixtures were not checked:\n%s", stdout)
+	}
+}
+
+// TestVerifyAcceptsAPattern checks that a pattern is a valid argument.
+func TestVerifyAcceptsAPattern(t *testing.T) {
+	src := sourceWithTx(t)
+	withFake(t, src)
+
+	dir := t.TempDir()
+	captureIntoDir(t, dir)
+
+	stdout, stderr, err := run(t, "verify", filepath.Join(dir, "*.golden.json"))
+	if err != nil {
+		t.Fatalf("verify: %v\nstderr: %s", err, stderr)
+	}
+	if !strings.Contains(stdout, "2 checked: 2 ok") {
+		t.Errorf("pattern did not match the fixtures:\n%s", stdout)
 	}
 }

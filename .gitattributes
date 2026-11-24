@@ -1,0 +1,4 @@
+# Fixtures and testdata are compared byte for byte across platforms, so they
+# are checked out with LF everywhere: a Windows clone must not turn a fixture
+# into CRLF and make a golden test fail for a reason unrelated to the value.
+* text=auto eol=lf

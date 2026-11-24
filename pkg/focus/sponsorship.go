@@ -2,6 +2,7 @@ package focus
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -88,12 +89,12 @@ func AssertEntrySponsoredBy(t TB, meta Value, targetEntry, sponsorAccount Value)
 
 	if !seen {
 		t.Errorf("%s: the transaction made no ledger change to %s\n\n%s",
-			assertion, key.label, indent(describeChanges(changes), "  "))
+			assertion, key.label, indent(describeChanges(changes)))
 		return false
 	}
 	if removed || entry == nil {
 		t.Errorf("%s: the transaction removed %s, which carries no sponsorship to inspect\n\n%s",
-			assertion, key.label, indent(describeEntryChanges(changes, key.keyID), "  "))
+			assertion, key.label, indent(describeEntryChanges(changes, key.keyID)))
 		return false
 	}
 
@@ -108,7 +109,7 @@ func AssertEntrySponsoredBy(t TB, meta Value, targetEntry, sponsorAccount Value)
 	t.Errorf("%s: %s is %s, want sponsored by %s\n\n  %s\n\n%s",
 		assertion, key.label, after.describe(), shorten(want),
 		describeSponsorshipTransition(before, after),
-		indent(describeEntryChanges(changes, key.keyID), "  "))
+		indent(describeEntryChanges(changes, key.keyID)))
 	return false
 }
 
@@ -182,4 +183,124 @@ func describeEntryChanges(changes []ledgerChange, keyID string) string {
 		return "no ledger entry change in this meta touches that entry"
 	}
 	return describeChanges(matching)
+}
+
+// AssertSponsorshipTransition verifies that a ledger entry matching targetKey underwent
+// a sponsorship transition from wantPrevSponsor to wantNewSponsor.
+//
+// An empty string or "none" for wantPrevSponsor asserts that the entry was previously unsponsored.
+// An empty string or "none" for wantNewSponsor asserts that the entry's sponsorship was revoked (now unsponsored).
+func AssertSponsorshipTransition(t TestingT, metaInput any, targetKey string, wantPrevSponsor, wantNewSponsor string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertSponsorshipTransition"
+	_ = newConfig(opts...)
+
+	key, hasKey := resolveLedgerKey(t, assertion, targetKey)
+	changes, ok := ledgerChanges(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+
+	normalizeSponsor := func(s string) (string, bool) {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.EqualFold(s, "none") {
+			return "", true
+		}
+		addr, ok := resolveAccount(t, assertion, "sponsor", s)
+		return addr, ok
+	}
+
+	expectedPrev, ok := normalizeSponsor(wantPrevSponsor)
+	if !ok {
+		return false
+	}
+	expectedNew, ok := normalizeSponsor(wantNewSponsor)
+	if !ok {
+		return false
+	}
+
+	var (
+		before sponsorshipState
+		after  sponsorshipState
+		seen   bool
+		keyID  string
+	)
+	if hasKey {
+		keyID = key.keyID
+	} else {
+		keyID = targetKey
+	}
+
+	if !guard(t, assertion, func() {
+		for _, c := range changes {
+			matches := (hasKey && c.keyID == key.keyID) || c.keyID == targetKey || c.account == targetKey
+			if !matches {
+				continue
+			}
+			seen = true
+			if c.keyID != "" {
+				keyID = c.keyID
+			}
+			switch c.kind {
+			case xdr.LedgerEntryChangeTypeLedgerEntryState:
+				if state, has := entrySponsorship(c.entry); has {
+					before = state
+				}
+			case xdr.LedgerEntryChangeTypeLedgerEntryCreated,
+				xdr.LedgerEntryChangeTypeLedgerEntryUpdated,
+				xdr.LedgerEntryChangeTypeLedgerEntryRestored:
+				if state, has := entrySponsorship(c.entry); has {
+					after = state
+				}
+			case xdr.LedgerEntryChangeTypeLedgerEntryRemoved:
+				after = sponsorshipState{sponsored: false}
+			}
+		}
+	}) {
+		return false
+	}
+
+	if !seen {
+		label := targetKey
+		if hasKey {
+			label = key.label
+		}
+		t.Errorf("%s: the transaction made no ledger change to %s\n\n%s",
+			assertion, label, indent(describeChanges(changes)))
+		return false
+	}
+
+	actualPrev := ""
+	if before.sponsored {
+		actualPrev = before.sponsor
+	}
+	actualNew := ""
+	if after.sponsored {
+		actualNew = after.sponsor
+	}
+
+	if actualPrev == expectedPrev && actualNew == expectedNew {
+		return true
+	}
+
+	label := targetKey
+	if hasKey {
+		label = key.label
+	}
+
+	sponsorLabel := func(s string) string {
+		if s == "" {
+			return "none"
+		}
+		return shorten(s)
+	}
+
+	t.Errorf("%s: sponsorship transition for %s does not match\n\n"+
+		"  got:  prev %s, new %s (%s)\n"+
+		"  want: prev %s, new %s\n\n%s",
+		assertion, label,
+		sponsorLabel(actualPrev), sponsorLabel(actualNew), describeSponsorshipTransition(before, after),
+		sponsorLabel(expectedPrev), sponsorLabel(expectedNew),
+		indent(describeEntryChanges(changes, keyID)))
+	return false
 }

@@ -49,6 +49,49 @@ func TestFailureMessageSideBySide(t *testing.T) {
 	}
 }
 
+func TestFailureMessageDiffContext(t *testing.T) {
+	t.Parallel()
+
+	want := buildEnvelope(t, paymentOp(t, 100_0000000))
+	got := buildEnvelope(t, paymentOp(t, 200_0000000))
+
+	tb := faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(1))
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if !strings.Contains(msg, "Body.PaymentOp.Asset = native") {
+		t.Errorf("one context line does not show the neighboring asset field:\n%s", msg)
+	}
+	if strings.Index(msg, "Body.PaymentOp.Asset = native") > strings.Index(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Amount") {
+		t.Errorf("preceding context appears after the changed field:\n%s", msg)
+	}
+
+	tb = faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(0))
+	msg, err = tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if strings.Contains(msg, "Body.PaymentOp.Asset = native") {
+		t.Errorf("zero context lines still show neighboring fields:\n%s", msg)
+	}
+
+	want = buildEnvelope(t, paymentOp(t, 100_0000000))
+	got = buildEnvelope(t, creditPaymentOp(t, 100_0000000))
+	tb = faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithDiffContext(1))
+	msg, err = tb.Message()
+	if err != nil {
+		t.Fatalf("reading assertion message: %v", err)
+	}
+	if !strings.Contains(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Asset") ||
+		strings.Index(msg, "Body.PaymentOp.Amount =") < strings.Index(msg, "~ V1.Tx.Operations[0].Body.PaymentOp.Asset") {
+		t.Errorf("following context does not appear after the changed field:\n%s", msg)
+	}
+}
+
 // TestFailureMessageAddedAndRemoved checks that a value present on one side
 // only is shown with a single labelled side rather than as an empty pair.
 func TestFailureMessageAddedAndRemoved(t *testing.T) {
@@ -182,5 +225,50 @@ func TestFailureMessageStaysReadable(t *testing.T) {
 	}
 	if !strings.Contains(msg, "and 4 more difference(s); raise the limit with focus.WithMaxChanges") {
 		t.Errorf("message does not mention the elided differences:\n%s", msg)
+	}
+}
+
+// TestFailureMessageLabel checks the contextual label appears beside the
+// assertion name, so a failure inside a loop or a multi-step flow names the
+// step it came from.
+func TestFailureMessageLabel(t *testing.T) {
+	t.Parallel()
+
+	want := buildEnvelope(t, paymentOp(t, 100_0000000))
+	got := buildEnvelope(t, paymentOp(t, 200_0000000))
+
+	tb := faketb.New()
+	if focus.AssertEnvelopeEqual(tb, want, got, focus.WithLabel("step 3: fee refund")) {
+		t.Fatal("assertion returned true for differing envelopes")
+	}
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(msg, "AssertEnvelopeEqual [step 3: fee refund]: envelopes differ") {
+		t.Errorf("failure headline does not carry the label:\n%s", msg)
+	}
+
+	// An empty label is the same as not setting one.
+	tb = faketb.New()
+	focus.AssertEnvelopeEqual(tb, want, got, focus.WithLabel(""))
+	unlabeled, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(unlabeled, "AssertEnvelopeEqual: envelopes differ") ||
+		strings.Contains(unlabeled, "[]") {
+		t.Errorf("empty label changed the headline:\n%s", unlabeled)
+	}
+
+	// The scalar failure helpers carry the label too.
+	tb = faketb.New()
+	focus.AssertSequence(tb, want, 999, focus.WithLabel("step 1: sequence"))
+	scalar, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	if !strings.Contains(scalar, "AssertSequence [step 1: sequence]: sequence number is") {
+		t.Errorf("scalar failure does not carry the label:\n%s", scalar)
 	}
 }

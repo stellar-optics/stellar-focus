@@ -1,74 +1,108 @@
-// TAP (Test Anything Protocol) output formatter for focus verify.
-//
-// TAP version 13: https://testanything.org/tap-specification-130.html
-//
-// Standard TAP output format used by most CI systems.
-// Outputs: 1..N at the top, then ok/not ok lines for each test.
-//
-// Example output:
-//   1..5
-//   ok 1 - fixture1.golden.json
-//   not ok 2 - fixture2.golden.json
-//   ok 3 - fixture3.golden.json
-//   # looks like 5 tests
-//   # passed: 3
-//   # failed: 2
 package cli
+
+// TAP output for focus verify.
+//
+// TAP version 13 is the other format CI test reporters understand: a plan, one
+// ok/not ok line per fixture, and a YAML diagnostic block for a failure. A
+// skipped fixture is reported as ok with a SKIP directive, which is how TAP
+// says "not a failure, not a pass".
 
 import (
 	"fmt"
-	"os"
+	"io"
+	"strings"
 )
 
-// TapWriter writes TAP (Test Anything Protocol) output to a writer.
-type TapWriter struct {
-	file   *os.File
-	closed bool
-}
-
-// NewTapWriter creates a new TapWriter that writes to the given file.
-// If file is nil, output goes to stderr.
-func NewTapWriter(file *os.File) *TapWriter {
-	if file == nil {
-		return &TapWriter{file: os.Stderr}
-	}
-	return &TapWriter{file: file}
-}
-
-// WritePlan writes the TAP plan header "1..N" where N is the total number of tests.
-// This should be called once at the start of TAP output.
-func (w *TapWriter) WritePlan(totalTests int) error {
-	_, err := fmt.Fprintf(w.file, "1..%d\n", totalTests)
-	return err
-}
-
-//WriteOK writes "ok N - description" for a passing test.
-func (w *TapWriter) WriteOK(testNum int, description string) error {
-	_, err := fmt.Fprintf(w.file, "ok %d - %s\n", testNum, description)
-	return err
-}
-
-// WriteNotOK writes "not ok N - description" for a failing test.
-func (w *TapWriter) WriteNotOK(testNum int, description string) error {
-	_, err := fmt.Fprintf(w.file, "not ok %d - %s\n", testNum, description)
-	return err
-}
-
-// WriteSummary writes the TAP summary lines showing passed/failed counts.
-// This should be called after all test results have been written.
-func (w *TapWriter) WriteSummary(passed, failed int) error {
-	_, err := fmt.Fprintf(w.file, "# passed: %d\n", passed)
-	if err != nil {
+// writeTAP renders a verification report as TAP version 13.
+func writeTAP(w io.Writer, report *VerifyReport) error {
+	if _, err := fmt.Fprintln(w, "TAP version 13"); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(w.file, "# failed: %d\n", failed)
+	if _, err := fmt.Fprintf(w, "1..%d\n", len(report.Results)); err != nil {
+		return err
+	}
+
+	var passed, failed, skipped int
+	for i, item := range report.Results {
+		number := i + 1
+		switch item.Status {
+		case statusMatched:
+			passed++
+			if _, err := fmt.Fprintf(w, "ok %d - %s\n", number, item.Path); err != nil {
+				return err
+			}
+		case statusDrifted:
+			failed++
+			if _, err := fmt.Fprintf(w, "not ok %d - %s\n", number, item.Path); err != nil {
+				return err
+			}
+			if err := writeTAPDiagnostic(w, item); err != nil {
+				return err
+			}
+		case statusErrored:
+			failed++
+			if _, err := fmt.Fprintf(w, "not ok %d - %s\n", number, item.Path); err != nil {
+				return err
+			}
+			if err := writeTAPDiagnostic(w, item); err != nil {
+				return err
+			}
+		case statusSkipped, statusFiltered:
+			skipped++
+			if _, err := fmt.Fprintf(w, "ok %d - %s # SKIP %s\n",
+				number, item.Path, tapText(item.Error)); err != nil {
+				return err
+			}
+		}
+	}
+
+	_, err := fmt.Fprintf(w, "# tests: %d\n# passed: %d\n# failed: %d\n# skipped: %d\n",
+		len(report.Results), passed, failed, skipped)
 	return err
 }
 
-// Close closes the underlying file (if not stderr).
-func (w *TapWriter) Close() error {
-	if w.file == nil || w.file == os.Stderr {
-		return nil
+// writeTAPDiagnostic writes the YAML block that explains a failing fixture.
+//
+// Every line is indented and quoted where needed, so a path or an error
+// containing a colon cannot turn the block into something else.
+func writeTAPDiagnostic(w io.Writer, item VerifyItemResult) error {
+	message := item.Error
+	if message == "" {
+		message = "the fixture no longer matches the chain"
 	}
-	return w.file.Close()
+
+	if _, err := fmt.Fprintln(w, "  ---"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  message: %s\n", tapQuote(message)); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "  status: %s\n", item.Status); err != nil {
+		return err
+	}
+	if len(item.DiffPaths) > 0 {
+		if _, err := fmt.Fprintln(w, "  diff_paths:"); err != nil {
+			return err
+		}
+		for _, path := range item.DiffPaths {
+			if _, err := fmt.Fprintf(w, "    - %s\n", tapQuote(path)); err != nil {
+				return err
+			}
+		}
+	}
+	_, err := fmt.Fprintln(w, "  ...")
+	return err
+}
+
+// tapQuote quotes a string for a YAML scalar.
+func tapQuote(text string) string {
+	return fmt.Sprintf("%q", tapText(text))
+}
+
+// tapText flattens a message onto one line, so a multi-line error cannot
+// break a TAP line or a YAML scalar.
+func tapText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	return strings.TrimSpace(text)
 }

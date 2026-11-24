@@ -8,27 +8,29 @@ import (
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
+
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
 
 // fixture reads real captured mainnet XDR, shared with the sibling
 // repositories.
-func fixture(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", name+".txt"))
+func fixture(tb testing.TB, name string) string {
+	tb.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "fuzz", "testdata", name+".txt"))
 	if err != nil {
-		t.Fatalf("reading fixture %s: %v", name, err)
+		tb.Fatalf("reading fixture %s: %v", name, err)
 	}
 	return strings.TrimSpace(string(b))
 }
 
 // mustMarshal builds base64 XDR from a concrete value.
-func mustMarshal(t *testing.T, v any) string {
-	t.Helper()
+func mustMarshal(tb testing.TB, v any) string {
+	tb.Helper()
 	s, err := xdr.MarshalBase64(v)
 	if err != nil {
-		t.Fatalf("marshalling %T: %v", v, err)
+		tb.Fatalf("marshalling %T: %v", v, err)
 	}
 	return s
 }
@@ -66,6 +68,131 @@ func TestAssertEqualPasses(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAssertXDRRoundTripPasses covers the shapes a caller may hold and the
+// types whose round-trip the assertion is expected to verify.
+func TestAssertXDRRoundTripPasses(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		value    focus.Value
+		typeName string
+	}{
+		{"envelope base64", fixture(t, "tx_failed.env"), "TransactionEnvelope"},
+		{"envelope value", envelopeValue(t, paymentOp(t, 100)), "TransactionEnvelope"},
+		{"result base64", fixture(t, "tx_failed.res"), "TransactionResult"},
+		{"ledger key", func() xdr.LedgerKey {
+			key := xdr.LedgerKey{}
+			if err := key.SetAccount(xdr.MustAddress(testSource)); err != nil {
+				t.Fatalf("building ledger key: %v", err)
+			}
+			return key
+		}(), "LedgerKey"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if !focus.AssertXDRRoundTrip(tb, tc.value, tc.typeName) {
+				t.Errorf("round-trip failed unexpectedly:\n%s", tb.Output())
+			}
+			if tb.Failed() {
+				t.Errorf("assertion reported a failure while returning true:\n%s", tb.Output())
+			}
+		})
+	}
+}
+
+// TestAssertXDRRoundTripReportsTheChangedPath forces a lossy round-trip: the
+// decoded tree is one envelope, but its marshaler emits another, which is
+// exactly what a mutated field or a dropped arm looks like to the assertion.
+func TestAssertXDRRoundTripReportsTheChangedPath(t *testing.T) {
+	t.Parallel()
+
+	original, err := lens.DecodeAs(
+		mustMarshal(t, envelopeValueSeq(t, 987654, paymentOp(t, 100_0000000))),
+		"TransactionEnvelope",
+	)
+	if err != nil {
+		t.Fatalf("decoding the original: %v", err)
+	}
+	changed := envelopeValueSeq(t, 987654, paymentOp(t, 200_0000000))
+	raw, err := changed.MarshalBinary()
+	if err != nil {
+		t.Fatalf("marshalling the changed envelope: %v", err)
+	}
+
+	tb := faketb.New()
+	if focus.AssertXDRRoundTrip(tb, &lens.Value{
+		Type: original.Type,
+		Node: original.Node,
+		Raw:  fixedMarshaler{raw: raw},
+	}, "TransactionEnvelope") {
+		t.Fatal("a lossy round-trip was reported as lossless")
+	}
+
+	msg, err := tb.Message()
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	for _, want := range []string{
+		"AssertXDRRoundTrip",
+		"did not survive",
+		"Amount",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message does not contain %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestAssertXDRRoundTripRejectsBadInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		value       focus.Value
+		typeName    string
+		wantMessage string
+	}{
+		{"nil", nil, "TransactionEnvelope", "value is nil"},
+		{"empty", "", "TransactionEnvelope", "empty string"},
+		{"unknown type", fixture(t, "tx_failed.env"), "NoSuchType", "unknown XDR type"},
+		{"unsupported value", 42, "TransactionEnvelope", "unsupported type"},
+		{"wrong type", fixture(t, "tx_failed.res"), "TransactionEnvelope", "could not be read"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if focus.AssertXDRRoundTrip(tb, tc.value, tc.typeName) {
+				t.Fatal("assertion accepted invalid input")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			if !strings.Contains(msg, tc.wantMessage) {
+				t.Errorf("message = %q, want it to mention %q", msg, tc.wantMessage)
+			}
+		})
+	}
+}
+
+// fixedMarshaler emits bytes that are unrelated to the decoded tree it is
+// attached to, so a round-trip test can exercise the failure path.
+type fixedMarshaler struct {
+	raw []byte
+}
+
+func (m fixedMarshaler) MarshalBinary() ([]byte, error) {
+	return m.raw, nil
 }
 
 // TestAssertEnvelopeEqualFailureMessage is the most important test in the

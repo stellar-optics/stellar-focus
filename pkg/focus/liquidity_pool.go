@@ -141,13 +141,13 @@ func assertPoolChange(t TB, assertion string, meta, pool Value, want PoolChange,
 
 	if !mov.touched {
 		t.Errorf("%s: the transaction did not change liquidity pool %s\n\n%s",
-			assertion, shortenID(id), indent(describePoolChanges(changes), "  "))
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
 		return false
 	}
 	if !mov.hasBefore {
 		t.Errorf("%s: this meta does not record liquidity pool %s before the change, "+
 			"so the movement cannot be measured\n\n%s",
-			assertion, shortenID(id), indent(describePoolChanges(changes), "  "))
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
 		return false
 	}
 
@@ -210,19 +210,19 @@ func correctDirection(t TB, assertion string, mov poolMovement, got poolReserves
 		t.Errorf("%s: liquidity pool %s moved its reserves without minting or burning "+
 			"pool shares, which is a trade against the pool rather than a deposit or "+
 			"a withdrawal\n\n%s",
-			assertion, shortenID(mov.id), indent(describePoolMovement(mov), "  "))
+			assertion, shortenID(mov.id), indent(describePoolMovement(mov)))
 		return false
 	case deposit && got.shares < 0:
 		t.Errorf("%s: liquidity pool %s burned %s pool shares; "+
 			"a withdrawal is asserted with AssertLiquidityPoolWithdrawal\n\n%s",
 			assertion, shortenID(mov.id), amountStroops(xdr.Int64(-got.shares), ""),
-			indent(describePoolMovement(mov), "  "))
+			indent(describePoolMovement(mov)))
 		return false
 	case !deposit && got.shares > 0:
 		t.Errorf("%s: liquidity pool %s minted %s pool shares; "+
 			"a deposit is asserted with AssertLiquidityPoolDeposit\n\n%s",
 			assertion, shortenID(mov.id), amountStroops(xdr.Int64(got.shares), ""),
-			indent(describePoolMovement(mov), "  "))
+			indent(describePoolMovement(mov)))
 		return false
 	}
 	return true
@@ -424,7 +424,7 @@ func poolMismatchMessage(
 		fmt.Fprintf(&b, "  %s\n", d)
 	}
 	b.WriteString("\n")
-	b.WriteString(indent(describePoolMovement(mov), "  "))
+	b.WriteString(indent(describePoolMovement(mov)))
 	return b.String()
 }
 
@@ -499,4 +499,59 @@ func signedStroops(v int64) string {
 		return "+" + amountStroops(xdr.Int64(v), "")
 	}
 	return amountStroops(xdr.Int64(v), "")
+}
+
+// AssertLiquidityPoolShares verifies minted or burned pool shares and reserve movements
+// for a liquidity pool.
+//
+// metaInput accepts any transaction meta form accepted by ledgerChanges.
+// poolID accepts 64 hex characters (with or without "pool:" or "0x"), an xdr.PoolId,
+// or an xdr.TrustLineAsset for the pool's shares.
+// wantShareDelta is the expected net change in total pool shares (positive for deposits,
+// negative for withdrawals).
+func AssertLiquidityPoolShares(t TestingT, metaInput any, poolID string, wantShareDelta int64, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertLiquidityPoolShares"
+	_ = newConfig(opts...)
+
+	changes, ok := ledgerChanges(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+	id, ok := resolvePoolID(t, assertion, poolID)
+	if !ok {
+		return false
+	}
+	mov, ok := poolMovementOf(t, assertion, changes, id)
+	if !ok {
+		return false
+	}
+
+	if !mov.touched {
+		t.Errorf("%s: the transaction did not change liquidity pool %s\n\n%s",
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
+		return false
+	}
+	if !mov.hasBefore {
+		t.Errorf("%s: this meta does not record liquidity pool %s before the change, "+
+			"so the movement cannot be measured\n\n%s",
+			assertion, shortenID(id), indent(describePoolChanges(changes)))
+		return false
+	}
+
+	delta := mov.delta()
+	if delta.shares == wantShareDelta {
+		return true
+	}
+
+	t.Errorf("%s: liquidity pool %s share delta mismatch\n\n"+
+		"  ~ shares: got %s, want %s\n"+
+		"    reserve A%s moved by %s\n"+
+		"    reserve B%s moved by %s\n\n%s",
+		assertion, shortenID(id),
+		signedStroops(delta.shares), signedStroops(wantShareDelta),
+		poolAssetSuffix(mov.assetA), signedStroops(delta.a),
+		poolAssetSuffix(mov.assetB), signedStroops(delta.b),
+		indent(describePoolMovement(mov)))
+	return false
 }

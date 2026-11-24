@@ -1,11 +1,16 @@
 package focus_test
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
@@ -15,7 +20,7 @@ import (
 func TestFieldAssertionsPass(t *testing.T) {
 	t.Parallel()
 
-	env := buildEnvelopeSeq(t, 4242, paymentOp(t, 100_0000000), creditPaymentOp(t, "USDC", 5))
+	env := buildEnvelopeSeq(t, 4242, paymentOp(t, 100_0000000), creditPaymentOp(t, 5))
 
 	tests := []struct {
 		name string
@@ -49,7 +54,7 @@ func TestFieldAssertionsPass(t *testing.T) {
 func TestFieldAssertionMessages(t *testing.T) {
 	t.Parallel()
 
-	env := buildEnvelopeSeq(t, 7, paymentOp(t, 100), creditPaymentOp(t, "USDC", 5))
+	env := buildEnvelopeSeq(t, 7, paymentOp(t, 100), creditPaymentOp(t, 5))
 
 	tests := []struct {
 		name     string
@@ -341,6 +346,423 @@ func TestAssertContractTrapped(t *testing.T) {
 	}
 }
 
+// TestUnorderedSignatureComparison covers the multi-sig case: the same
+// envelope signed in a different order is the same envelope, and a comparison
+// that says so must not hide a signature that is actually missing.
+func TestUnorderedSignatureComparison(t *testing.T) {
+	t.Parallel()
+
+	sigA := []byte{1, 2, 3, 4}
+	sigB := []byte{5, 6, 7, 8}
+
+	want := envelopeWithSignatures(t, sigA, sigB)
+	got := envelopeWithSignatures(t, sigB, sigA)
+
+	t.Run("order alone is a difference", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertEnvelopeEqual(tb, want, got) {
+			t.Fatal("envelopes with reordered signatures compared equal")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "Signatures") {
+			t.Errorf("the diff does not name the signatures:\n%s", msg)
+		}
+	})
+
+	t.Run("unordered wrapper passes", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertEnvelopeEqualUnordered(tb, want, got) {
+			t.Errorf("reordered signatures were reported as a difference:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("SortPath does the same", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertEnvelopeEqual(tb, want, got, focus.SortPath("**.Signatures")) {
+			t.Errorf("SortPath did not treat the signatures as a set:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("a missing signature is still a difference", func(t *testing.T) {
+		t.Parallel()
+
+		other := envelopeWithSignatures(t, sigA, []byte{9, 9, 9, 9})
+		tb := faketb.New()
+		if focus.AssertEnvelopeEqualUnordered(tb, want, other) {
+			t.Fatal("a missing signature was reported as equal")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		// The failure says how the array was compared, so a reader knows the
+		// order was not the problem.
+		if !strings.Contains(msg, "compared as unordered sets") {
+			t.Errorf("the failure does not say the array was unordered:\n%s", msg)
+		}
+		if !strings.Contains(msg, "Signatures") {
+			t.Errorf("the failure does not name the signatures:\n%s", msg)
+		}
+	})
+
+	t.Run("a sort pattern that matches nothing is reported", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertEnvelopeEqual(tb, want, want, focus.SortPath("**.SignaturesTypo")) {
+			t.Fatal("a sort pattern that matched nothing was accepted silently")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "sort patterns matched no array") {
+			t.Errorf("the stale pattern was not reported:\n%s", msg)
+		}
+		if !strings.Contains(msg, "**.SignaturesTypo") {
+			t.Errorf("the stale pattern is not named:\n%s", msg)
+		}
+	})
+
+	t.Run("the caller's value is not reordered", func(t *testing.T) {
+		t.Parallel()
+
+		decoded, err := lens.Decode(want)
+		if err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		before := fmt.Sprintf("%v", decoded.Node.Child("V1").Child("Signatures").Children[0].Child("Signature").Value)
+
+		tb := faketb.New()
+		if !focus.AssertEnvelopeEqualUnordered(tb, decoded, decoded) {
+			t.Errorf("a value compared with itself failed:\n%s", tb.Output())
+		}
+
+		after := fmt.Sprintf("%v", decoded.Node.Child("V1").Child("Signatures").Children[0].Child("Signature").Value)
+		if before != after {
+			t.Errorf("the assertion reordered the caller's value: %v became %v", before, after)
+		}
+	})
+}
+
+// TestSorobanSpecAwareAssertions checks the behaviour a contract
+// specification buys: a payload can be named the way the contract's author
+// named it, and a failure says which field differs.
+func TestSorobanSpecAwareAssertions(t *testing.T) {
+	t.Parallel()
+
+	spec := transferSpec()
+	meta := buildSorobanMeta(t, transferEvent(t, testSource, 100))
+
+	t.Run("matches a payload by field name", func(t *testing.T) {
+		tb := faketb.New()
+		want := focus.Event{
+			Topics: []any{"transfer"},
+			Data:   map[string]any{"from": testSource, "amount": 100},
+			Spec:   spec,
+		}
+		if !focus.AssertEventEmitted(tb, meta, want) {
+			t.Errorf("spec-aware match failed:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("names the field that differs", func(t *testing.T) {
+		tb := faketb.New()
+		want := focus.Event{
+			Topics: []any{"transfer"},
+			Data:   map[string]any{"from": testSource, "amount": 200},
+			Spec:   spec,
+		}
+		if focus.AssertEventEmitted(tb, meta, want) {
+			t.Fatal("matched a payload with the wrong amount")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		for _, want := range []string{
+			"amount",               // the field name the contract chose
+			"from",                 // and the other one
+			"u128(100)",            // what was there
+			"u128(200)",            // what was wanted
+			"ScValTypeScvMap",      // the XDR discriminant, for transparency
+			"differences from the", // and the diff itself
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("a missing field is named", func(t *testing.T) {
+		tb := faketb.New()
+		want := focus.Event{
+			Topics: []any{"transfer"},
+			Data:   map[string]any{"from": testSource, "amount": 100, "memo": "hi"},
+			Spec:   spec,
+		}
+		if focus.AssertEventEmitted(tb, meta, want) {
+			t.Fatal("matched a payload with an unexpected field")
+		}
+		msg, _ := tb.Message()
+		if !strings.Contains(msg, "memo") {
+			t.Errorf("message does not name the unexpected field:\n%s", msg)
+		}
+	})
+
+	t.Run("without a specification the payload is compared as it is", func(t *testing.T) {
+		tb := faketb.New()
+		want := focus.Event{
+			Topics: []any{"transfer"},
+			Data:   map[string]any{"from": testSource, "amount": 100},
+		}
+		if focus.AssertEventEmitted(tb, meta, want) {
+			t.Fatal("matched a payload that cannot be read without a specification")
+		}
+		msg, _ := tb.Message()
+		if !strings.Contains(msg, "needs the contract's specification") {
+			t.Errorf("message does not explain what is missing:\n%s", msg)
+		}
+	})
+
+	t.Run("a specification does not change what matches", func(t *testing.T) {
+		tb := faketb.New()
+		want := focus.Event{Topics: []any{"transfer"}}
+		if !focus.AssertEventEmitted(tb, meta, want) {
+			t.Errorf("wildcard match failed:\n%s", tb.Output())
+		}
+	})
+}
+
+// TestSorobanSpecNamesTopics checks that a topic the contract declares is
+// named in the failure listing, so a reader can tell which topic is wrong.
+func TestSorobanSpecNamesTopics(t *testing.T) {
+	t.Parallel()
+
+	address := xdr.ScSpecTypeDef{Type: xdr.ScSpecTypeScSpecTypeAddress}
+	spec := []xdr.ScSpecEntry{
+		{
+			Kind: xdr.ScSpecEntryKindScSpecEntryEventV0,
+			EventV0: &xdr.ScSpecEventV0{
+				Name: "approve",
+				Params: []xdr.ScSpecEventParamV0{
+					{
+						Name:     "spender",
+						Type:     address,
+						Location: xdr.ScSpecEventParamLocationV0ScSpecEventParamLocationTopicList,
+					},
+				},
+			},
+		},
+	}
+
+	name := xdr.ScSymbol("approve")
+	id, err := xdr.AddressToAccountId(testDest)
+	if err != nil {
+		t.Fatalf("parsing address: %v", err)
+	}
+	addressValue := xdr.ScAddress{Type: xdr.ScAddressTypeScAddressTypeAccount, AccountId: &id}
+
+	event := xdr.ContractEvent{
+		Type: xdr.ContractEventTypeContract,
+		Body: xdr.ContractEventBody{
+			V: 0,
+			V0: &xdr.ContractEventV0{
+				Topics: []xdr.ScVal{
+					{Type: xdr.ScValTypeScvSymbol, Sym: &name},
+					{Type: xdr.ScValTypeScvAddress, Address: &addressValue},
+				},
+				Data: xdr.ScVal{Type: xdr.ScValTypeScvVoid},
+			},
+		},
+	}
+	meta := buildSorobanMeta(t, event)
+
+	tb := faketb.New()
+	want := focus.Event{
+		Topics: []any{"approve", testSource},
+		Spec:   spec,
+	}
+	if focus.AssertEventEmitted(tb, meta, want) {
+		t.Fatal("matched an event with the wrong topic")
+	}
+	msg, _ := tb.Message()
+	if !strings.Contains(msg, "spender=") {
+		t.Errorf("message does not name the topic:\n%s", msg)
+	}
+}
+
+// TestAssertReturnValueWithSpec checks that a return value can be matched
+// and described by the names the contract's author gave it.
+func TestAssertReturnValueWithSpec(t *testing.T) {
+	t.Parallel()
+
+	spec := []xdr.ScSpecEntry{
+		{
+			Kind: xdr.ScSpecEntryKindScSpecEntryUdtStructV0,
+			UdtStructV0: &xdr.ScSpecUdtStructV0{
+				Name: "Receipt",
+				Fields: []xdr.ScSpecUdtStructFieldV0{
+					{Name: "amount", Type: xdr.ScSpecTypeDef{Type: xdr.ScSpecTypeScSpecTypeU128}},
+				},
+			},
+		},
+		{
+			Kind: xdr.ScSpecEntryKindScSpecEntryFunctionV0,
+			FunctionV0: &xdr.ScSpecFunctionV0{
+				Name: "withdraw",
+				Outputs: []xdr.ScSpecTypeDef{
+					{Type: xdr.ScSpecTypeScSpecTypeUdt, Udt: &xdr.ScSpecTypeUdt{Name: "Receipt"}},
+				},
+			},
+		},
+	}
+
+	amount := xdr.UInt128Parts{Hi: 0, Lo: 42}
+	key := xdr.ScSymbol("amount")
+	entries := xdr.ScMap{
+		{Key: xdr.ScVal{Type: xdr.ScValTypeScvSymbol, Sym: &key}, Val: xdr.ScVal{Type: xdr.ScValTypeScvU128, U128: &amount}},
+	}
+	mapPtr := &entries
+	meta := mustMarshal(t, xdr.TransactionMeta{
+		V: 3,
+		V3: &xdr.TransactionMetaV3{
+			SorobanMeta: &xdr.SorobanTransactionMeta{
+				ReturnValue: xdr.ScVal{Type: xdr.ScValTypeScvMap, Map: &mapPtr},
+			},
+		},
+	})
+
+	t.Run("matches by field name", func(t *testing.T) {
+		tb := faketb.New()
+		want := map[string]any{"amount": 42}
+		if !focus.AssertReturnValueWithSpec(tb, meta, want, "withdraw", spec) {
+			t.Errorf("spec-aware return value did not match:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("names the field that differs", func(t *testing.T) {
+		tb := faketb.New()
+		want := map[string]any{"amount": 43}
+		if focus.AssertReturnValueWithSpec(tb, meta, want, "withdraw", spec) {
+			t.Fatal("matched a return value with the wrong amount")
+		}
+		msg, _ := tb.Message()
+		for _, want := range []string{"amount", "u128(42)", "u128(43)"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("an unknown function is reported", func(t *testing.T) {
+		tb := faketb.New()
+		if focus.AssertReturnValueWithSpec(tb, meta, map[string]any{"amount": 42}, "nope", spec) {
+			t.Fatal("matched a function the contract does not declare")
+		}
+		msg, _ := tb.Message()
+		if !strings.Contains(msg, "nope") {
+			t.Errorf("message does not name the function:\n%s", msg)
+		}
+	})
+}
+
+// TestContractSpec checks that a contract's specification can be read out
+// of a compiled contract, which is how a test gets one without a second
+// file.
+func TestContractSpec(t *testing.T) {
+	t.Parallel()
+
+	wasm := specWasm(t, transferSpec())
+
+	spec, err := focus.ContractSpec(wasm)
+	if err != nil {
+		t.Fatalf("reading the contract specification: %v", err)
+	}
+	if len(spec) != len(transferSpec()) {
+		t.Fatalf("read %d entries, want %d", len(spec), len(transferSpec()))
+	}
+
+	event, ok := spec[1].GetEventV0()
+	if !ok {
+		t.Fatal("the second entry is not an event")
+	}
+	if string(event.Name) != "transfer" {
+		t.Errorf("the event is named %q, want %q", event.Name, "transfer")
+	}
+
+	t.Run("a module without a specification has none", func(t *testing.T) {
+		spec, err := focus.ContractSpec([]byte("\x00asm\x01\x00\x00\x00"))
+		if err != nil {
+			t.Fatalf("reading the contract specification: %v", err)
+		}
+		if len(spec) != 0 {
+			t.Errorf("read %d entries, want none", len(spec))
+		}
+	})
+
+	t.Run("rubbish is reported, not decoded", func(t *testing.T) {
+		if _, err := focus.ContractSpec([]byte("not a contract")); err == nil {
+			t.Fatal("accepted a file that is not a WASM module")
+		}
+	})
+}
+
+// specWasm builds a WASM module carrying a contract specification in a
+// custom section, the way a compiled contract does.
+func specWasm(tb testing.TB, entries []xdr.ScSpecEntry) []byte {
+	tb.Helper()
+
+	var payload bytes.Buffer
+	if err := binary.Write(&payload, binary.BigEndian, uint32(len(entries))); err != nil {
+		tb.Fatalf("writing the specification count: %v", err)
+	}
+	for _, entry := range entries {
+		if _, err := xdr.Marshal(&payload, entry); err != nil {
+			tb.Fatalf("writing a specification entry: %v", err)
+		}
+	}
+
+	var content bytes.Buffer
+	name := "contractspecv0"
+	writeLEB128(&content, uint64(len(name)))
+	content.WriteString(name)
+	content.Write(payload.Bytes())
+
+	var module bytes.Buffer
+	module.WriteString("\x00asm")
+	module.Write([]byte{1, 0, 0, 0})
+	module.WriteByte(0) // a custom section
+	writeLEB128(&module, uint64(content.Len()))
+	module.Write(content.Bytes())
+	return module.Bytes()
+}
+
+// writeLEB128 writes an unsigned integer the way the WebAssembly binary
+// format encodes lengths.
+func writeLEB128(w *bytes.Buffer, value uint64) {
+	for {
+		b := byte(value & 0x7f)
+		value >>= 7
+		if value != 0 {
+			b |= 0x80
+		}
+		w.WriteByte(b)
+		if value == 0 {
+			return
+		}
+	}
+}
+
 // TestRequireUsesFatalf checks the documented difference between the two
 // packages: focus reports, require stops.
 func TestRequireUsesFatalf(t *testing.T) {
@@ -383,6 +805,8 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		tb := faketb.New()
 		// Each of these must report rather than panic.
 		focus.AssertEnvelopeEqual(tb, v, v)
+		focus.AssertEnvelopeEqualUnordered(tb, v, v)
+		focus.AssertEnvelopeEqual(tb, v, v, focus.SortPath("**.Signatures"))
 		focus.AssertResultEqual(tb, v, v)
 		focus.AssertMetaEqual(tb, v, v)
 		focus.AssertEqual(tb, v, v)
@@ -395,6 +819,8 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		focus.AssertOperationType(tb, v, 0, "payment")
 		focus.AssertSignatureCount(tb, v, 0)
 		focus.AssertFeeBump(tb, v, false)
+		focus.AssertFeeBumpInner(tb, v, func(focus.Value) bool { return true })
+		focus.InnerEnvelope(tb, v)
 		focus.AssertSucceeded(tb, v)
 		focus.AssertFailed(tb, v)
 		focus.AssertResultCode(tb, v, "tx_failed")
@@ -406,10 +832,23 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		focus.AssertRefundFeeEqual(tb, v, 1)
 		focus.AssertSimulationResourcesWithin(tb, v, 1, 1)
 		focus.AssertEventEmitted(tb, v, focus.Event{})
+		focus.AssertEventEmitted(tb, v, focus.Event{Spec: []xdr.ScSpecEntry{{}}})
 		focus.AssertEventCount(tb, v, 0)
+		focus.AssertEventsEqual(tb, v, []focus.Event{{}})
 		focus.AssertNoEvents(tb, v)
 		focus.AssertReturnValue(tb, v, "x")
+		focus.AssertReturnValueWithSpec(tb, v, "x", "fn", nil)
+		focus.AssertReturnValueWithSpec(tb, v, "x", "fn", []xdr.ScSpecEntry{{}})
 		focus.AssertContractTrapped(tb, v)
+		focus.AssertContractTrappedWith(tb, v, "Error(Contract, #4)")
+		focus.AssertSimulationSucceeded(tb, nil)
+		focus.AssertSimulatedReturnValue(tb, nil, v)
+		focus.AssertInstructionsBelow(tb, nil, 1)
+		focus.AssertSorobanResources(tb, v, 1, 1, 1)
+		focus.AssertResourceFee(tb, v, 1)
+		focus.AssertPayment(tb, v, 0, "G", 1, "native")
+		focus.AssertCreateAccount(tb, v, 0, "G", 1)
+		focus.AssertChangeTrust(tb, v, 0, "native", 1)
 		focus.AssertEntryCreated(tb, v, v)
 		focus.AssertEntryModified(tb, v, v)
 		focus.AssertEntryDeleted(tb, v, v)
@@ -436,13 +875,25 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		focus.AssertThresholdsEqual(tb, v, v, focus.Thresholds{})
 		focus.AssertTimeboundsValid(tb, v, 0, 0)
 		focus.AssertLedgerboundsValid(tb, v, 0, 0)
+		focus.AssertTimeBounds(tb, v, 0, 0)
+		focus.AssertTimeBoundsWindow(tb, v, time.Minute)
+		focus.AssertNoTimeBounds(tb, v)
+		focus.AssertLedgerBounds(tb, v, 0, 0)
 		focus.AssertMemoTextEqual(tb, v, "")
 		focus.AssertMemoIDEqual(tb, v, 0)
 		focus.AssertMemoHashEqual(tb, v, "")
 		focus.AssertMemoReturnEqual(tb, v, "")
+		focus.AssertMemoText(tb, v, "")
+		focus.AssertMemoID(tb, v, 0)
+		focus.AssertMemoHash(tb, v, [32]byte{})
+		focus.AssertNoMemo(tb, v)
 		focus.AssertOperationSequence(tb, v, nil)
+		focus.AssertOperationSourceAccount(tb, v, 0, "G")
 		focus.AssertSignaturesPresent(tb, v, "G")
 		focus.AssertSignatureThreshold(tb, v, 1, "G")
+		focus.AssertSignatureHints(tb, v, [4]byte{})
+		focus.AssertSignedBy(tb, v, "G")
+		focus.AssertContractError(tb, v, xdr.ScErrorTypeSceContract, 4)
 		focus.AssertDiagnosticEventOrder(tb, v, []focus.DiagnosticEventMatch{{Kind: focus.DiagnosticFnCall}})
 		focus.AssertDiagnosticEventTimeline(tb, v, focus.DiagnosticTimeline{
 			Ledger:   3966820,
@@ -454,6 +905,9 @@ func TestAssertionsNeverPanic(t *testing.T) {
 			Entries:    map[string]any{"owner": v},
 		})
 		focus.AssertContractOwner(tb, v, "CAAAA", testSource)
+		focus.AssertContractAuthValid(tb, v, testSource, focus.ContractCall{Args: []any{v}})
+		focus.AssertContractAuthValid(tb, v, testSource, focus.ContractCall{})
+		focus.AssertContractAuthValid(tb, v, "not-a-strkey", focus.ContractCall{})
 		focus.Events(tb, v)
 		focus.DiagnosticEvents(tb, v)
 		focus.Summarize(tb, v)

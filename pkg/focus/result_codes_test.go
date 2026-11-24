@@ -8,6 +8,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // operationResultWithCode builds a bare operation result carrying an
@@ -129,4 +130,102 @@ func TestAssertOperationResultCodeFailureMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func feeBumpResultValue(outerCode xdr.TransactionResultCode, innerCode xdr.TransactionResultCode) xdr.TransactionResult {
+	var ops *[]xdr.OperationResult
+	if innerCode == xdr.TransactionResultCodeTxSuccess || innerCode == xdr.TransactionResultCodeTxFailed {
+		empty := []xdr.OperationResult{}
+		ops = &empty
+	}
+	return xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code: outerCode,
+			InnerResultPair: &xdr.InnerTransactionResultPair{
+				TransactionHash: xdr.Hash{1, 2, 3},
+				Result: xdr.InnerTransactionResult{
+					FeeCharged: 0,
+					Result: xdr.InnerTransactionResultResult{
+						Code:    innerCode,
+						Results: ops,
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestAssertFeeBumpInnerResultCode(t *testing.T) {
+	t.Parallel()
+
+	fbFailed := feeBumpResultValue(xdr.TransactionResultCodeTxFeeBumpInnerFailed, xdr.TransactionResultCodeTxBadSeq)
+	fbSuccess := feeBumpResultValue(xdr.TransactionResultCodeTxFeeBumpInnerSuccess, xdr.TransactionResultCodeTxSuccess)
+	regularFailed := buildResult(t, xdr.TransactionResultCodeTxFailed, paymentResult(xdr.PaymentResultCodePaymentUnderfunded))
+
+	t.Run("inner failure matches expected short code", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertFeeBumpInnerResultCode(tb, fbFailed, "tx_bad_seq") {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.FeeBumpInnerResultCode(t, fbFailed, "tx_bad_seq")
+	})
+
+	t.Run("inner success matches expected short code", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertFeeBumpInnerResultCode(tb, fbSuccess, "tx_success") {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.FeeBumpInnerResultCode(t, fbSuccess, "tx_success")
+	})
+
+	t.Run("inner code mismatch reports outer vs inner and remediation", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertFeeBumpInnerResultCode(tb, fbFailed, "tx_bad_auth") {
+			t.Fatal("assertion passed when inner code mismatched")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, `inner transaction result code is "tx_bad_seq", want "tx_bad_auth"`) {
+			t.Errorf("message did not report inner codes:\n%s", msg)
+		}
+		if !strings.Contains(msg, "outer:") || !strings.Contains(msg, "tx_fee_bump_inner_failed") {
+			t.Errorf("message did not report outer code:\n%s", msg)
+		}
+		if !strings.Contains(msg, "got inner:") || !strings.Contains(msg, "sequence") {
+			t.Errorf("message did not include plain-English remediation:\n%s", msg)
+		}
+	})
+
+	t.Run("non-fee-bump transaction result fails", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertFeeBumpInnerResultCode(tb, regularFailed, "tx_bad_seq") {
+			t.Fatal("assertion passed for non-fee-bump result")
+		}
+		if !strings.Contains(tb.Output(), "is not a fee-bump transaction with an inner result") {
+			t.Errorf("message did not report that result is not a fee-bump:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("invalid result input fails", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertFeeBumpInnerResultCode(tb, nil, "tx_bad_seq") {
+			t.Fatal("assertion passed for nil input")
+		}
+		if !strings.Contains(tb.Output(), "could not be read") {
+			t.Errorf("message did not report unreadable input:\n%s", tb.Output())
+		}
+	})
 }

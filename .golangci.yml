@@ -24,6 +24,9 @@ linters:
     - unconvert     # redundant type conversions
     - copyloopvar   # loop variable capture issues
     - nilerr        # returning nil when an error is non-nil
+    - thelper       # helper functions call t.Helper(), so failures point at the caller
+    - gocritic      # suspicious constructs the vet pass misses
+    - unparam       # parameters that are always the same value
 
   settings:
     errcheck:

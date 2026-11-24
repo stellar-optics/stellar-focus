@@ -6,3 +6,4 @@ coverage.html
 .DS_Store
 .idea/
 .vscode/
+/.focus/

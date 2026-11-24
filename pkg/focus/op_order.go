@@ -48,7 +48,7 @@ func AssertOperationSequence(t TB, envelope Value, want []xdr.OperationType) boo
 	fmt.Fprintf(&b, "  got   %s\n", describeOperationSequence(got))
 	fmt.Fprintf(&b, "  want  %s\n", describeOperationSequence(wantNames))
 	if listing := operationList(s); listing != "" {
-		fmt.Fprintf(&b, "\n%s\n", indent(listing, "  "))
+		fmt.Fprintf(&b, "\n%s\n", indent(listing))
 	}
 	t.Errorf("%s", strings.TrimRight(b.String(), "\n"))
 	return false

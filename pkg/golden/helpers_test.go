@@ -21,6 +21,13 @@ func buildEnvelope(t *testing.T, amount int64) string {
 // buildEnvelopeSeq is buildEnvelope with an explicit sequence number.
 func buildEnvelopeSeq(t *testing.T, seq, amount int64) string {
 	t.Helper()
+	return buildEnvelopeWith(t, seq, 100, amount)
+}
+
+// buildEnvelopeWith is buildEnvelope with an explicit sequence number and
+// fee, for tests that need a difference the suite's options do not cover.
+func buildEnvelopeWith(t *testing.T, seq, fee, amount int64) string {
+	t.Helper()
 
 	var src, dst xdr.AccountId
 	if err := src.SetAddress(testSource); err != nil {
@@ -35,7 +42,7 @@ func buildEnvelopeSeq(t *testing.T, seq, amount int64) string {
 		V1: &xdr.TransactionV1Envelope{
 			Tx: xdr.Transaction{
 				SourceAccount: src.ToMuxedAccount(),
-				Fee:           100,
+				Fee:           xdr.Uint32(fee),
 				SeqNum:        xdr.SequenceNumber(seq),
 				Cond:          xdr.Preconditions{Type: xdr.PreconditionTypePrecondNone},
 				Memo:          xdr.Memo{Type: xdr.MemoTypeMemoNone},

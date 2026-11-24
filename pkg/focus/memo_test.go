@@ -278,6 +278,198 @@ func TestAssertMemoTypedMessages(t *testing.T) {
 	}
 }
 
+// TestAssertMemoVariantsPass covers the typed memo assertions: the memo the
+// transaction carries is read in the form the caller already holds it.
+func TestAssertMemoVariantsPass(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		call func(focus.TB) bool
+	}{
+		{
+			"text memo",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoText(tb, envelopeWithMemo(t, textMemo("invoice-42")), "invoice-42")
+			},
+		},
+		{
+			"empty text memo",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoText(tb, envelopeWithMemo(t, textMemo("")), "")
+			},
+		},
+		{
+			"id memo",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoID(tb, envelopeWithMemo(t, idMemo(42)), 42)
+			},
+		},
+		{
+			"id memo above the int64 range",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoID(tb, envelopeWithMemo(t, idMemo(1<<63+1)), 1<<63+1)
+			},
+		},
+		{
+			"hash memo",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoHash(tb, envelopeWithMemo(t, hashMemo(testHash)), testHash)
+			},
+		},
+		{
+			"return memo satisfies the hash assertion",
+			func(tb focus.TB) bool {
+				return focus.AssertMemoHash(tb, envelopeWithMemo(t, returnMemo(testHash)), testHash)
+			},
+		},
+		{
+			"no memo",
+			func(tb focus.TB) bool {
+				return focus.AssertNoMemo(tb, envelopeWithMemo(t, xdr.Memo{Type: xdr.MemoTypeMemoNone}))
+			},
+		},
+		{
+			"no memo on an envelope that never had one",
+			func(tb focus.TB) bool {
+				return focus.AssertNoMemo(tb, envelopeValue(t, paymentOp(t, 100)))
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if !tc.call(tb) {
+				t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+			}
+			if tb.Failed() {
+				t.Errorf("assertion reported a failure while returning true:\n%s", tb.Output())
+			}
+		})
+	}
+}
+
+// TestAssertMemoVariantsFail checks what the typed memo assertions say when
+// they fail: the memo the transaction actually carries, and the memo the test
+// wanted.
+func TestAssertMemoVariantsFail(t *testing.T) {
+	t.Parallel()
+
+	text := func(s string) xdr.TransactionEnvelope { return envelopeWithMemo(t, textMemo(s)) }
+	id := func(v uint64) xdr.TransactionEnvelope { return envelopeWithMemo(t, idMemo(v)) }
+	hash := func(h xdr.Hash) xdr.TransactionEnvelope { return envelopeWithMemo(t, hashMemo(h)) }
+
+	tests := []struct {
+		name     string
+		call     func(focus.TB) bool
+		contains []string
+	}{
+		{
+			name: "wrong text value",
+			call: func(tb focus.TB) bool { return focus.AssertMemoText(tb, text("goodbye"), "hello") },
+			contains: []string{
+				"AssertMemoText: text memo is \"goodbye\", want \"hello\"",
+			},
+		},
+		{
+			name: "id memo where text was wanted",
+			call: func(tb focus.TB) bool { return focus.AssertMemoText(tb, id(42), "hello") },
+			contains: []string{
+				`the memo is an id memo (id: 42), want a text memo "hello"`,
+			},
+		},
+		{
+			name: "wrong id value",
+			call: func(tb focus.TB) bool { return focus.AssertMemoID(tb, id(41), 42) },
+			contains: []string{
+				"AssertMemoID: id memo is 41, want 42",
+			},
+		},
+		{
+			name: "text memo where id was wanted",
+			call: func(tb focus.TB) bool { return focus.AssertMemoID(tb, text("hello"), 42) },
+			contains: []string{
+				"the memo is a text memo (text: hello), want an id memo 42",
+			},
+		},
+		{
+			name: "wrong hash value",
+			call: func(tb focus.TB) bool {
+				return focus.AssertMemoHash(tb, hash(testHash), otherHash)
+			},
+			contains: []string{
+				"AssertMemoHash: hash memo differs",
+				"got   " + testHash.HexString(),
+				"want  " + otherHash.HexString(),
+			},
+		},
+		{
+			name: "id memo where hash was wanted",
+			call: func(tb focus.TB) bool {
+				return focus.AssertMemoHash(tb, id(7), testHash)
+			},
+			contains: []string{
+				"the memo is an id memo (id: 7), want a hash or return memo " + testHash.HexString(),
+			},
+		},
+		{
+			name: "wrong hash in a return memo",
+			call: func(tb focus.TB) bool {
+				return focus.AssertMemoHash(tb, envelopeWithMemo(t, returnMemo(otherHash)), testHash)
+			},
+			contains: []string{
+				"AssertMemoHash: return memo differs",
+				"got   " + otherHash.HexString(),
+				"want  " + testHash.HexString(),
+			},
+		},
+		{
+			name: "text memo where the memo should be absent",
+			call: func(tb focus.TB) bool { return focus.AssertNoMemo(tb, text("hello")) },
+			contains: []string{
+				"AssertNoMemo: the memo is a text memo (text: hello), want no memo",
+			},
+		},
+		{
+			name: "id memo where the memo should be absent",
+			call: func(tb focus.TB) bool { return focus.AssertNoMemo(tb, id(42)) },
+			contains: []string{
+				"AssertNoMemo: the memo is an id memo (id: 42), want no memo",
+			},
+		},
+		{
+			name: "value that is not an envelope",
+			call: func(tb focus.TB) bool { return focus.AssertMemoText(tb, 42, "hello") },
+			contains: []string{
+				"envelope value could not be read",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if tc.call(tb) {
+				t.Fatal("assertion passed, want a failure")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
+
 // TestMemoAssertionsOnBadInput checks the standard input error for a
 // non-envelope value and for a hash want of an unsupported type.
 func TestMemoAssertionsOnBadInput(t *testing.T) {

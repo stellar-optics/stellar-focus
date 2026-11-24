@@ -45,7 +45,7 @@ func AssertSignersEqual(t TB, meta Value, account Value, want map[string]uint32)
 	t.Helper()
 	const assertion = "AssertSignersEqual"
 
-	entry, addr, _, ok := accountEntryFrom(t, assertion, meta, account, "signers")
+	entry, addr, ok := accountEntryFrom(t, assertion, meta, account, "signers")
 	if !ok {
 		return false
 	}
@@ -60,7 +60,7 @@ func AssertSignersEqual(t TB, meta Value, account Value, want map[string]uint32)
 	lines := signerDiffLines(got, want)
 	t.Errorf("%s: account %s signers differ — %s\n\n  %s\n\n%s",
 		assertion, shorten(addr), pluralChanges(len(lines)),
-		strings.Join(lines, "\n  "), indent(describeSigners(got), "  "))
+		strings.Join(lines, "\n  "), indent(describeSigners(got)))
 	return false
 }
 
@@ -82,7 +82,7 @@ func AssertThresholdsEqual(t TB, meta Value, account Value, want Value) bool {
 		return false
 	}
 
-	entry, addr, _, ok := accountEntryFrom(t, assertion, meta, account, "thresholds")
+	entry, addr, ok := accountEntryFrom(t, assertion, meta, account, "thresholds")
 	if !ok {
 		return false
 	}
@@ -109,16 +109,16 @@ func AssertThresholdsEqual(t TB, meta Value, account Value, want Value) bool {
 // entry in terms of the assertion's subject.
 func accountEntryFrom(
 	t TB, assertion string, meta, account Value, noun string,
-) (*xdr.LedgerEntry, string, []ledgerChange, bool) {
+) (*xdr.LedgerEntry, string, bool) {
 	t.Helper()
 
 	changes, ok := ledgerChanges(t, assertion, meta)
 	if !ok {
-		return nil, "", nil, false
+		return nil, "", false
 	}
 	addr, ok := resolveAccount(t, assertion, "account", account)
 	if !ok {
-		return nil, "", nil, false
+		return nil, "", false
 	}
 
 	var entry *xdr.LedgerEntry
@@ -135,14 +135,14 @@ func accountEntryFrom(
 			}
 		}
 	}) {
-		return nil, "", nil, false
+		return nil, "", false
 	}
 	if entry == nil {
 		t.Errorf("%s: this meta carries no account entry for %s, so its %s cannot be read from it\n\n%s",
-			assertion, shorten(addr), noun, indent(describeAccountChanges(changes, addr), "  "))
-		return nil, "", nil, false
+			assertion, shorten(addr), noun, indent(describeAccountChanges(changes, addr)))
+		return nil, "", false
 	}
-	return entry, addr, changes, true
+	return entry, addr, true
 }
 
 // accountSigner is a signer reduced to its strkey and weight, so comparisons

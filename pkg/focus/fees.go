@@ -53,7 +53,7 @@ func AssertRefundFeeEqual(t TB, meta Value, want int64) bool {
 	}
 	if got := int64(fees.TotalRefundableResourceFeeCharged); got != want {
 		t.Errorf("AssertRefundFeeEqual: refundable resource fee is %s, want %s\n\n%s",
-			stroops(got), stroops(want), indent(describeResourceFees(fees), "  "))
+			stroops(got), stroops(want), indent(describeResourceFees(fees)))
 		return false
 	}
 	return true

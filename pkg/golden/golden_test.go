@@ -6,16 +6,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/fuzz"
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
 
 // A real captured mainnet envelope, shared with the sibling repositories.
 func envelope(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "..", "testdata", "tx_failed.env.txt"))
+	b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "fuzz", "testdata", "tx_failed.env.txt"))
 	if err != nil {
 		t.Fatalf("reading fixture: %v", err)
 	}
@@ -155,6 +157,71 @@ func TestAssertFailureShowsDiffAndRemedy(t *testing.T) {
 	}
 }
 
+// TestRequireStopsTheTestOnFailure is the fatal counterpart of Assert: the
+// same diagnostic, delivered as one fatal message so a test that stops
+// still shows the reader everything.
+func TestRequireStopsTheTestOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+
+	stored := buildEnvelope(t, 100)
+	actual := buildEnvelope(t, 200)
+
+	fixture, err := golden.Build(stored, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+	if g.Require("env", actual) {
+		t.Fatal("Require() passed against a stale golden file")
+	}
+
+	if len(tb.Fatals) == 0 {
+		t.Fatalf("the failure was not reported fatally:\n%s", tb.Output())
+	}
+	if len(tb.Errors) != 0 {
+		t.Errorf("the failure was also reported through Errorf:\n%s", tb.Output())
+	}
+
+	out := tb.Output()
+	for _, want := range []string{"Body.PaymentOp.Amount", "is out of date", "-focus.update"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the fatal message does not contain %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestRequirePassesAgainstAMatchingGolden checks the ordinary case: a
+// fixture that matches says nothing at all.
+func TestRequirePassesAgainstAMatchingGolden(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	env := buildEnvelope(t, 100)
+
+	fixture, err := golden.Build(env, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	tb := faketb.New()
+	if !golden.New(tb, golden.WithDir(dir)).Require("env", env) {
+		t.Errorf("Require() failed against a matching golden file:\n%s", tb.Output())
+	}
+	if tb.Failed() {
+		t.Errorf("a matching fixture reported a failure:\n%s", tb.Output())
+	}
+}
+
 // TestAssertMissingFileExplainsHowToCreateIt covers the first run of a new
 // golden test, where a bare "no such file" would be unhelpful.
 func TestAssertMissingFileExplainsHowToCreateIt(t *testing.T) {
@@ -194,9 +261,70 @@ func TestAssertHonoursIgnoreOptions(t *testing.T) {
 	}
 
 	tb := faketb.New()
-	g := golden.New(tb, golden.WithDir(dir), golden.WithOptions(focus.IgnoreSequence()))
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false),
+		golden.WithOptions(focus.IgnoreSequence()))
 	if !g.Assert("env", actual) {
 		t.Errorf("ignore option was not applied:\n%s", tb.Output())
+	}
+}
+
+func TestAssertSuppressesSequenceNoiseByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stored := buildEnvelopeSeq(t, 111, 100)
+	actual := buildEnvelopeSeq(t, 222, 100)
+	fixture, err := golden.Build(stored, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	tb := faketb.New()
+	if !golden.New(tb, golden.WithDir(dir)).Assert("env", actual) {
+		t.Errorf("default noise suppression did not normalize sequence number:\n%s", tb.Output())
+	}
+}
+
+// TestWithDiffContextControlsFailureContext checks that a golden mismatch
+// shows only the requested number of unchanged fields around the difference,
+// and says how many were left out.
+func TestWithDiffContextControlsFailureContext(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "env", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithDiffContext(1))
+	if g.Assert("env", buildEnvelope(t, 200)) {
+		t.Fatal("Assert() passed against a stale golden file")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "Body.PaymentOp.Asset = native") {
+		t.Errorf("one context line does not show the neighboring asset field:\n%s", out)
+	}
+	if strings.Contains(out, "Body.PaymentOp.Destination =") {
+		t.Errorf("one context line showed a field beyond the window:\n%s", out)
+	}
+	if !strings.Contains(out, "unchanged field(s) omitted") {
+		t.Errorf("the message does not note the omitted context:\n%s", out)
+	}
+
+	tb = faketb.New()
+	g = golden.New(tb, golden.WithDir(dir), golden.WithDiffContext(0))
+	if g.Assert("env", buildEnvelope(t, 200)) {
+		t.Fatal("Assert() passed against a stale golden file")
+	}
+	out = tb.Output()
+	if strings.Contains(out, "Body.PaymentOp.Asset = native") {
+		t.Errorf("zero context lines still showed a neighboring field:\n%s", out)
+	}
+	if !strings.Contains(out, "Body.PaymentOp.Amount") {
+		t.Errorf("zero context lines dropped the difference itself:\n%s", out)
 	}
 }
 
@@ -213,6 +341,284 @@ func TestPath(t *testing.T) {
 		if got := g.Path(tc.name); got != tc.want {
 			t.Errorf("Path(%q) = %q, want %q", tc.name, got, tc.want)
 		}
+	}
+}
+
+// writeGolden records a fixture under a name, exactly as a golden test would
+// have recorded it.
+func writeGolden(t *testing.T, dir, name, xdr string) {
+	t.Helper()
+
+	fixture, err := golden.Build(xdr, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, name+".golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+}
+
+// TestAssertAllPassesWhenEveryCaseMatches is the ordinary case: a table of
+// fixtures that all still match.
+func TestAssertAllPassesWhenEveryCaseMatches(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 200))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100), Description: "the first payment"},
+		{Name: "payment_v2", Value: buildEnvelope(t, 200)},
+	}
+	if !g.AssertAll(cases) {
+		t.Errorf("AssertAll() failed against matching golden files:\n%s", tb.Output())
+	}
+	if tb.Failed() {
+		t.Errorf("AssertAll() reported a failure for a table that matched:\n%s", tb.Output())
+	}
+}
+
+// TestAssertAllReportsTheFailingCaseWithItsIndexAndDescription is the reason
+// the table exists: a failure must say which entry failed, without the
+// reader scanning filenames.
+func TestAssertAllReportsTheFailingCaseWithItsIndexAndDescription(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v3", buildEnvelope(t, 300))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100), Description: "the first payment"},
+		{Name: "payment_v2", Value: buildEnvelope(t, 200), Description: "a payment that moved"},
+		{Name: "payment_v3", Value: buildEnvelope(t, 300)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with a drifted case in the table")
+	}
+
+	out := tb.Output()
+	for _, want := range []string{
+		"table summary",
+		"[1/3] payment_v1: ok",
+		"[2/3] payment_v2: DRIFTED",
+		"[3/3] payment_v3: ok",
+		"a payment that moved",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("failure output does not contain %q:\n%s", want, out)
+		}
+	}
+	// The diff itself must still be there: the summary says which entry
+	// failed, the diff says what changed.
+	if !strings.Contains(out, "Body.PaymentOp.Amount") {
+		t.Errorf("failure output does not show what changed:\n%s", out)
+	}
+}
+
+// TestAssertAllRunsEveryCaseAfterAFailure checks that a broken entry does not
+// hide the rest of the table.
+func TestAssertAllRunsEveryCaseAfterAFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v3", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 900)},
+		{Name: "payment_v2", Value: buildEnvelope(t, 100)},
+		{Name: "payment_v3", Value: buildEnvelope(t, 800)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with two drifted cases in the table")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[1/3] payment_v1: DRIFTED") {
+		t.Errorf("the first broken case is not reported:\n%s", out)
+	}
+	if !strings.Contains(out, "[3/3] payment_v3: DRIFTED") {
+		t.Errorf("the last case did not run after an earlier failure:\n%s", out)
+	}
+	if !strings.Contains(out, "[2/3] payment_v2: ok") {
+		t.Errorf("the passing case is not reported:\n%s", out)
+	}
+	if got := strings.Count(out, "is out of date"); got != 2 {
+		t.Errorf("reported %d stale fixtures, want 2:\n%s", got, out)
+	}
+}
+
+// TestAssertAllMergesCaseOptionsWithSuiteOptions checks that a case can ask
+// for its own rules without losing the suite's.
+func TestAssertAllMergesCaseOptionsWithSuiteOptions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "volatile", buildEnvelopeSeq(t, 111, 100))
+	writeGolden(t, dir, "strict", buildEnvelopeSeq(t, 111, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false))
+
+	cases := []golden.Case{
+		{
+			Name:    "volatile",
+			Value:   buildEnvelopeSeq(t, 222, 100),
+			Options: []focus.Option{focus.IgnoreSequence()},
+		},
+		{Name: "strict", Value: buildEnvelopeSeq(t, 222, 100)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed although one case asked for no rules at all")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[1/2] volatile: ok") {
+		t.Errorf("the per-case option was not applied:\n%s", out)
+	}
+	if !strings.Contains(out, "[2/2] strict: DRIFTED") {
+		t.Errorf("the suite's options were not applied to the second case:\n%s", out)
+	}
+}
+
+// TestAssertAllKeepsTheSuiteOptions checks that a case's own options add to
+// the suite's rather than replacing them: here the suite ignores the
+// sequence number and the case ignores the fee, so dropping either one leaves
+// a difference behind.
+func TestAssertAllKeepsTheSuiteOptions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "env", buildEnvelopeWith(t, 111, 100, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), golden.WithNoiseSuppression(false),
+		golden.WithOptions(focus.IgnoreSequence()))
+
+	cases := []golden.Case{
+		{
+			Name:    "env",
+			Value:   buildEnvelopeWith(t, 222, 200, 100),
+			Options: []focus.Option{focus.IgnorePaths("**.Fee")},
+		},
+	}
+	if !g.AssertAll(cases) {
+		t.Errorf("the suite's option was dropped when the case had its own:\n%s", tb.Output())
+	}
+}
+
+// TestAssertAllReportsAMissingFixturePerCase covers the first run of a new
+// table, where one of the fixtures has not been recorded yet.
+func TestAssertAllReportsAMissingFixturePerCase(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "present", buildEnvelope(t, 100))
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	cases := []golden.Case{
+		{Name: "present", Value: buildEnvelope(t, 100)},
+		{Name: "absent", Value: buildEnvelope(t, 200)},
+	}
+	if g.AssertAll(cases) {
+		t.Fatal("AssertAll() passed with a fixture that does not exist")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "[2/2] absent: DRIFTED") {
+		t.Errorf("the missing fixture is not reported as a failed case:\n%s", out)
+	}
+	if !strings.Contains(out, "does not exist yet") {
+		t.Errorf("the missing fixture does not say how to create it:\n%s", out)
+	}
+}
+
+// TestAssertAllSkipsFocusignoredFixtures checks that a fixture still being
+// worked on can sit beside the real ones without being verified: the fixture
+// root's .focusignore lists it, and the table leaves it out.
+func TestAssertAllSkipsFocusignoredFixtures(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeGolden(t, dir, "payment_v1", buildEnvelope(t, 100))
+	writeGolden(t, dir, "payment_v2", buildEnvelope(t, 100))
+	writeGolden(t, filepath.Join(dir, "records"), "payment_draft", buildEnvelope(t, 100))
+	writeGolden(t, filepath.Join(dir, "experimental"), "payment_v3", buildEnvelope(t, 100))
+
+	// A literal rule, a wildcard that has to match a name at any depth, and a
+	// path rule reaching into a directory.
+	ignores := "# fixtures not ready for CI\n" +
+		"payment_v2.golden.json\n" +
+		"*_draft.golden.json\n" +
+		"experimental/**\n"
+	if err := os.WriteFile(filepath.Join(dir, ".focusignore"), []byte(ignores), 0o600); err != nil {
+		t.Fatalf("writing .focusignore: %v", err)
+	}
+
+	// Every ignored fixture would fail if it were checked, so a table that
+	// passes is a table that left them out.
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+	if !g.AssertAll([]golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 100)},
+		{Name: "payment_v2", Value: buildEnvelope(t, 900)},
+		{Name: "records/payment_draft", Value: buildEnvelope(t, 900)},
+		{Name: "experimental/payment_v3", Value: buildEnvelope(t, 900)},
+	}) {
+		t.Fatalf("AssertAll() checked a fixture listed in .focusignore:\n%s", tb.Output())
+	}
+	if out := tb.Output(); strings.Contains(out, "payment_v2") ||
+		strings.Contains(out, "payment_draft") || strings.Contains(out, "payment_v3") {
+		t.Errorf("an ignored fixture was checked:\n%s", out)
+	}
+
+	// The fixtures that are not ignored are still verified, and the ignored
+	// ones do not even take up a place in the table's summary.
+	tb = faketb.New()
+	g = golden.New(tb, golden.WithDir(dir))
+	if g.AssertAll([]golden.Case{
+		{Name: "payment_v1", Value: buildEnvelope(t, 200)},
+		{Name: "experimental/payment_v3", Value: buildEnvelope(t, 900)},
+	}) {
+		t.Fatal("AssertAll() passed with a drifted fixture that is not ignored")
+	}
+	out := tb.Output()
+	if !strings.Contains(out, "[1/1] payment_v1: DRIFTED") {
+		t.Errorf("the non-ignored fixture was not verified on its own:\n%s", out)
+	}
+	if strings.Contains(out, "payment_v3") {
+		t.Errorf("the ignored case was still counted in the table:\n%s", out)
+	}
+}
+
+// TestAssertAllOnAnEmptyTable checks that an empty table is a pass, not a
+// failure: there is nothing to be wrong with.
+func TestAssertAllOnAnEmptyTable(t *testing.T) {
+	t.Parallel()
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(t.TempDir()))
+
+	if !g.AssertAll(nil) {
+		t.Error("AssertAll() failed for an empty table")
+	}
+	if tb.Failed() {
+		t.Errorf("an empty table reported a failure:\n%s", tb.Output())
 	}
 }
 
@@ -260,4 +666,205 @@ func TestUpdateFlagIsRegistered(t *testing.T) {
 	}
 	// Update() returning false without panicking is the check; the flag is
 	// registered at package init and would panic on a duplicate name.
+}
+
+// TestRefreshRendersTheDecodedSectionAgain is what the refresh is for: the
+// decoded tree of a stored fixture goes stale when the formatter changes, and
+// re-recording the fixture to fix it would re-record the data too.
+func TestRefreshRendersTheDecodedSectionAgain(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "env.golden.json")
+
+	fixture, err := golden.Build(envelope(t), "TransactionEnvelope", "a failed Soroban call", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	fixture.Decoded = json.RawMessage(`{"stale": true}`)
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	changed, err := golden.Refresh(path)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if !changed {
+		t.Error("Refresh() reported no change for a stale fixture")
+	}
+
+	refreshed, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if strings.Contains(string(refreshed.Decoded), "stale") {
+		t.Errorf("the decoded section was not refreshed:\n%s", refreshed.Decoded)
+	}
+	// Everything but the decoded section keeps its value.
+	if refreshed.XDR != fixture.XDR {
+		t.Error("the refresh changed the XDR")
+	}
+	if refreshed.Type != fixture.Type {
+		t.Errorf("the refresh changed the type: %q", refreshed.Type)
+	}
+	if refreshed.Description != fixture.Description {
+		t.Errorf("the refresh changed the description: %q", refreshed.Description)
+	}
+}
+
+// TestRefreshLeavesACurrentFixtureAlone checks that a refresh is safe to run
+// over a whole directory: nothing changes, so nothing is written.
+func TestRefreshLeavesACurrentFixtureAlone(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "env.golden.json")
+
+	fixture, err := golden.Build(envelope(t), "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading file: %v", err)
+	}
+
+	changed, err := golden.Refresh(path)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	if changed {
+		t.Error("Refresh() changed a fixture that was already current")
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading file: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Error("the file was rewritten even though nothing changed")
+	}
+}
+
+// TestRefreshReportsAFixtureItCannotDecode checks that a fixture whose XDR
+// does not decode is reported rather than quietly left stale.
+func TestRefreshReportsAFixtureItCannotDecode(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "broken.golden.json")
+
+	fixture, err := golden.Build(envelope(t), "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	fixture.XDR = "!!! not xdr !!!"
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	if _, err := golden.Refresh(path); err == nil {
+		t.Fatal("Refresh() returned no error for a fixture it could not decode")
+	} else if !strings.Contains(err.Error(), "decoding") {
+		t.Errorf("the error does not say what went wrong: %v", err)
+	}
+}
+
+func TestNewProvenanceFillsTheKnownPassphrase(t *testing.T) {
+	t.Parallel()
+
+	at := time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		network string
+		want    string
+	}{
+		{"testnet", "Test SDF Network ; September 2015"},
+		{"mainnet", "Public Global Stellar Network ; September 2015"},
+		{"futurenet", "Test SDF Future Network ; October 2022"},
+		{"standalone", ""},
+	}
+	for _, tc := range tests {
+		p := golden.NewProvenance(tc.network, "https://rpc.example", 1, "abc", at)
+		if p.NetworkPassphrase != tc.want {
+			t.Errorf("NewProvenance(%q).NetworkPassphrase = %q, want %q", tc.network, p.NetworkPassphrase, tc.want)
+		}
+		if got := golden.PassphraseFor(tc.network); got != tc.want {
+			t.Errorf("PassphraseFor(%q) = %q, want %q", tc.network, got, tc.want)
+		}
+	}
+}
+
+// TestFuzzSeedsAreBuiltFromARealGoldenFixture checks that the deserializer
+// fuzz corpus starts from a fixture this package actually writes: the valid
+// seeds must carry the captured envelope, not a hand-written stub. A fuzz
+// target seeded with bytes its own encoder cannot produce would teach the
+// parser nothing.
+func TestFuzzSeedsAreBuiltFromARealGoldenFixture(t *testing.T) {
+	t.Parallel()
+
+	env := envelope(t)
+	seeded := map[golden.Format]bool{}
+
+	for _, seed := range fuzz.GoldenSeeds() {
+		if !strings.HasPrefix(seed.Name, "valid/") {
+			continue
+		}
+		serializer, err := golden.SerializerFor(seed.Format)
+		if err != nil {
+			t.Fatalf("SerializerFor(%q) error = %v", seed.Format, err)
+		}
+		fixture, err := serializer.Unmarshal(seed.Data)
+		if err != nil {
+			t.Errorf("the %s seed does not deserialize: %v", seed.Format, err)
+			continue
+		}
+		if fixture.XDR != env || fixture.Type != "TransactionEnvelope" {
+			continue
+		}
+		seeded[seed.Format] = true
+	}
+
+	for _, format := range []golden.Format{golden.JSON, golden.YAML, golden.Text} {
+		if !seeded[format] {
+			t.Errorf("the fuzz corpus has no valid %s fixture built from the captured envelope", format)
+		}
+	}
+}
+
+func TestPassphraseIsWrittenAndReadBack(t *testing.T) {
+	t.Parallel()
+
+	const passphrase = "Standalone Network ; February 2017"
+	provenance := golden.NewProvenance("standalone", "http://localhost:8000/rpc", 7, "abc",
+		time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC))
+	provenance.NetworkPassphrase = passphrase
+
+	fixture, err := golden.Build(envelope(t), "TransactionEnvelope", "", provenance)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "envelope.golden.json")
+	if err := golden.Save(path, fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	if !strings.Contains(string(raw), `"networkPassphrase": "Standalone Network ; February 2017"`) {
+		t.Errorf("the passphrase is not in the file:\n%s", raw)
+	}
+
+	loaded, err := golden.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Captured == nil || loaded.Captured.NetworkPassphrase != passphrase {
+		t.Errorf("loaded provenance = %+v, want passphrase %q", loaded.Captured, passphrase)
+	}
 }

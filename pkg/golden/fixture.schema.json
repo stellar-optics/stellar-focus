@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "stellar-focus golden fixture",
+  "type": "object",
+  "required": ["type", "xdr"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {"type": "string"},
+    "type": {"type": "string", "minLength": 1},
+    "description": {"type": "string"},
+    "xdr": {"type": "string", "minLength": 1},
+    "captured": {
+      "type": "object",
+      "required": ["network"],
+      "additionalProperties": false,
+      "properties": {
+        "network": {"type": "string", "minLength": 1},
+        "networkPassphrase": {"type": "string"},
+        "ledger": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "txHash": {"type": "string"},
+        "at": {"type": "string", "format": "date-time"},
+        "endpoint": {"type": "string"},
+        "anonymized": {"type": "boolean"},
+        "sanitized": {"type": "boolean"}
+      }
+    },
+    "decoded": {}
+  }
+}

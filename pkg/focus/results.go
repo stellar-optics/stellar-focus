@@ -25,7 +25,7 @@ func AssertSucceeded(t TB, result Value) bool {
 		return false
 	}
 	if !s.Outcome.Success {
-		t.Errorf("AssertSucceeded: transaction failed\n%s", indent(explainOutcome(s), "  "))
+		t.Errorf("AssertSucceeded: transaction failed\n%s", indent(explainOutcome(s)))
 		return false
 	}
 	return true
@@ -101,7 +101,7 @@ func AssertOperationSucceeded(t TB, result Value, index int) bool {
 	}
 	if !op.Result.Success {
 		t.Errorf("AssertOperationSucceeded: operation %d%s failed with %q\n\n  %s\n%s",
-			index, opLabel(op.Type), op.Result.Code, describeReason(*op.Result), indent(explainOutcome(s), "  "))
+			index, opLabel(op.Type), op.Result.Code, describeReason(*op.Result), indent(explainOutcome(s)))
 		return false
 	}
 	return true
@@ -162,7 +162,7 @@ func AssertFailedOperations(t TB, result Value, want ...int) bool {
 		return true
 	}
 	t.Errorf("AssertFailedOperations: operations %v failed, want %v\n%s",
-		got, want, indent(explainOutcome(s), "  "))
+		got, want, indent(explainOutcome(s)))
 	return false
 }
 

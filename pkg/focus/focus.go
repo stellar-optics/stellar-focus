@@ -55,6 +55,9 @@ type TB interface {
 	Name() string
 }
 
+// TestingT is an alias for TB for compatibility with standard testing interfaces.
+type TestingT = TB
+
 // Value is any XDR payload an assertion accepts. The permitted forms are:
 //
 //	string                          base64-encoded XDR
@@ -68,6 +71,10 @@ type TB interface {
 // The looseness is deliberate. Test code holds XDR in whichever form the
 // system under test produced, and requiring callers to convert at every call
 // site is friction in exactly the common case.
+//
+// One assertion accepts a form that is not XDR at all: an event matcher
+// takes a map of field names for its payload, which the contract's
+// specification turns into a comparison by field name. See Event.
 type Value = any
 
 // coerce turns an accepted Value into a decoded lens value.
@@ -209,4 +216,22 @@ func Encode(v Value, typeName string) (string, *lens.Value, error) {
 		return "", nil, fmt.Errorf("encoding %s: %w", decoded.Type, err)
 	}
 	return base64Encode(raw), decoded, nil
+}
+
+// CoerceForBenchmark exposes the internal coerce function for benchmarking.
+// It is not intended for production use.
+func CoerceForBenchmark(v Value, typeName string) (*lens.Value, error) {
+	return coerce(v, typeName)
+}
+
+// LensDecodeForBenchmark exposes lens.Decode for benchmarking.
+// It is not intended for production use.
+func LensDecodeForBenchmark(payload string) (*lens.Value, error) {
+	return lens.Decode(payload)
+}
+
+// LensDiffForBenchmark exposes lens.Diff for benchmarking.
+// It is not intended for production use.
+func LensDiffForBenchmark(want, got *lens.Value) (*lens.DiffResult, error) {
+	return lens.Diff(want, got)
 }

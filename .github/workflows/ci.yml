@@ -15,18 +15,32 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25"
+  # The single-platform jobs (lint, library, typescript-check) use these; the
+  # build and test jobs take their Go version from the matrix instead.
+  GO_VERSION: "1.25.x"
+  NODE_VERSION: "20"
+
+# Every run step is bash on every runner, so the same script works on Windows
+# as it does on Linux and macOS.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
-    name: Build and vet
-    runs-on: ubuntu-latest
+    name: Build and vet (${{ matrix.os }}, Go ${{ matrix.go-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ["1.25.x", "1.26.x"]
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ matrix.go-version }}
           cache: true
 
       - name: Verify go.mod is tidy
@@ -68,15 +82,28 @@ jobs:
           version: latest
 
   test:
-    name: Test
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: ["1.25.x", "1.26.x"]
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version: ${{ matrix.go-version }}
           cache: true
+
+      # A fixture recorded on Windows has to be the same bytes as one recorded
+      # on Linux. This writes and re-reads a fixture through the real Save path
+      # and compares it with the bytes Linux produces, so a platform that leaks
+      # its line ending into the file fails here rather than as diff noise in
+      # someone's pull request.
+      - name: Golden files are byte-identical on every platform
+        run: go test ./pkg/golden -run TestSavedFixturesAreByteIdentical -count=1 -v
 
       - name: Test with race detector and coverage
         run: |
@@ -96,11 +123,36 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload coverage profile
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: coverage.out
           if-no-files-found: error
+
+  fuzz:
+    name: Fuzz golden parsers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The golden deserializer and the template engine read arbitrary files
+      # and arbitrary text. Malformed input returning an error is the pass; a
+      # panic, a hang or an unbounded allocation fails the run. Go executes
+      # one fuzz target per invocation, so each target is its own step.
+      - name: Fuzz the golden fixture deserializer
+        run: |
+          go test ./pkg/fuzz -run '^$' \
+            -fuzz '^FuzzGoldenDeserializer$' -fuzztime 30s -fuzzminimizetime 10s
+
+      - name: Fuzz template interpolation
+        run: |
+          go test ./pkg/fuzz -run '^$' \
+            -fuzz '^FuzzInterpolate$' -fuzztime 30s -fuzzminimizetime 10s
 
   library:
     name: Library smoke test
@@ -142,6 +194,12 @@ jobs:
             exit 1
           fi
 
+      # The AST check states the whole boundary, not just the CLI half: only
+      # the standard library, the Stellar SDK, lens and this module itself may
+      # be imported by pkg/focus.
+      - name: pkg/focus stays within its dependency boundary
+        run: go test ./pkg/focus -run TestPackageDependencies -count=1 -v
+
       - name: golden -focus.update round-trips
         run: |
           # A throwaway module proves the documented workflow works from the
@@ -173,7 +231,7 @@ jobs:
           	g.Assert("envelope", strings.TrimSpace(string(b)))
           }
           GOTEST
-          cp testdata/tx_failed.env.txt "$tmp/envelope.txt"
+          cp pkg/fuzz/testdata/tx_failed.env.txt "$tmp/envelope.txt"
           cd "$tmp"
           go mod edit -require github.com/stellar-optics/stellar-focus@v0.0.0
           go mod edit -replace github.com/stellar-optics/stellar-focus="$GITHUB_WORKSPACE"
@@ -203,3 +261,25 @@ jobs:
           fi
           grep -q '"decoded"' testdata/envelope.golden.json \
             || { echo "::error::the golden file has no decoded section"; exit 1; }
+
+  typescript-check:
+    name: TypeScript type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: examples/package-lock.json
+
+      - name: Install TypeScript example deps
+        run: |
+          cd examples
+          npm ci
+
+      - name: Type-check lifecycle.ts
+        run: |
+          cd examples
+          npm run typecheck

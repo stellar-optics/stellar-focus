@@ -2,6 +2,7 @@ package focus
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -41,6 +42,10 @@ const (
 	// DiagnosticContract is a contract event carried in the diagnostic stream,
 	// which is where the events of a failed call survive.
 	DiagnosticContract = "contract"
+	// DiagnosticError is the host saying the call died. Its payload is the
+	// ScError the invocation failed with, which is the only place the reason
+	// for a trap survives.
+	DiagnosticError = "error"
 	// DiagnosticSystem is a system event, emitted by the protocol rather than
 	// by a contract.
 	DiagnosticSystem = "system"
@@ -51,38 +56,12 @@ const (
 
 // DiagnosticEvent is one event in a transaction's diagnostic stream, with the
 // position and depth it was emitted at.
-type DiagnosticEvent struct {
-	// Index is the event's zero-based position in the stream.
-	//
-	// A diagnostic event carries no wall-clock timestamp, so its position is
-	// the only ordering key the protocol gives it; see DiagnosticTimeline for
-	// what dates the stream as a whole.
-	Index int
-	// Depth is the contract call depth the event was emitted at: 0 for the
-	// transaction's outermost call, 1 for a call made from inside it, and so
-	// on. A fn_call and its matching fn_return share a depth.
-	Depth int
-	// Kind is one of the Diagnostic* constants, or the first topic symbol of a
-	// diagnostic event this package does not name.
-	Kind string
-	// ContractID is the strkey "C…" address of the contract the event belongs
-	// to. It is empty for a system event, which no contract emits.
-	ContractID string
-	// Topics and Data are the event's payload in wire form. Use Event's
-	// matching instead of reading these unless you need the raw values.
-	Topics []xdr.ScVal
-	Data   xdr.ScVal
-	// InSuccessfulContractCall reports whether the call that emitted the event
-	// completed. Events from a failed call survive only here.
-	InSuccessfulContractCall bool
-
-	// event is the raw event, kept for matching against a matcher.
-	event xdr.ContractEvent
-	// detail is the pre-rendered one-line description. It is built behind
-	// guard, while the value is known to be well-formed, so that printing a
-	// failure never calls a generated accessor on a value that could panic.
-	detail string
-}
+//
+// It is the same shape as Event, so an event read out of a stream can be fed
+// straight back into the event matchers. ContractID, Topics and Data carry the
+// payload; Index, Depth, Kind and InSuccessfulContractCall carry the stream
+// position that a diagnostic event has instead of a timestamp.
+type DiagnosticEvent = Event
 
 // DiagnosticEventMatch describes one diagnostic event a test expects to find,
 // and the order in which it expects to find it.
@@ -101,6 +80,10 @@ type DiagnosticEventMatch struct {
 	Topics []any
 	// Data matches the event payload. Nil matches any payload.
 	Data any
+	// Spec is the contract's specification: the ScSpecEntry list that names
+	// its types and events. It is optional, and it changes only how the
+	// payload is described, never whether it matches.
+	Spec []xdr.ScSpecEntry
 	// Call filters by whether the call that emitted the event succeeded.
 	Call CallOutcome
 }
@@ -171,7 +154,7 @@ func AssertDiagnosticEventOrder(t TB, meta Value, want []DiagnosticEventMatch) b
 		if found < 0 {
 			t.Errorf("%s: %s\n\n%s", assertion,
 				describeDiagnosticOrderFailure(i, want, pos, events),
-				indent(describeDiagnosticStream(events), "  "))
+				indent(describeDiagnosticStream(events)))
 			return false
 		}
 		pos = found + 1
@@ -233,8 +216,8 @@ func AssertDiagnosticEventTimeline(t TB, meta Value, want DiagnosticTimeline) bo
 	if got := pins[len(pins)-1]; got != want.Ledger {
 		t.Errorf("%s: the transaction was applied in ledger %d, want %s\n\n%s\n\n%s",
 			assertion, got, describeTimeline(want),
-			indent(describeLedgerPins(pins), "  "),
-			indent(describeDiagnosticStream(events), "  "))
+			indent(describeLedgerPins(pins)),
+			indent(describeDiagnosticStream(events)))
 		return false
 	}
 	return true
@@ -330,7 +313,12 @@ func decorateDiagnostics(raw []xdr.DiagnosticEvent) []DiagnosticEvent {
 
 		body, hasBody := de.Event.Body.GetV0()
 		if hasBody {
-			ev.Topics = body.Topics
+			if len(body.Topics) > 0 {
+				ev.Topics = make([]any, len(body.Topics))
+				for i, topic := range body.Topics {
+					ev.Topics[i] = topic
+				}
+			}
 			ev.Data = body.Data
 		}
 		ev.detail = describeDiagnosticEvent(ev, hasBody)
@@ -380,7 +368,12 @@ func diagnosticEventMatches(e DiagnosticEvent, w DiagnosticEventMatch) bool {
 		// CallOutcomeAny, and any value outside the defined set, filters
 		// nothing.
 	}
-	return eventMatches(e.event, Event{ContractID: w.ContractID, Topics: w.Topics, Data: w.Data})
+	return eventMatches(e.event, Event{
+		ContractID: w.ContractID,
+		Topics:     w.Topics,
+		Data:       w.Data,
+		Spec:       w.Spec,
+	}, newSpecIndex(w.Spec))
 }
 
 // indexOfDiagnosticEvent returns the position of the first event at or after
@@ -435,15 +428,15 @@ func describeDiagnosticEvent(e DiagnosticEvent, hasBody bool) string {
 	if e.ContractID != "" {
 		fmt.Fprintf(&b, "  contract %s", shorten(e.ContractID))
 	}
-	if hasBody {
-		if len(e.Topics) > 0 {
-			topics := make([]string, 0, len(e.Topics))
-			for _, topic := range e.Topics {
+	if body, ok := e.event.Body.GetV0(); hasBody && ok {
+		if len(body.Topics) > 0 {
+			topics := make([]string, 0, len(body.Topics))
+			for _, topic := range body.Topics {
 				topics = append(topics, describeScVal(topic))
 			}
 			fmt.Fprintf(&b, "  topics[%s]", strings.Join(topics, ", "))
 		}
-		fmt.Fprintf(&b, "  data %s", describeScVal(e.Data))
+		fmt.Fprintf(&b, "  data %s", describeScVal(body.Data))
 	} else {
 		b.WriteString("  (the event body carries no V0 arm, so it has no topics or data)")
 	}
@@ -564,4 +557,112 @@ func describeCloseTime(t time.Time) string {
 		return "(no close time)"
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// AssertContractLogMessage checks that a transaction's diagnostic events contain
+// a log message matching pattern.
+//
+// pattern can be a literal substring, or a regular expression enclosed in slashes
+// (e.g. "/user \d+ deposited/").
+//
+// When no match is found, failure output shows all captured diagnostic log events.
+func AssertContractLogMessage(t TestingT, metaInput any, pattern string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertContractLogMessage"
+	_ = newConfig(opts...)
+
+	var (
+		re       *regexp.Regexp
+		isRegex  bool
+		regexErr error
+	)
+	if len(pattern) >= 2 && strings.HasPrefix(pattern, "/") && strings.HasSuffix(pattern, "/") {
+		isRegex = true
+		re, regexErr = regexp.Compile(pattern[1 : len(pattern)-1])
+		if regexErr != nil {
+			t.Errorf("%s: invalid regular expression %s: %v", assertion, pattern, regexErr)
+			return false
+		}
+	}
+
+	matchStr := func(s string) bool {
+		if isRegex {
+			return re.MatchString(s)
+		}
+		return strings.Contains(s, pattern)
+	}
+
+	events, _, ok := diagnosticStream(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+
+	for _, e := range events {
+		if matchStr(e.detail) {
+			return true
+		}
+		if body, hasBody := e.event.Body.GetV0(); hasBody {
+			for _, topic := range body.Topics {
+				for _, str := range extractScValStrings(topic) {
+					if matchStr(str) {
+						return true
+					}
+				}
+				if matchStr(describeScVal(topic)) {
+					return true
+				}
+			}
+			for _, str := range extractScValStrings(body.Data) {
+				if matchStr(str) {
+					return true
+				}
+			}
+			if matchStr(describeScVal(body.Data)) {
+				return true
+			}
+		}
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: no diagnostic log message matched %q\n\n", assertion, pattern)
+	if len(events) == 0 {
+		b.WriteString("  the transaction emitted no diagnostic events")
+	} else {
+		fmt.Fprintf(&b, "  captured diagnostic event(s) (%d):\n%s",
+			len(events), indent(describeDiagnosticStream(events)))
+	}
+	t.Errorf("%s", b.String())
+	return false
+}
+
+func extractScValStrings(v xdr.ScVal) []string {
+	var res []string
+	switch v.Type {
+	case xdr.ScValTypeScvString:
+		if s, ok := v.GetStr(); ok {
+			res = append(res, string(s))
+		}
+	case xdr.ScValTypeScvSymbol:
+		if s, ok := v.GetSym(); ok {
+			res = append(res, string(s))
+		}
+	case xdr.ScValTypeScvBytes:
+		if b, ok := v.GetBytes(); ok {
+			res = append(res, string(b))
+		}
+	case xdr.ScValTypeScvVec:
+		if vec, ok := v.GetVec(); ok && vec != nil {
+			for _, item := range *vec {
+				res = append(res, extractScValStrings(item)...)
+			}
+		}
+	case xdr.ScValTypeScvMap:
+		if m, ok := v.GetMap(); ok && m != nil {
+			for _, entry := range *m {
+				res = append(res, extractScValStrings(entry.Key)...)
+				res = append(res, extractScValStrings(entry.Val)...)
+			}
+		}
+	}
+	return res
 }

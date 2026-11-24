@@ -124,8 +124,8 @@ func AssertConstructorState(t TB, meta Value, want ConstructorState) bool {
 
 	t.Errorf("%s: contract %s was initialized with different state — %s\n\n%s\n\n%s",
 		assertion, shorten(snapshot.contract), pluralDiff(len(diffs)),
-		indent(renderConstructorDifferences(diffs), "  "),
-		indent(snapshot.describe(), "  "))
+		indent(renderConstructorDifferences(diffs)),
+		indent(snapshot.describe()))
 	return false
 }
 
@@ -172,7 +172,7 @@ func AssertContractOwner(t TB, meta Value, contractID, wantOwner string) bool {
 	if len(candidates) == 0 {
 		t.Errorf("%s: contract %s has no owner binding: the deployment wrote no storage entry "+
 			"with key %q\n\n%s",
-			assertion, shorten(snapshot.contract), ownerKey, indent(snapshot.describe(), "  "))
+			assertion, shorten(snapshot.contract), ownerKey, indent(snapshot.describe()))
 		return false
 	}
 	if anyValueEquals(candidates, wantID) {
@@ -184,13 +184,13 @@ func AssertContractOwner(t TB, meta Value, contractID, wantOwner string) bool {
 		t.Errorf("%s: the owner entry on contract %s holds %s, which is not an address; "+
 			"an owner binding must be a strkey account (G…) or contract (C…)\n\n%s",
 			assertion, shorten(snapshot.contract), describeValue(got.value),
-			indent(snapshot.describe(), "  "))
+			indent(snapshot.describe()))
 		return false
 	}
 
 	t.Errorf("%s: contract %s binds owner to %s, want %s\n\n%s",
 		assertion, shorten(snapshot.contract), describeValue(got.value), describeValue(want),
-		indent(snapshot.describe(), "  "))
+		indent(snapshot.describe()))
 	return false
 }
 
@@ -445,15 +445,10 @@ func readConstructorSnapshot(t TB, assertion string, meta Value, contractID stri
 	var (
 		snapshot constructorSnapshot
 		present  []string
-		err      error
 	)
 	if !guard(t, assertion, func() {
-		snapshot, present, err = scanContractData(changes, contractID)
+		snapshot, present = scanContractData(changes, contractID)
 	}) {
-		return constructorSnapshot{}, false
-	}
-	if err != nil {
-		t.Errorf("%s: reading the contract data: %v", assertion, err)
 		return constructorSnapshot{}, false
 	}
 
@@ -468,12 +463,12 @@ func readConstructorSnapshot(t TB, assertion string, meta Value, contractID stri
 				"A __constructor runs inside the deployment transaction, so the state it writes "+
 				"appears in that transaction's meta. Check the contract id, and that this is the "+
 				"deployment transaction rather than a later invocation.",
-				assertion, shorten(contractID), indent(detail, "  "))
+				assertion, shorten(contractID), indent(detail))
 			return constructorSnapshot{}, false
 		}
 		t.Errorf("%s: contract %s has no contract instance entry in this transaction, so the "+
 			"deployment did not create it\n\n%s",
-			assertion, shorten(contractID), indent(snapshot.describe(), "  "))
+			assertion, shorten(contractID), indent(snapshot.describe()))
 		return constructorSnapshot{}, false
 	}
 
@@ -486,7 +481,7 @@ func readConstructorSnapshot(t TB, assertion string, meta Value, contractID stri
 //
 // The returned present lines list every contract data change the meta carries,
 // for the diagnosis a wrong contract id needs.
-func scanContractData(changes []ledgerChange, contractID string) (constructorSnapshot, []string, error) {
+func scanContractData(changes []ledgerChange, contractID string) (constructorSnapshot, []string) {
 	snapshot := constructorSnapshot{contract: contractID}
 	positions := make(map[string]int)
 	var present []string
@@ -567,7 +562,7 @@ func scanContractData(changes []ledgerChange, contractID string) (constructorSna
 		})
 	}
 
-	return snapshot, present, nil
+	return snapshot, present
 }
 
 // addConstructorEntry appends an entry, or replaces an earlier value for the

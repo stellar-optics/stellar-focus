@@ -72,8 +72,8 @@ issue on its own.
 
 ### 2. The library stays dependency-light
 
-`pkg/focus`, `pkg/focus/require` and `pkg/golden` may depend only on the
-standard library, `stellar/go-stellar-sdk` and `stellar-xdr-lens`. No
+`pkg/focus`, `pkg/focus/require`, `pkg/fuzz` and `pkg/golden` may depend only
+on the standard library, `stellar/go-stellar-sdk` and `stellar-xdr-lens`. No
 assertion framework, no diff library, no CLI framework.
 
 Test helpers get imported into other people's projects, and one that drags

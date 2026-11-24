@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/clients/rpcclient"
@@ -14,9 +15,11 @@ import (
 //
 // This is the only type in stellar-focus that opens a network connection.
 type RPCSource struct {
-	client   *rpcclient.Client
-	network  string
-	endpoint string
+	client     *rpcclient.Client
+	network    string
+	endpoint   string
+	mu         sync.RWMutex
+	passphrase string
 }
 
 // NewRPCSource returns a Source backed by Soroban RPC.
@@ -39,6 +42,31 @@ func (s *RPCSource) Network() string { return s.network }
 
 // Endpoint implements Source.
 func (s *RPCSource) Endpoint() string { return s.endpoint }
+
+// NetworkPassphrase detects and caches the passphrase reported by this RPC
+// endpoint. The first successful result is reused for subsequent captures.
+func (s *RPCSource) NetworkPassphrase(ctx context.Context) (string, error) {
+	s.mu.RLock()
+	passphrase := s.passphrase
+	s.mu.RUnlock()
+	if passphrase != "" {
+		return passphrase, nil
+	}
+	response, err := s.client.GetNetwork(ctx)
+	if err != nil {
+		return "", fmt.Errorf("rpc getNetwork: %w", err)
+	}
+	if response.Passphrase == "" {
+		return "", fmt.Errorf("rpc getNetwork returned an empty network passphrase")
+	}
+	s.mu.Lock()
+	if s.passphrase == "" {
+		s.passphrase = response.Passphrase
+	}
+	passphrase = s.passphrase
+	s.mu.Unlock()
+	return passphrase, nil
+}
 
 // Close releases the underlying HTTP resources.
 func (s *RPCSource) Close() error {

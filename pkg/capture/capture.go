@@ -8,12 +8,17 @@
 package capture
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/golden"
 )
@@ -32,9 +37,49 @@ var DefaultEndpoints = map[string]string{
 	NetworkMainnet: "https://mainnet.sorobanrpc.com",
 }
 
+// DefaultHorizonEndpoints maps a network name to its public Horizon
+// endpoint.
+//
+// Horizon is a separate service from Soroban RPC, so it has its own
+// defaults: a capture that asks for Horizon and gets an RPC URL would fail
+// in a way that took a while to understand.
+var DefaultHorizonEndpoints = map[string]string{
+	NetworkTestnet: "https://horizon-testnet.stellar.org",
+	NetworkMainnet: "https://horizon.stellar.org",
+}
+
 // ErrNotFound is returned when the requested item is not on the network, or
 // has aged out of the endpoint's retention window.
 var ErrNotFound = errors.New("not found on this network")
+
+// CacheOptions configures the on-disk capture cache.
+//
+// The cache lives under .focus/cache by default. TTL ages entries out; a zero
+// TTL uses DefaultCacheTTL. MaxBytes bounds the cache directory, with older
+// and less recently used entries evicted first; a zero or negative MaxBytes
+// leaves the size unbounded.
+type CacheOptions struct {
+	// Dir is the cache root. An empty Dir disables caching.
+	Dir string
+	// TTL is how long an entry stays fresh. Zero uses DefaultCacheTTL.
+	TTL time.Duration
+	// MaxBytes is the size limit in bytes. Zero or less means unbounded.
+	MaxBytes int64
+}
+
+// OpenCache returns a cache configured by opts and prunes it immediately, so
+// a previous session's expired or oversized entries do not linger.
+//
+// It is the single place the capture commands need to construct a cache: the
+// options are validated by the same code that applies them, and a new session
+// starts from a cache already within its configured limits.
+func OpenCache(opts CacheOptions) (*Cache, error) {
+	cache := NewCache(opts.Dir, opts.TTL)
+	if err := cache.Prune(opts.MaxBytes, opts.TTL); err != nil {
+		return nil, err
+	}
+	return cache, nil
+}
 
 // Record is one captured item, before it becomes a fixture file.
 type Record struct {
@@ -49,6 +94,11 @@ type Record struct {
 	TxHash string
 	// Description is a human note recorded in the fixture.
 	Description string
+	// Anonymized marks XDR whose public account addresses were replaced.
+	Anonymized bool
+	// Sanitized marks XDR whose memos, data values or secret keys were
+	// masked by a Sanitizer.
+	Sanitized bool
 }
 
 // Source fetches data from a network.
@@ -70,6 +120,308 @@ type Source interface {
 	LedgerEntry(ctx context.Context, key string) ([]Record, error)
 }
 
+// NetworkPassphraseSource optionally exposes the passphrase reported by the
+// network. It is separate from Source to preserve compatibility with existing
+// capture sources.
+type NetworkPassphraseSource interface {
+	NetworkPassphrase(ctx context.Context) (string, error)
+}
+
+// resolvePassphrase works out which network passphrase a source is bound to.
+//
+// A source that reports its passphrase is believed first, since that is what
+// the network itself says. Otherwise the passphrase of a known network name
+// is used, and for an unknown network with a silent source the result is
+// empty.
+func resolvePassphrase(ctx context.Context, src Source) (string, error) {
+	if source, ok := src.(NetworkPassphraseSource); ok {
+		passphrase, err := source.NetworkPassphrase(ctx)
+		if err != nil {
+			return "", fmt.Errorf("detecting network passphrase: %w", err)
+		}
+		if passphrase != "" {
+			return passphrase, nil
+		}
+	}
+	return golden.PassphraseFor(src.Network()), nil
+}
+
+// WithPassphrase binds a source to an explicit network passphrase.
+//
+// It is for networks the library cannot name — a standalone core, a private
+// network — and for sources such as Horizon that do not report a passphrase
+// of their own. When the wrapped source does report one, the two must agree:
+// a fixture stamped with the wrong passphrase would carry a hash that no
+// longer identifies its transaction.
+func WithPassphrase(src Source, passphrase string) Source {
+	if passphrase == "" {
+		return src
+	}
+	return &passphraseSource{Source: src, passphrase: passphrase}
+}
+
+// passphraseSource is a Source with an explicitly supplied passphrase.
+type passphraseSource struct {
+	Source
+	passphrase string
+}
+
+// NetworkPassphrase implements NetworkPassphraseSource, checking the
+// explicit passphrase against the one the wrapped source reports, if any.
+func (s *passphraseSource) NetworkPassphrase(ctx context.Context) (string, error) {
+	inner, ok := s.Source.(NetworkPassphraseSource)
+	if !ok {
+		return s.passphrase, nil
+	}
+	reported, err := inner.NetworkPassphrase(ctx)
+	if err != nil {
+		return "", err
+	}
+	if reported != "" && reported != s.passphrase {
+		return "", fmt.Errorf("network passphrase mismatch: %q was given, but %s reports %q",
+			s.passphrase, s.Name(), reported)
+	}
+	return s.passphrase, nil
+}
+
+// TransactionInLedger implements LedgerTransactionSource, so wrapping a
+// source that can use a ledger hint — an archive fallback — keeps the hint.
+func (s *passphraseSource) TransactionInLedger(ctx context.Context, hash string, ledger uint32) ([]Record, error) {
+	return FetchTransaction(ctx, s.Source, hash, ledger)
+}
+
+// FilterOptions selects which captured transactions are kept.
+//
+// It narrows a capture to the transactions worth recording — the ones with
+// many operations, the Soroban calls, the failures — before anything is
+// written to disk. The zero value keeps everything.
+type FilterOptions struct {
+	// MinOps keeps only transactions with at least this many operations.
+	MinOps int
+	// OnlySoroban keeps only transactions that invoke the Soroban host.
+	OnlySoroban bool
+	// FailedOnly keeps only transactions whose result is a failure.
+	FailedOnly bool
+}
+
+// Enabled reports whether any filter is set.
+func (f FilterOptions) Enabled() bool {
+	return f.MinOps > 0 || f.OnlySoroban || f.FailedOnly
+}
+
+// FilterRecords keeps only the records of transactions that match every set
+// filter.
+//
+// A transaction is spread over several records — an envelope, a result and
+// its meta — so each filter is decided once per transaction hash and all of
+// that transaction's records are kept or dropped together. Order is
+// preserved, and records with no transaction hash are not transaction
+// candidates, so they pass through untouched.
+func FilterRecords(records []Record, opts FilterOptions) ([]Record, error) {
+	if !opts.Enabled() {
+		return records, nil
+	}
+
+	order, byTx := groupByTransaction(records)
+	kept := make(map[string]bool, len(order))
+	for _, hash := range order {
+		match, err := matchesFilter(byTx[hash], opts)
+		if err != nil {
+			return nil, fmt.Errorf("filtering transaction %s: %w", hash, err)
+		}
+		kept[hash] = match
+	}
+
+	out := make([]Record, 0, len(records))
+	for _, r := range records {
+		if r.TxHash == "" || kept[r.TxHash] {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// groupByTransaction gathers the records of each transaction, in the order
+// their transaction first appears.
+func groupByTransaction(records []Record) (order []string, byTx map[string][]Record) {
+	byTx = make(map[string][]Record)
+	for _, r := range records {
+		if r.TxHash == "" {
+			continue
+		}
+		if _, seen := byTx[r.TxHash]; !seen {
+			order = append(order, r.TxHash)
+		}
+		byTx[r.TxHash] = append(byTx[r.TxHash], r)
+	}
+	return order, byTx
+}
+
+// matchesFilter reports whether one transaction's records pass every filter.
+//
+// A filter whose input record is missing does not match: a transaction with
+// no envelope cannot be shown to have enough operations, and one with no
+// result cannot be shown to have failed.
+func matchesFilter(records []Record, opts FilterOptions) (bool, error) {
+	envelope, hasEnvelope := recordOfType(records, "TransactionEnvelope")
+
+	if opts.MinOps > 0 {
+		if !hasEnvelope {
+			return false, nil
+		}
+		count, err := operationCount(envelope)
+		if err != nil {
+			return false, err
+		}
+		if count < opts.MinOps {
+			return false, nil
+		}
+	}
+
+	if opts.OnlySoroban {
+		if !hasEnvelope {
+			return false, nil
+		}
+		soroban, err := isSoroban(envelope)
+		if err != nil {
+			return false, err
+		}
+		if !soroban {
+			return false, nil
+		}
+	}
+
+	if opts.FailedOnly {
+		result, ok := recordOfType(records, "TransactionResult")
+		if !ok {
+			return false, nil
+		}
+		failed, err := isFailed(result)
+		if err != nil {
+			return false, err
+		}
+		if !failed {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// recordOfType returns the first record of a type, if there is one.
+func recordOfType(records []Record, typ string) (Record, bool) {
+	for _, r := range records {
+		if r.Type == typ {
+			return r, true
+		}
+	}
+	return Record{}, false
+}
+
+// operationCount counts the operations a transaction carries.
+func operationCount(envelope Record) (int, error) {
+	env, err := decodeEnvelope(envelope.XDR)
+	if err != nil {
+		return 0, err
+	}
+	_, ops, err := envelopeTransaction(env)
+	if err != nil {
+		return 0, err
+	}
+	return len(ops), nil
+}
+
+// isSoroban reports whether a transaction talks to the Soroban host.
+//
+// The signal comes from the envelope: a Soroban transaction carries
+// SorobanTransactionData on its extension, or it invokes the host function.
+// A V0 envelope predates Soroban and never carries either.
+func isSoroban(envelope Record) (bool, error) {
+	env, err := decodeEnvelope(envelope.XDR)
+	if err != nil {
+		return false, err
+	}
+	ext, ops, err := envelopeTransaction(env)
+	if err != nil {
+		return false, err
+	}
+	if ext.SorobanData != nil {
+		return true, nil
+	}
+	for _, op := range ops {
+		if op.Body.Type == xdr.OperationTypeInvokeHostFunction {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// isFailed reports whether a transaction's result is a failure.
+//
+// Anything other than txSUCCESS is a failure: a txFAILED transaction, a bad
+// sequence, an insufficient fee, a Soroban precondition the host rejected.
+func isFailed(result Record) (bool, error) {
+	res, err := decodeResult(result.XDR)
+	if err != nil {
+		return false, err
+	}
+	return res.Result.Code != xdr.TransactionResultCodeTxSuccess, nil
+}
+
+// envelopeTransaction unwraps the transaction an envelope carries, returning
+// its extension and operations.
+func envelopeTransaction(env xdr.TransactionEnvelope) (xdr.TransactionExt, []xdr.Operation, error) {
+	switch env.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		if env.V0 == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("V0 envelope carries no transaction")
+		}
+		return xdr.TransactionExt{}, env.V0.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if env.V1 == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("V1 envelope carries no transaction")
+		}
+		return env.V1.Tx.Ext, env.V1.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if env.FeeBump == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("fee bump envelope carries no transaction")
+		}
+		inner := env.FeeBump.Tx.InnerTx.V1
+		if inner == nil {
+			return xdr.TransactionExt{}, nil, fmt.Errorf("fee bump envelope carries no inner V1 transaction")
+		}
+		return inner.Tx.Ext, inner.Tx.Operations, nil
+	default:
+		return xdr.TransactionExt{}, nil, fmt.Errorf("unexpected envelope type %v", env.Type)
+	}
+}
+
+// decodeEnvelope decodes a base64 transaction envelope.
+func decodeEnvelope(b64 string) (xdr.TransactionEnvelope, error) {
+	var env xdr.TransactionEnvelope
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return env, fmt.Errorf("decoding envelope: %w", err)
+	}
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &env); err != nil {
+		return env, fmt.Errorf("decoding envelope: %w", err)
+	}
+	return env, nil
+}
+
+// decodeResult decodes a base64 transaction result.
+func decodeResult(b64 string) (xdr.TransactionResult, error) {
+	var res xdr.TransactionResult
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return res, fmt.Errorf("decoding result: %w", err)
+	}
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &res); err != nil {
+		return res, fmt.Errorf("decoding result: %w", err)
+	}
+	return res, nil
+}
+
 // Capture fetches items and turns them into fixtures, stamping each with the
 // provenance needed to verify or refresh it later.
 //
@@ -77,8 +429,19 @@ type Source interface {
 // tests — control the timestamp written into the fixture.
 func Capture(ctx context.Context, src Source, records []Record, now time.Time) ([]*golden.Fixture, error) {
 	out := make([]*golden.Fixture, 0, len(records))
+	passphrase := ""
+	if len(records) > 0 {
+		var err error
+		passphrase, err = resolvePassphrase(ctx, src)
+		if err != nil {
+			return nil, err
+		}
+	}
 	for _, r := range records {
 		provenance := golden.NewProvenance(src.Network(), src.Endpoint(), r.Ledger, r.TxHash, now)
+		provenance.NetworkPassphrase = passphrase
+		provenance.Anonymized = r.Anonymized
+		provenance.Sanitized = r.Sanitized
 
 		fixture, err := golden.Build(r.XDR, r.Type, r.Description, provenance)
 		if err != nil {
@@ -87,6 +450,53 @@ func Capture(ctx context.Context, src Source, records []Record, now time.Time) (
 		out = append(out, fixture)
 	}
 	return out, nil
+}
+
+// MutateRecord applies a deterministic mutation to a captured record and
+// returns the mutant as another record.
+//
+// It is the capture-level entry point to MutateXDR: a valid capture can be
+// turned into a negative fixture without leaving the package or handling
+// base64 by hand. The original record is not modified, and the report names
+// the exact byte offset the mutation touched.
+func MutateRecord(record Record, seed int64, mutationType MutationType) (Record, MutationReport, error) {
+	raw, err := base64.StdEncoding.DecodeString(record.XDR)
+	if err != nil {
+		return Record{}, MutationReport{}, fmt.Errorf("mutating %q: XDR is not base64: %w", record.Name, err)
+	}
+
+	mutated, report := MutateXDR(raw, seed, mutationType)
+	if !report.Applied {
+		return Record{}, report, fmt.Errorf("mutating %q: %s", record.Name, report.Description)
+	}
+
+	mutant := record
+	mutant.XDR = base64.StdEncoding.EncodeToString(mutated)
+	if mutant.Name != "" {
+		mutant.Name = fmt.Sprintf("%s_%s_%d", mutant.Name, mutationType, seed)
+	}
+	mutant.Description = fmt.Sprintf("%s (mutated: %s)", record.Description, report.Description)
+	return mutant, report, nil
+}
+
+// CaptureWASM fetches a contract's WASM, verifies it against the ledger's own
+// code hash, extracts its specification and writes the binary beside its JSON
+// metadata in dir.
+//
+// It is the whole capture workflow in one call, returning the capture and the
+// two paths written so a caller can report them.
+//
+//nolint:revive // The public name is fixed by issue #239.
+func CaptureWASM(ctx context.Context, src ContractWASMSource, contractID, dir string) (*WASMCapture, string, string, error) {
+	capture, err := CaptureContractWASM(ctx, src, contractID)
+	if err != nil {
+		return nil, "", "", err
+	}
+	metadataPath, wasmPath, err := capture.Save(dir)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return capture, metadataPath, wasmPath, nil
 }
 
 // VerifyResult reports whether a stored fixture still matches the chain.
@@ -111,14 +521,40 @@ type VerifyResult struct {
 // simply not checkable this way.
 func Verify(ctx context.Context, src Source, path string, f *golden.Fixture) VerifyResult {
 	result := VerifyResult{Path: path}
+	if f.Captured != nil && f.Captured.Anonymized {
+		result.Err = fmt.Errorf("fixture addresses were anonymized, so it cannot be verified against the live network")
+		return result
+	}
+
+	if f.Captured != nil && f.Captured.Sanitized {
+		result.Err = fmt.Errorf("fixture data was sanitized, so it cannot be verified against the live network")
+		return result
+	}
 
 	if f.Captured == nil || f.Captured.TxHash == "" {
 		result.Err = fmt.Errorf(
 			"no capture provenance, so there is nothing to re-fetch (was this fixture written by hand?)")
 		return result
 	}
+	if f.Captured.NetworkPassphrase != "" {
+		passphrase, err := resolvePassphrase(ctx, src)
+		if err != nil {
+			result.Err = err
+			return result
+		}
+		if passphrase == "" {
+			result.Err = fmt.Errorf("capture source cannot verify the fixture network passphrase " +
+				"(give the passphrase explicitly with --passphrase)")
+			return result
+		}
+		if passphrase != f.Captured.NetworkPassphrase {
+			result.Err = fmt.Errorf("network passphrase mismatch: fixture is bound to %q, source reports %q",
+				f.Captured.NetworkPassphrase, passphrase)
+			return result
+		}
+	}
 
-	records, err := src.Transaction(ctx, f.Captured.TxHash)
+	records, err := FetchTransaction(ctx, src, f.Captured.TxHash, f.Captured.Ledger)
 	if err != nil {
 		result.Err = fmt.Errorf("re-fetching %s: %w", f.Captured.TxHash, err)
 		return result
@@ -148,6 +584,197 @@ func Verify(ctx context.Context, src Source, path string, f *golden.Fixture) Ver
 	return result
 }
 
+// LedgerHeaderSource serves the header of one ledger by sequence.
+//
+// It is the seam CaptureLedgerRange needs: RPC, Horizon and history archives
+// all provide it, and a test supplies a canned map of ledgers so a range
+// capture stays offline.
+type LedgerHeaderSource interface {
+	// LedgerHeaderAt fetches the header of one ledger as a
+	// LedgerHeaderHistoryEntry record.
+	LedgerHeaderAt(ctx context.Context, sequence uint32) (Record, error)
+}
+
+// LedgerRangeOptions tunes a multi-ledger capture.
+//
+// The zero value means "use the defaults": a short pause between requests
+// and a few retries with exponential backoff. Retries are counted after the
+// first attempt, so Retries: 2 makes at most three requests per ledger.
+type LedgerRangeOptions struct {
+	// Interval is the minimum time between two requests. Zero uses 100ms.
+	Interval time.Duration
+	// Retries is how many times a failed ledger is retried. Zero uses 3.
+	Retries int
+	// Backoff is the wait before the first retry; it doubles each time.
+	// Zero uses 250ms.
+	Backoff time.Duration
+}
+
+// defaultLedgerRangeOptions is the rate limit and retry policy a caller gets
+// when it does not ask for one, chosen to be kind to a public endpoint.
+func defaultLedgerRangeOptions() LedgerRangeOptions {
+	return LedgerRangeOptions{
+		Interval: 100 * time.Millisecond,
+		Retries:  3,
+		Backoff:  250 * time.Millisecond,
+	}
+}
+
+// CaptureLedgerRange captures a consecutive run of ledgers — start through
+// end, inclusive — as one verifiable ledger batch.
+//
+// It is the multi-ledger counterpart to a single transaction capture: each
+// ledger's close metadata and header are recorded in order, so a test can
+// reason about a re-org, a fee change, or state archival across the run
+// rather than one ledger at a time. Requests are spaced out and retried with
+// backoff, and the context cancels the whole capture between attempts.
+//
+//nolint:revive // the name follows the documented capture API.
+func CaptureLedgerRange(ctx context.Context, src Source, start, end uint32) (*LedgerBatchBundle, error) {
+	return CaptureLedgerRangeWithOptions(ctx, src, start, end, LedgerRangeOptions{})
+}
+
+// CaptureLedgerRangeWithOptions is CaptureLedgerRange with an explicit rate
+// limit and retry policy.
+//
+//nolint:revive // the name follows the documented capture API.
+func CaptureLedgerRangeWithOptions(
+	ctx context.Context,
+	src Source,
+	start, end uint32,
+	opts LedgerRangeOptions,
+) (*LedgerBatchBundle, error) {
+	if start == 0 {
+		return nil, fmt.Errorf("a ledger range needs a first ledger of at least 1")
+	}
+	if end < start {
+		return nil, fmt.Errorf("ledger range end %d is before start %d", end, start)
+	}
+	headerSource, ok := src.(LedgerHeaderSource)
+	if !ok {
+		return nil, fmt.Errorf("source %q cannot capture a ledger range: it does not serve ledger headers", src.Name())
+	}
+
+	defaults := defaultLedgerRangeOptions()
+	if opts.Interval <= 0 {
+		opts.Interval = defaults.Interval
+	}
+	if opts.Retries <= 0 {
+		opts.Retries = defaults.Retries
+	}
+	if opts.Backoff <= 0 {
+		opts.Backoff = defaults.Backoff
+	}
+
+	bundle := &LedgerBatchBundle{
+		Format:     LedgerBatchFormat,
+		Network:    src.Network(),
+		Endpoint:   src.Endpoint(),
+		Start:      start,
+		End:        end,
+		CapturedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	for sequence := start; ; sequence++ {
+		if sequence > start {
+			if err := wait(ctx, opts.Interval); err != nil {
+				return nil, err
+			}
+		}
+
+		record, err := fetchLedgerHeader(ctx, headerSource, sequence, opts)
+		if err != nil {
+			return nil, fmt.Errorf("capturing ledger %d: %w", sequence, err)
+		}
+		entry, err := ledgerBatchEntry(record, sequence)
+		if err != nil {
+			return nil, fmt.Errorf("capturing ledger %d: %w", sequence, err)
+		}
+		bundle.Ledgers = append(bundle.Ledgers, entry)
+
+		if sequence == end || sequence == math.MaxUint32 {
+			break
+		}
+	}
+	return bundle, nil
+}
+
+// fetchLedgerHeader fetches one header, retrying with exponential backoff. A
+// cancelled context stops immediately rather than sleeping out the policy.
+func fetchLedgerHeader(
+	ctx context.Context,
+	src LedgerHeaderSource,
+	sequence uint32,
+	opts LedgerRangeOptions,
+) (Record, error) {
+	var lastErr error
+	for attempt := 0; attempt <= opts.Retries; attempt++ {
+		if attempt > 0 {
+			backoff := opts.Backoff
+			for i := 1; i < attempt; i++ {
+				backoff *= 2
+			}
+			if err := wait(ctx, backoff); err != nil {
+				return Record{}, err
+			}
+		}
+
+		record, err := src.LedgerHeaderAt(ctx, sequence)
+		if err == nil {
+			return record, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return Record{}, ctx.Err()
+		}
+	}
+	return Record{}, lastErr
+}
+
+// wait sleeps for d, or returns early when the context is cancelled.
+func wait(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// ledgerBatchEntry turns a header record into the close metadata a ledger
+// batch stores, decoding the header to name the ledger precisely.
+func ledgerBatchEntry(record Record, sequence uint32) (LedgerBatchEntry, error) {
+	raw, err := base64.StdEncoding.DecodeString(record.XDR)
+	if err != nil {
+		return LedgerBatchEntry{}, fmt.Errorf("header XDR is not base64: %w", err)
+	}
+	var header xdr.LedgerHeaderHistoryEntry
+	if _, err := xdr.Unmarshal(bytes.NewReader(raw), &header); err != nil {
+		return LedgerBatchEntry{}, fmt.Errorf("parsing header: %w", err)
+	}
+	if got := uint32(header.Header.LedgerSeq); got != sequence {
+		return LedgerBatchEntry{}, fmt.Errorf("source returned the header of ledger %d, want %d", got, sequence)
+	}
+
+	entryType := record.Type
+	if entryType == "" {
+		entryType = "LedgerHeaderHistoryEntry"
+	}
+	return LedgerBatchEntry{
+		Sequence:        sequence,
+		Hash:            hex.EncodeToString(header.Hash[:]),
+		CloseTime:       int64(header.Header.ScpValue.CloseTime),
+		ProtocolVersion: uint32(header.Header.LedgerVersion),
+		Type:            entryType,
+		XDR:             record.XDR,
+	}, nil
+}
+
 // ResolveEndpoint picks the URL for a network, honouring an explicit
 // override.
 func ResolveEndpoint(network, override string) (string, error) {
@@ -155,6 +782,20 @@ func ResolveEndpoint(network, override string) (string, error) {
 		return override, nil
 	}
 	url, ok := DefaultEndpoints[network]
+	if !ok {
+		return "", fmt.Errorf(
+			"unknown network %q; use testnet or mainnet, or give an explicit --rpc-url", network)
+	}
+	return url, nil
+}
+
+// ResolveHorizonEndpoint picks the Horizon URL for a network, honouring an
+// explicit override.
+func ResolveHorizonEndpoint(network, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	url, ok := DefaultHorizonEndpoints[network]
 	if !ok {
 		return "", fmt.Errorf(
 			"unknown network %q; use testnet or mainnet, or give an explicit --rpc-url", network)

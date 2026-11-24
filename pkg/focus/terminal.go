@@ -125,7 +125,7 @@ func PaletteForWriter(w io.Writer, mode string) lensformat.Palette {
 // the same quoting as every other failure via render, keeping empty strings
 // and whitespace visible.
 func FormatFieldMismatch(assertion, field string, want, got any, color bool) string {
-	plain := mismatchMessage(assertion, field, want, got)
+	plain := mismatchMessage(assertion, field, want, got, nil)
 	if !color {
 		return plain
 	}

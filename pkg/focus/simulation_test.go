@@ -10,6 +10,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/simulate"
 )
 
 // accountKeys builds n account ledger keys, for filling a footprint.
@@ -240,4 +241,106 @@ func TestAssertSimulationResourcesWithinResponseProblems(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPreflightSimulationAssertions covers the assertions that read the result
+// of a preflight simulation: a simulation the host rejected, a return value
+// that is not the one expected, and an instruction budget that was blown.
+func TestPreflightSimulationAssertions(t *testing.T) {
+	t.Parallel()
+
+	rejected := &simulate.SimulateResult{Error: "HostError: Error(Contract, #1)"}
+	ran := &simulate.SimulateResult{Instructions: 1000}
+
+	returnsSeven := xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: u32ptr(7)}
+
+	t.Run("succeeded", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertSimulationSucceeded(tb, ran) {
+			t.Errorf("a simulation that ran was reported as failed:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSimulationSucceeded(tb, rejected) {
+			t.Fatal("a rejected simulation was reported as successful")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "Error(Contract, #1)") {
+			t.Errorf("the rejection message was lost:\n%s", msg)
+		}
+	})
+
+	t.Run("return value", func(t *testing.T) {
+		t.Parallel()
+
+		result := &simulate.SimulateResult{ReturnValue: &returnsSeven}
+		tb := faketb.New()
+		if !focus.AssertSimulatedReturnValue(tb, result, returnsSeven) {
+			t.Errorf("the return value did not match:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("wrong return value", func(t *testing.T) {
+		t.Parallel()
+
+		result := &simulate.SimulateResult{ReturnValue: &returnsSeven}
+		tb := faketb.New()
+		if focus.AssertSimulatedReturnValue(tb, result, xdr.ScVal{Type: xdr.ScValTypeScvU32, U32: u32ptr(9)}) {
+			t.Fatal("the assertion passed with the wrong return value")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "u32(7)") || !strings.Contains(msg, "u32(9)") {
+			t.Errorf("the message does not show both values:\n%s", msg)
+		}
+	})
+
+	t.Run("no return value", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertSimulatedReturnValue(tb, &simulate.SimulateResult{}, returnsSeven) {
+			t.Fatal("the assertion passed for a simulation that returned nothing")
+		}
+		msg, _ := tb.Message()
+		if !strings.Contains(msg, "no value") {
+			t.Errorf("the message does not explain the mistake:\n%s", msg)
+		}
+	})
+
+	t.Run("instructions below the budget", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertInstructionsBelow(tb, ran, 2_000) {
+			t.Errorf("a simulation within budget was reported as over it:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("instructions over the budget", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertInstructionsBelow(tb, ran, 500) {
+			t.Fatal("the assertion passed for a simulation over budget")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "1000") || !strings.Contains(msg, "500") {
+			t.Errorf("the message does not show the usage and the limit:\n%s", msg)
+		}
+	})
 }

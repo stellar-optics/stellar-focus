@@ -24,19 +24,42 @@ import (
 const maxInlineXDR = 24
 
 // diffMessage renders the failure text for a structural mismatch.
-func diffMessage(assertion string, want, got *lens.Value, changes []lens.Change, applied []string, c *config) string {
+func diffMessage(
+	assertion string,
+	want, got *lens.Value,
+	changes []lens.Change,
+	applied []string,
+	c *config,
+	sorts sortResult,
+) string {
 	var b strings.Builder
 
 	// Headline: the count is the first thing that tells you how bad it is.
+	// The label goes beside the assertion name so a failure in a loop or a
+	// multi-step flow names the step it came from.
 	fmt.Fprintf(&b, "%s: %s differ — %s\n",
-		assertion, describeType(want, got), pluralChanges(len(changes)))
+		c.assertionName(assertion), describeType(want, got), pluralChanges(len(changes)))
 
 	if len(applied) > 0 {
 		fmt.Fprintf(&b, "(ignored: %s)\n", strings.Join(applied, ", "))
 	}
 
+	// An array that was compared as a set is named, so a reader can tell
+	// the difference between "these differ" and "these differ, and the order
+	// was not part of the comparison".
+	if len(sorts.unordered) > 0 {
+		fmt.Fprintf(&b, "(compared as unordered sets: %s)\n", strings.Join(sorts.unordered, ", "))
+	}
+
+	// A sort rule that matched nothing is reported here too: on a failing
+	// comparison it would otherwise be invisible.
+	if len(sorts.stale) > 0 {
+		fmt.Fprintf(&b, "(stale sort patterns, matched no array: %s)\n",
+			strings.Join(sorts.stale, ", "))
+	}
+
 	b.WriteString("\n")
-	b.WriteString(renderChanges(changes, c))
+	b.WriteString(renderChanges(changes, c, want, got))
 	b.WriteString("\n")
 
 	// The raw payloads come last, truncated, so they are available for
@@ -58,7 +81,7 @@ func diffMessage(assertion string, want, got *lens.Value, changes []lens.Change,
 // addition colour — so a focus failure and `lens diff` agree. With colour off
 // the palette is empty and the plain text is the coloured text minus the
 // escapes.
-func renderChanges(changes []lens.Change, c *config) string {
+func renderChanges(changes []lens.Change, c *config, want, got *lens.Value) string {
 	shown := changes
 	var elided int
 	if c.maxChanges > 0 && len(changes) > c.maxChanges {
@@ -69,13 +92,95 @@ func renderChanges(changes []lens.Change, c *config) string {
 	p := c.palette()
 	var b strings.Builder
 	for _, ch := range shown {
+		renderDiffContext(&b, ch, want, got, c.diffContext, true, p)
 		renderChange(&b, ch, p)
+		renderDiffContext(&b, ch, want, got, c.diffContext, false, p)
 	}
 	if elided > 0 {
 		fmt.Fprintf(&b, "%s… and %d more difference(s); raise the limit with focus.WithMaxChanges%s\n",
 			p.Dim, elided, p.Reset)
 	}
 	return b.String()
+}
+
+func renderDiffContext(b *strings.Builder, ch lens.Change, want, got *lens.Value, limit int, before bool, p lensformat.Palette) {
+	if limit == 0 || want == nil || got == nil || want.Node == nil || got.Node == nil {
+		return
+	}
+
+	parentPath := parentChangePath(ch.Path)
+	wantParent := want.Node.Find(parentPath)
+	gotParent := got.Node.Find(parentPath)
+	if wantParent == nil || gotParent == nil {
+		return
+	}
+
+	changedIndex := -1
+	for index, child := range wantParent.Children {
+		if nodeChildPath(parentPath, wantParent, child, index) == ch.Path {
+			changedIndex = index
+			break
+		}
+	}
+	if changedIndex < 0 {
+		return
+	}
+
+	if before {
+		start := max(0, changedIndex-limit)
+		renderOmittedContext(b, start, p)
+		for index := start; index < changedIndex; index++ {
+			renderContextChild(b, parentPath, wantParent, gotParent, index, p)
+		}
+		return
+	}
+	end := min(len(wantParent.Children), changedIndex+limit+1)
+	for index := changedIndex + 1; index < end; index++ {
+		renderContextChild(b, parentPath, wantParent, gotParent, index, p)
+	}
+	renderOmittedContext(b, len(wantParent.Children)-end, p)
+}
+
+// renderOmittedContext notes that unchanged siblings outside the context
+// window were left out. Without it, a trimmed diff looks like the whole
+// parent, and the reader cannot tell whether anything else was there.
+func renderOmittedContext(b *strings.Builder, omitted int, p lensformat.Palette) {
+	if omitted <= 0 {
+		return
+	}
+	fmt.Fprintf(b, "  %s… %d unchanged field(s) omitted…%s\n", p.Dim, omitted, p.Reset)
+}
+
+func renderContextChild(b *strings.Builder, parentPath string, wantParent, gotParent *lens.Node, index int, p lensformat.Palette) {
+	if index >= len(gotParent.Children) {
+		return
+	}
+	wantChild, gotChild := wantParent.Children[index], gotParent.Children[index]
+	path := nodeChildPath(parentPath, wantParent, wantChild, index)
+	if path != nodeChildPath(parentPath, gotParent, gotChild, index) ||
+		wantChild.Kind != lens.KindScalar || gotChild.Kind != lens.KindScalar ||
+		!equalScalars(wantChild.Value, gotChild.Value) || wantChild.Note != gotChild.Note {
+		return
+	}
+	fmt.Fprintf(b, "  %s%s = %s%s\n", p.Dim, path, wantChild.String(), p.Reset)
+}
+
+func parentChangePath(path string) string {
+	cut := max(strings.LastIndex(path, "."), strings.LastIndex(path, "["))
+	if cut < 0 {
+		return ""
+	}
+	return path[:cut]
+}
+
+func nodeChildPath(parentPath string, parent, child *lens.Node, index int) string {
+	if parent.Kind == lens.KindList && child.Name == "" {
+		return fmt.Sprintf("%s[%d]", parentPath, index)
+	}
+	if parentPath == "" {
+		return child.Name
+	}
+	return parentPath + "." + child.Name
 }
 
 // renderChange renders one difference: the path with the marker for the kind
@@ -136,8 +241,12 @@ func changePath(ch lens.Change) string {
 }
 
 // mismatchMessage renders a simple want/got failure for scalar assertions.
-func mismatchMessage(assertion, field string, want, got any) string {
-	return fmt.Sprintf("%s: %s is %s, want %s", assertion, field, render(got), render(want))
+//
+// A config may be passed to render the assertion's label. The variadic form
+// keeps the helper usable from the scalar assertions that do not take
+// options themselves.
+func mismatchMessage(assertion, field string, want, got any, c *config) string {
+	return fmt.Sprintf("%s: %s is %s, want %s", c.assertionName(assertion), field, render(got), render(want))
 }
 
 // render formats a scalar for a failure message, quoting strings so an empty
@@ -219,7 +328,7 @@ func base64Encode(b []byte) string {
 
 // indent prefixes every line, so a multi-line diff nests cleanly under the
 // go test file:line prefix instead of running back to column zero.
-func indent(s, prefix string) string {
+func indent(s string) string {
 	if s == "" {
 		return s
 	}
@@ -228,7 +337,7 @@ func indent(s, prefix string) string {
 		if l == "" {
 			continue
 		}
-		lines[i] = prefix + l
+		lines[i] = "  " + l
 	}
 	return strings.Join(lines, "\n")
 }

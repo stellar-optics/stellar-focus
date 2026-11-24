@@ -8,6 +8,7 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
+	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
 // testClaimableBalanceID returns a deterministic balance id, so failure
@@ -340,12 +341,12 @@ func TestAssertBalanceForfeited(t *testing.T) {
 	t.Parallel()
 
 	partial := metaV2(t, []xdr.LedgerEntryChange{
-		stateChange(trustlineEntryValue(t, testDest, "USDC", 100_0000000, 500_0000000)),
-		updatedChange(trustlineEntryValue(t, testDest, "USDC", 40_0000000, 500_0000000)),
+		stateChange(trustlineEntryValue(t, 100_0000000, 500_0000000)),
+		updatedChange(trustlineEntryValue(t, 40_0000000, 500_0000000)),
 	})
 	full := metaV2(t, []xdr.LedgerEntryChange{
-		stateChange(trustlineEntryValue(t, testDest, "USDC", 100_0000000, 500_0000000)),
-		removedChange(ledgerKeyOf(t, trustlineEntryValue(t, testDest, "USDC", 100_0000000, 500_0000000))),
+		stateChange(trustlineEntryValue(t, 100_0000000, 500_0000000)),
+		removedChange(ledgerKeyOf(t, trustlineEntryValue(t, 100_0000000, 500_0000000))),
 	})
 
 	t.Run("partial forfeiture", func(t *testing.T) {
@@ -456,6 +457,91 @@ func TestAssertClaimableBalanceRevoked(t *testing.T) {
 		}
 		if !strings.Contains(tb.Output(), "made no ledger change to claimable balance") {
 			t.Errorf("message does not say the balance was untouched:\n%s", tb.Output())
+		}
+	})
+}
+
+func TestAssertClawbackRevocation(t *testing.T) {
+	t.Parallel()
+
+	partial := metaV2(t, []xdr.LedgerEntryChange{
+		stateChange(trustlineEntryValue(t, 100_0000000, 500_0000000)),
+		updatedChange(trustlineEntryValue(t, 40_0000000, 500_0000000)),
+	})
+	full := metaV2(t, []xdr.LedgerEntryChange{
+		stateChange(trustlineEntryValue(t, 100_0000000, 500_0000000)),
+		removedChange(ledgerKeyOf(t, trustlineEntryValue(t, 100_0000000, 500_0000000))),
+	})
+
+	t.Run("partial clawback revocation verifies balance decrease", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertClawbackRevocation(tb, partial, testDest, "USDC:"+testIssuer, 60_0000000) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.ClawbackRevocation(t, partial, testDest, "USDC:"+testIssuer, 60_0000000)
+	})
+
+	t.Run("full clawback revocation removing trustline verifies deletion", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertClawbackRevocation(tb, full, testDest, "USDC:"+testIssuer, 100_0000000) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.ClawbackRevocation(t, full, testDest, "USDC:"+testIssuer, 100_0000000)
+	})
+
+	t.Run("amount mismatch reports diff in stroops and units", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertClawbackRevocation(tb, partial, testDest, "USDC:"+testIssuer, 50_0000000) {
+			t.Fatal("assertion passed for incorrect clawback amount")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "-60.0000000") || !strings.Contains(msg, "50.0000000") {
+			t.Errorf("failure message did not format units properly:\n%s", msg)
+		}
+	})
+
+	t.Run("negative or zero amount fails", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertClawbackRevocation(tb, partial, testDest, "USDC:"+testIssuer, -10) {
+			t.Fatal("assertion passed for negative amount")
+		}
+		if !strings.Contains(tb.Output(), "positive amount") {
+			t.Errorf("message did not report non-positive amount error:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("native asset cannot be clawed back", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertClawbackRevocation(tb, partial, testDest, "native", 100) {
+			t.Fatal("assertion passed for native asset")
+		}
+		if !strings.Contains(tb.Output(), "native asset cannot be clawed back") {
+			t.Errorf("message did not reject native asset:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("untouched account fails", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertClawbackRevocation(tb, partial, testSource, "USDC:"+testIssuer, 60_0000000) {
+			t.Fatal("assertion passed for untouched account")
+		}
+		if !strings.Contains(tb.Output(), "made no ledger change") {
+			t.Errorf("message did not report no ledger change:\n%s", tb.Output())
 		}
 	})
 }

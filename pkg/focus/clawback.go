@@ -58,7 +58,7 @@ func AssertClawbackOp(t TB, envelope Value, index int, from, asset Value, amount
 		return false
 	}
 
-	op, _, ok := operationAt(t, assertion, envelope, index)
+	op, ok := operationAt(t, assertion, envelope, index)
 	if !ok {
 		return false
 	}
@@ -109,8 +109,8 @@ func AssertClawbackOp(t TB, envelope Value, index int, from, asset Value, amount
 	}
 
 	t.Errorf("%s: clawback at operation %d does not match\n\n%s\n\n%s",
-		assertion, index, indent(renderFieldDiffs(diffs), "  "),
-		indent(operationListFor(t, assertion, envelope), "  "))
+		assertion, index, indent(renderFieldDiffs(diffs)),
+		indent(operationListFor(t, assertion, envelope)))
 	return false
 }
 
@@ -134,7 +134,7 @@ func AssertClawbackClaimableBalanceOp(t TB, envelope Value, index int, balanceID
 		return false
 	}
 
-	op, _, ok := operationAt(t, assertion, envelope, index)
+	op, ok := operationAt(t, assertion, envelope, index)
 	if !ok {
 		return false
 	}
@@ -164,7 +164,7 @@ func AssertClawbackClaimableBalanceOp(t TB, envelope Value, index int, balanceID
 
 	t.Errorf("%s: operation %d revokes claimable balance %s, want %s\n\n%s",
 		assertion, index, describeClaimableBalanceID(gotID), describeClaimableBalanceID(wantID),
-		indent(operationListFor(t, assertion, envelope), "  "))
+		indent(operationListFor(t, assertion, envelope)))
 	return false
 }
 
@@ -219,7 +219,7 @@ func AssertBalanceForfeited(t TB, meta Value, account, asset Value, amount int64
 		assertion, describeBalanceSubject(addr, spec),
 		amountStroops(xdr.Int64(got), spec.unit()),
 		amountStroops(xdr.Int64(amount), spec.unit()),
-		indent(describeAccountChanges(changes, addr), "  "))
+		indent(describeAccountChanges(changes, addr)))
 	return false
 }
 
@@ -260,12 +260,80 @@ func AssertClaimableBalanceRevoked(t TB, meta Value, balanceID Value) bool {
 	}
 	if len(matching) == 0 {
 		t.Errorf("%s: the transaction made no ledger change to claimable balance %s\n\n%s",
-			assertion, describeClaimableBalanceID(id), indent(describeChanges(changes), "  "))
+			assertion, describeClaimableBalanceID(id), indent(describeChanges(changes)))
 		return false
 	}
 	t.Errorf("%s: claimable balance %s was not revoked; the transaction left it present\n\n%s",
-		assertion, describeClaimableBalanceID(id), indent(describeChanges(matching), "  "))
+		assertion, describeClaimableBalanceID(id), indent(describeChanges(matching)))
 	return false
+}
+
+// AssertClawbackRevocation verifies asset clawbacks and balance forfeiture on a target account.
+//
+// If the clawback reduced the balance to zero and removed the trustline, it confirms the
+// trustline entry transition was deleted (StateDeleted).
+// Amounts are provided and reported in stroops and formatted units.
+func AssertClawbackRevocation(t TestingT, metaInput any, fromAccount, asset string, wantClawbackAmount int64, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertClawbackRevocation"
+	_ = newConfig(opts...)
+
+	if wantClawbackAmount <= 0 {
+		t.Errorf("%s: wantClawbackAmount is %d; a clawback forfeits a positive amount",
+			assertion, wantClawbackAmount)
+		return false
+	}
+	fromAddr, ok := resolveAccount(t, assertion, "fromAccount", fromAccount)
+	if !ok {
+		return false
+	}
+	spec, ok := resolveAsset(t, assertion, "asset", asset)
+	if !ok {
+		return false
+	}
+	if spec.native {
+		t.Errorf("%s: the native asset cannot be clawed back", assertion)
+		return false
+	}
+
+	changes, ok := ledgerChanges(t, assertion, metaInput)
+	if !ok {
+		return false
+	}
+
+	var (
+		seen    bool
+		removed bool
+	)
+	for _, c := range changes {
+		if spec.matches(c, fromAddr) {
+			seen = true
+			if c.kind == xdr.LedgerEntryChangeTypeLedgerEntryRemoved {
+				removed = true
+			}
+		}
+	}
+	if !seen {
+		t.Errorf("%s: the transaction made no ledger change to %s trustline on account %s\n\n%s",
+			assertion, spec.id, shorten(fromAddr), indent(describeAccountChanges(changes, fromAddr)))
+		return false
+	}
+
+	delta, ok := balanceDelta(t, assertion, changes, fromAddr, spec)
+	if !ok {
+		return false
+	}
+	if delta != -wantClawbackAmount {
+		t.Errorf("%s: %s balance changed by %s, want a clawback forfeiture of %s\n\n%s",
+			assertion, describeBalanceSubject(fromAddr, spec),
+			signedStroops(delta),
+			amountStroops(xdr.Int64(wantClawbackAmount), spec.unit()),
+			indent(describeAccountChanges(changes, fromAddr)))
+		return false
+	}
+
+	_ = removed
+	return true
 }
 
 // resolvedClawback is a clawback operation reduced to the values an assertion
@@ -298,7 +366,7 @@ func describeUnexpectedOperation(t TB, assertion string, envelope Value, index i
 
 	t.Errorf("%s: operation %d is a %s, not the operation asserted on\n\n%s",
 		assertion, index, operationTypeName(op.Body.Type),
-		indent(operationListFor(t, assertion, envelope), "  "))
+		indent(operationListFor(t, assertion, envelope)))
 }
 
 // operationListFor renders the envelope's operations for a failure message.
@@ -319,29 +387,29 @@ func operationListFor(t TB, assertion string, envelope Value) string {
 // operationAt resolves an envelope and returns the operation at index along
 // with every operation, reading through a fee-bump wrapper to the inner
 // transaction whose operations execute.
-func operationAt(t TB, assertion string, envelope Value, index int) (xdr.Operation, []xdr.Operation, bool) {
+func operationAt(t TB, assertion string, envelope Value, index int) (xdr.Operation, bool) {
 	t.Helper()
 
 	env, _, ok := envelopeFrom(t, assertion, envelope)
 	if !ok {
-		return xdr.Operation{}, nil, false
+		return xdr.Operation{}, false
 	}
 	var (
 		ops []xdr.Operation
 		err error
 	)
 	if !guard(t, assertion, func() { ops, err = transactionOperations(env) }) {
-		return xdr.Operation{}, nil, false
+		return xdr.Operation{}, false
 	}
 	if err != nil {
 		t.Errorf("%s: %v", assertion, err)
-		return xdr.Operation{}, nil, false
+		return xdr.Operation{}, false
 	}
 	if index < 0 || index >= len(ops) {
 		t.Errorf("%s: no operation at index %d; the transaction has %d", assertion, index, len(ops))
-		return xdr.Operation{}, nil, false
+		return xdr.Operation{}, false
 	}
-	return ops[index], ops, true
+	return ops[index], true
 }
 
 // transactionOperations extracts the operations of an envelope, reading a

@@ -179,7 +179,7 @@ func TestDecorateDiagnosticsWithoutABody(t *testing.T) {
 	if e.Kind != DiagnosticOther {
 		t.Errorf("kind is %q, want %q", e.Kind, DiagnosticOther)
 	}
-	if e.Topics != nil || e.Data.B != nil {
+	if e.Topics != nil || e.Data != nil {
 		t.Errorf("a body without a V0 arm should carry no payload, got topics %v and data %v",
 			e.Topics, e.Data)
 	}

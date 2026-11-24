@@ -68,7 +68,7 @@ func AssertInflationPayouts(t TB, result Value, want []InflationPayout) bool {
 		}
 		t.Errorf("%s: inflation did not run — the result reports %s — but %d payout(s) were wanted\n\n%s",
 			assertion, inflationCodeName(xdr.InflationResultCodeInflationNotTime), len(want),
-			indent(describeInflationWant(wantAddr, want), "  "))
+			indent(describeInflationWant(wantAddr, want)))
 		return false
 	}
 
@@ -88,8 +88,8 @@ func AssertInflationPayouts(t TB, result Value, want []InflationPayout) bool {
 
 	t.Errorf("%s: inflation paid %d payout(s), want %d\n\n%s\n\n%s",
 		assertion, len(got), len(want),
-		indent(describeInflationGot(got), "  "),
-		indent(describeInflationWant(wantAddr, want), "  "))
+		indent(describeInflationGot(got)),
+		indent(describeInflationWant(wantAddr, want)))
 	return false
 }
 
@@ -139,13 +139,13 @@ func AssertInflationPaid(t TB, result Value, account Value, amount int64) bool {
 		}
 		t.Errorf("%s: inflation made no payout to %s, want %s\n\n%s",
 			assertion, shorten(addr), amountStroops(xdr.Int64(amount), " XLM"),
-			indent(describeInflationGot(got), "  "))
+			indent(describeInflationGot(got)))
 		return false
 	}
 	t.Errorf("%s: inflation paid %s a total of %s, want %s\n\n%s",
 		assertion, shorten(addr), amountStroops(xdr.Int64(total), " XLM"),
 		amountStroops(xdr.Int64(amount), " XLM"),
-		indent(describeInflationGot(got), "  "))
+		indent(describeInflationGot(got)))
 	return false
 }
 
@@ -277,7 +277,7 @@ func inflationPayouts(t TB, assertion string, result Value) (payouts []xdr.Infla
 	}
 	if !hasInfl {
 		t.Errorf("%s: the result holds no inflation operation result; it covers %d operation result(s)\n\n%s",
-			assertion, len(opResults), indent(describeOperationResults(opResults), "  "))
+			assertion, len(opResults), indent(describeOperationResults(opResults)))
 		return nil, false, false
 	}
 

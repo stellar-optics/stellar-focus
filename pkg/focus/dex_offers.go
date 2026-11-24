@@ -185,7 +185,7 @@ func AssertOfferCreated(t TB, meta Value, want Offer) bool {
 		t.Errorf("%s: the transaction created no offer; want %s\n"+
 			"An offer that was filled completely on submission never reaches the "+
 			"ledger — assert the trade with AssertTradeExecuted instead.\n\n%s",
-			assertion, query.describe(), indent(describeOfferChanges(changes), "  "))
+			assertion, query.describe(), indent(describeOfferChanges(changes)))
 		return false
 	}
 	for _, o := range created {
@@ -201,7 +201,7 @@ func AssertOfferCreated(t TB, meta Value, want Offer) bool {
 		return false
 	}
 	t.Errorf("%s: none of the %d offers this transaction created is %s\n\n%s",
-		assertion, len(created), query.describe(), indent(describeOffers(created), "  "))
+		assertion, len(created), query.describe(), indent(describeOffers(created)))
 	return false
 }
 
@@ -255,7 +255,7 @@ func AssertTradeExecuted(t TB, value Value, want Trade) bool {
 	}
 
 	t.Errorf("%s: no trade in this %s is %s\n\n%s",
-		assertion, source, query.describe(), indent(describeTrades(trades), "  "))
+		assertion, source, query.describe(), indent(describeTrades(trades)))
 	return false
 }
 
@@ -845,7 +845,7 @@ func offerMismatchMessage(assertion string, q offerQuery, got offerState) string
 		fmt.Fprintf(&b, "  %s\n", d)
 	}
 	b.WriteString("\n")
-	b.WriteString(indent(describeOffers([]offerState{got}), "  "))
+	b.WriteString(indent(describeOffers([]offerState{got})))
 	return b.String()
 }
 
@@ -932,4 +932,221 @@ func orAny(label string) string {
 		return "any asset"
 	}
 	return label
+}
+
+// AssertPassiveOffer verifies whether a DEX offer operation or entry represents a passive offer.
+//
+// opInput accepts CreatePassiveSellOfferOp, ManageSellOfferOp, ManageBuyOfferOp,
+// OfferEntry, LedgerEntry, Operation, TransactionEnvelope, or base64/bytes/*lens.Value of those.
+func AssertPassiveOffer(t TestingT, opInput any, wantPassive bool, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertPassiveOffer"
+	_ = newConfig(opts...)
+
+	isPassive, _, ok := extractOfferInfo(t, opInput)
+	if !ok {
+		return false
+	}
+
+	if isPassive == wantPassive {
+		return true
+	}
+
+	t.Errorf("%s: offer passive status mismatch: got passive=%v, want passive=%v",
+		assertion, isPassive, wantPassive)
+	return false
+}
+
+// AssertOfferPriceRatio verifies that the price ratio of an offer operation or entry
+// matches the expected fraction numerator and denominator through exact fraction arithmetic.
+//
+// opInput accepts CreatePassiveSellOfferOp, ManageSellOfferOp, ManageBuyOfferOp,
+// OfferEntry, LedgerEntry, Operation, TransactionEnvelope, or base64/bytes/*lens.Value of those.
+func AssertOfferPriceRatio(t TestingT, opInput any, wantNumerator, wantDenominator int32, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertOfferPriceRatio"
+	_ = newConfig(opts...)
+
+	if wantDenominator <= 0 {
+		t.Errorf("%s: wantDenominator must be positive, got %d", assertion, wantDenominator)
+		return false
+	}
+
+	_, price, ok := extractOfferInfo(t, opInput)
+	if !ok {
+		return false
+	}
+	if price.D <= 0 {
+		t.Errorf("%s: offer price has non-positive denominator %d", assertion, price.D)
+		return false
+	}
+
+	// Exact fraction arithmetic: a/b == c/d <=> a*d == c*b
+	if int64(price.N)*int64(wantDenominator) == int64(wantNumerator)*int64(price.D) {
+		return true
+	}
+
+	gotRatio := float64(price.N) / float64(price.D)
+	wantRatio := float64(wantNumerator) / float64(wantDenominator)
+
+	t.Errorf("%s: offer price ratio mismatch: got %d/%d (%.7f), want %d/%d (%.7f)",
+		assertion, price.N, price.D, gotRatio, wantNumerator, wantDenominator, wantRatio)
+	return false
+}
+
+func extractOfferInfo(t TB, opInput any) (isPassive bool, price xdr.Price, ok bool) {
+	t.Helper()
+	const assertion = "extractOfferInfo"
+	if opInput == nil {
+		t.Errorf("%s: opInput is nil", assertion)
+		return false, xdr.Price{}, false
+	}
+
+	switch v := opInput.(type) {
+	case xdr.CreatePassiveSellOfferOp:
+		return true, v.Price, true
+	case *xdr.CreatePassiveSellOfferOp:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.CreatePassiveSellOfferOp", assertion)
+			return false, xdr.Price{}, false
+		}
+		return true, v.Price, true
+	case xdr.ManageSellOfferOp:
+		return false, v.Price, true
+	case *xdr.ManageSellOfferOp:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.ManageSellOfferOp", assertion)
+			return false, xdr.Price{}, false
+		}
+		return false, v.Price, true
+	case xdr.ManageBuyOfferOp:
+		return false, v.Price, true
+	case *xdr.ManageBuyOfferOp:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.ManageBuyOfferOp", assertion)
+			return false, xdr.Price{}, false
+		}
+		return false, v.Price, true
+	case xdr.OfferEntry:
+		passive := (uint32(v.Flags) & uint32(xdr.OfferEntryFlagsPassiveFlag)) != 0
+		return passive, v.Price, true
+	case *xdr.OfferEntry:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.OfferEntry", assertion)
+			return false, xdr.Price{}, false
+		}
+		passive := (uint32(v.Flags) & uint32(xdr.OfferEntryFlagsPassiveFlag)) != 0
+		return passive, v.Price, true
+	case xdr.LedgerEntry:
+		if v.Data.Type == xdr.LedgerEntryTypeOffer && v.Data.Offer != nil {
+			passive := (uint32(v.Data.Offer.Flags) & uint32(xdr.OfferEntryFlagsPassiveFlag)) != 0
+			return passive, v.Data.Offer.Price, true
+		}
+		t.Errorf("%s: ledger entry is type %s, want Offer", assertion, v.Data.Type.String())
+		return false, xdr.Price{}, false
+	case *xdr.LedgerEntry:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.LedgerEntry", assertion)
+			return false, xdr.Price{}, false
+		}
+		return extractOfferInfo(t, *v)
+	case xdr.Operation:
+		return extractOfferInfoFromOp(t, v)
+	case *xdr.Operation:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.Operation", assertion)
+			return false, xdr.Price{}, false
+		}
+		return extractOfferInfoFromOp(t, *v)
+	case xdr.TransactionEnvelope:
+		return extractOfferInfoFromEnvelope(t, &v)
+	case *xdr.TransactionEnvelope:
+		if v == nil {
+			t.Errorf("%s: opInput is a nil *xdr.TransactionEnvelope", assertion)
+			return false, xdr.Price{}, false
+		}
+		return extractOfferInfoFromEnvelope(t, v)
+	default:
+		decoded, err := coerce(opInput, "")
+		if err == nil && decoded != nil && decoded.Raw != nil {
+			switch raw := decoded.Raw.(type) {
+			case *xdr.TransactionEnvelope:
+				return extractOfferInfoFromEnvelope(t, raw)
+			case *xdr.Operation:
+				return extractOfferInfoFromOp(t, *raw)
+			case *xdr.CreatePassiveSellOfferOp:
+				return true, raw.Price, true
+			case *xdr.ManageSellOfferOp:
+				return false, raw.Price, true
+			case *xdr.ManageBuyOfferOp:
+				return false, raw.Price, true
+			case *xdr.OfferEntry:
+				passive := (uint32(raw.Flags) & uint32(xdr.OfferEntryFlagsPassiveFlag)) != 0
+				return passive, raw.Price, true
+			case *xdr.LedgerEntry:
+				return extractOfferInfo(t, *raw)
+			}
+		}
+		t.Errorf("%s: unsupported opInput type %T", assertion, opInput)
+		return false, xdr.Price{}, false
+	}
+}
+
+func extractOfferInfoFromOp(t TB, op xdr.Operation) (isPassive bool, price xdr.Price, ok bool) {
+	t.Helper()
+	const assertion = "extractOfferInfo"
+	switch op.Body.Type {
+	case xdr.OperationTypeCreatePassiveSellOffer:
+		if op.Body.CreatePassiveSellOfferOp != nil {
+			return true, op.Body.CreatePassiveSellOfferOp.Price, true
+		}
+	case xdr.OperationTypeManageSellOffer:
+		if op.Body.ManageSellOfferOp != nil {
+			return false, op.Body.ManageSellOfferOp.Price, true
+		}
+	case xdr.OperationTypeManageBuyOffer:
+		if op.Body.ManageBuyOfferOp != nil {
+			return false, op.Body.ManageBuyOfferOp.Price, true
+		}
+	}
+	t.Errorf("%s: operation %s is not an offer operation", assertion, op.Body.Type.String())
+	return false, xdr.Price{}, false
+}
+
+func extractOfferInfoFromEnvelope(t TB, env *xdr.TransactionEnvelope) (isPassive bool, price xdr.Price, ok bool) {
+	t.Helper()
+	const assertion = "extractOfferInfo"
+	var ops []xdr.Operation
+	switch env.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		if env.V0 != nil {
+			ops = env.V0.Tx.Operations
+		}
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if env.V1 != nil {
+			ops = env.V1.Tx.Operations
+		}
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if env.FeeBump != nil && env.FeeBump.Tx.InnerTx.V1 != nil {
+			ops = env.FeeBump.Tx.InnerTx.V1.Tx.Operations
+		}
+	}
+	for _, op := range ops {
+		switch op.Body.Type {
+		case xdr.OperationTypeCreatePassiveSellOffer:
+			if op.Body.CreatePassiveSellOfferOp != nil {
+				return true, op.Body.CreatePassiveSellOfferOp.Price, true
+			}
+		case xdr.OperationTypeManageSellOffer:
+			if op.Body.ManageSellOfferOp != nil {
+				return false, op.Body.ManageSellOfferOp.Price, true
+			}
+		case xdr.OperationTypeManageBuyOffer:
+			if op.Body.ManageBuyOfferOp != nil {
+				return false, op.Body.ManageBuyOfferOp.Price, true
+			}
+		}
+	}
+	t.Errorf("%s: envelope contains no offer operation", assertion)
+	return false, xdr.Price{}, false
 }

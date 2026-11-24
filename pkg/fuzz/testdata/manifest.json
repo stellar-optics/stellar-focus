@@ -1,0 +1,34 @@
+{
+  "seeds": [
+    {
+      "file": "tx_failed.env.txt",
+      "name": "tx_failed.env",
+      "type": "TransactionEnvelope",
+      "note": "a mainnet payment that failed"
+    },
+    {
+      "file": "tx_failed.res.txt",
+      "name": "tx_failed.res",
+      "type": "TransactionResult",
+      "note": "the result of the same payment"
+    },
+    {
+      "file": "tx_soroban.env.txt",
+      "name": "tx_soroban.env",
+      "type": "TransactionEnvelope",
+      "note": "a mainnet contract invocation"
+    },
+    {
+      "file": "tx_soroban.res.txt",
+      "name": "tx_soroban.res",
+      "type": "TransactionResult",
+      "note": "the result of the same invocation"
+    },
+    {
+      "file": "tx_success.env.txt",
+      "name": "tx_success.env",
+      "type": "TransactionEnvelope",
+      "note": "a mainnet payment that succeeded"
+    }
+  ]
+}

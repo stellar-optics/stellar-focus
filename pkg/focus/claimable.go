@@ -3,6 +3,7 @@ package focus
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
 )
@@ -85,7 +86,7 @@ func AssertClaimableBalanceCreated(t TB, meta Value, claimant Value, amount int6
 		t.Errorf("%s: the transaction created no claimable balance; "+
 			"want %s claimable by account %s\n\n%s",
 			assertion, amountStroops(xdr.Int64(amount), ""), shorten(addr),
-			indent(describeChanges(changes), "  "))
+			indent(describeChanges(changes)))
 		return false
 	}
 
@@ -102,7 +103,7 @@ func AssertClaimableBalanceCreated(t TB, meta Value, claimant Value, amount int6
 	if len(forClaimant) == 0 {
 		t.Errorf("%s: the transaction created %s, none of them claimable by account %s\n\n%s",
 			assertion, pluralBalances(len(created)), shorten(addr),
-			indent(describeClaimableBalances(created), "  "))
+			indent(describeClaimableBalances(created)))
 		return false
 	}
 	for _, cb := range forClaimant {
@@ -120,14 +121,14 @@ func AssertClaimableBalanceCreated(t TB, meta Value, claimant Value, amount int6
 			assertion, shortenID(cb.id), shorten(addr),
 			amountStroops(cb.amount, assetUnit(cb.asset)),
 			amountStroops(xdr.Int64(amount), assetUnit(cb.asset)),
-			indent(describeClaimableBalances(created), "  "))
+			indent(describeClaimableBalances(created)))
 		return false
 	}
 	t.Errorf("%s: account %s can claim %s, holding %s; want one of %s\n\n%s",
 		assertion, shorten(addr), pluralBalances(len(forClaimant)),
 		strings.Join(balanceAmounts(forClaimant), ", "),
 		amountStroops(xdr.Int64(amount), ""),
-		indent(describeClaimableBalances(created), "  "))
+		indent(describeClaimableBalances(created)))
 	return false
 }
 
@@ -293,4 +294,372 @@ func shortenID(id string) string {
 		return id
 	}
 	return id[:8] + "…" + id[len(id)-8:]
+}
+
+// AssertClaimPredicateTree asserts that claimant at claimantIndex in opOrEntry has a
+// claim predicate tree recursively matching wantPredicate.
+//
+// opOrEntry accepts an xdr.ClaimableBalanceEntry, an xdr.CreateClaimableBalanceOp,
+// an xdr.LedgerEntry, an xdr.Operation, an xdr.TransactionEnvelope, an xdr.TransactionMeta,
+// an xdr.Claimant, a slice []xdr.Claimant, or base64/bytes/*lens.Value of those.
+//
+// In failure messages, the structural path of any deviating branch is displayed alongside
+// pretty-printed predicate trees with human-readable timestamps.
+func AssertClaimPredicateTree(t TestingT, opOrEntry any, claimantIndex int, wantPredicate xdr.ClaimPredicate, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
+	_ = newConfig(opts...)
+
+	claimants, ok := extractClaimants(t, opOrEntry)
+	if !ok {
+		return false
+	}
+	if claimantIndex < 0 || claimantIndex >= len(claimants) {
+		t.Errorf("%s: claimantIndex %d out of bounds (found %d claimant(s))",
+			assertion, claimantIndex, len(claimants))
+		return false
+	}
+
+	c := claimants[claimantIndex]
+	v0, ok := c.GetV0()
+	if !ok {
+		t.Errorf("%s: claimant at index %d is not a V0 claimant (type %s)",
+			assertion, claimantIndex, c.Type.String())
+		return false
+	}
+
+	gotPredicate := v0.Predicate
+	diff, matched := diffClaimPredicateTree("$", wantPredicate, gotPredicate)
+	if matched {
+		return true
+	}
+
+	t.Errorf("%s: claim predicate mismatch at claimant index %d:\n  %s\n\nwant predicate:\n%s\n\ngot predicate:\n%s",
+		assertion, claimantIndex, diff,
+		indent(prettyClaimPredicateTree(wantPredicate, 0)),
+		indent(prettyClaimPredicateTree(gotPredicate, 0)))
+	return false
+}
+
+// extractClaimants retrieves the claimant slice from various accepted input types.
+func extractClaimants(t TB, opOrEntry any) ([]xdr.Claimant, bool) {
+	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
+	if opOrEntry == nil {
+		t.Errorf("%s: opOrEntry is nil", assertion)
+		return nil, false
+	}
+	switch v := opOrEntry.(type) {
+	case xdr.ClaimableBalanceEntry:
+		return v.Claimants, true
+	case *xdr.ClaimableBalanceEntry:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.ClaimableBalanceEntry", assertion)
+			return nil, false
+		}
+		return v.Claimants, true
+	case xdr.CreateClaimableBalanceOp:
+		return v.Claimants, true
+	case *xdr.CreateClaimableBalanceOp:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.CreateClaimableBalanceOp", assertion)
+			return nil, false
+		}
+		return v.Claimants, true
+	case xdr.Operation:
+		if v.Body.Type == xdr.OperationTypeCreateClaimableBalance && v.Body.CreateClaimableBalanceOp != nil {
+			return v.Body.CreateClaimableBalanceOp.Claimants, true
+		}
+		t.Errorf("%s: operation is type %s, want CreateClaimableBalance", assertion, v.Body.Type.String())
+		return nil, false
+	case *xdr.Operation:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.Operation", assertion)
+			return nil, false
+		}
+		return extractClaimants(t, *v)
+	case xdr.LedgerEntry:
+		if v.Data.Type == xdr.LedgerEntryTypeClaimableBalance && v.Data.ClaimableBalance != nil {
+			return v.Data.ClaimableBalance.Claimants, true
+		}
+		t.Errorf("%s: ledger entry is type %s, want ClaimableBalance", assertion, v.Data.Type.String())
+		return nil, false
+	case *xdr.LedgerEntry:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.LedgerEntry", assertion)
+			return nil, false
+		}
+		return extractClaimants(t, *v)
+	case xdr.Claimant:
+		return []xdr.Claimant{v}, true
+	case *xdr.Claimant:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.Claimant", assertion)
+			return nil, false
+		}
+		return []xdr.Claimant{*v}, true
+	case []xdr.Claimant:
+		return v, true
+	case xdr.ClaimPredicate:
+		return []xdr.Claimant{{
+			Type: xdr.ClaimantTypeClaimantTypeV0,
+			V0:   &xdr.ClaimantV0{Predicate: v},
+		}}, true
+	case *xdr.ClaimPredicate:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.ClaimPredicate", assertion)
+			return nil, false
+		}
+		return extractClaimants(t, *v)
+	case xdr.TransactionEnvelope:
+		return claimantsFromEnvelope(t, &v)
+	case *xdr.TransactionEnvelope:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionEnvelope", assertion)
+			return nil, false
+		}
+		return claimantsFromEnvelope(t, v)
+	case xdr.TransactionMeta:
+		return claimantsFromMeta(t, v)
+	case *xdr.TransactionMeta:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionMeta", assertion)
+			return nil, false
+		}
+		return claimantsFromMeta(t, *v)
+	default:
+		decoded, err := coerce(opOrEntry, "")
+		if err == nil && decoded != nil && decoded.Raw != nil {
+			switch raw := decoded.Raw.(type) {
+			case *xdr.TransactionEnvelope:
+				return claimantsFromEnvelope(t, raw)
+			case *xdr.TransactionMeta:
+				return claimantsFromMeta(t, raw)
+			case *xdr.LedgerEntry:
+				return extractClaimants(t, raw)
+			case *xdr.ClaimableBalanceEntry:
+				return extractClaimants(t, raw)
+			case *xdr.CreateClaimableBalanceOp:
+				return extractClaimants(t, raw)
+			case *xdr.Operation:
+				return extractClaimants(t, raw)
+			}
+		}
+		changes, ok := ledgerChanges(t, assertion, opOrEntry)
+		if ok {
+			for _, c := range changes {
+				if c.entry != nil && c.entry.Data.Type == xdr.LedgerEntryTypeClaimableBalance && c.entry.Data.ClaimableBalance != nil {
+					return c.entry.Data.ClaimableBalance.Claimants, true
+				}
+			}
+		}
+		t.Errorf("%s: unsupported opOrEntry type %T; expected ClaimableBalanceEntry, CreateClaimableBalanceOp, LedgerEntry, TransactionEnvelope, or TransactionMeta", assertion, opOrEntry)
+		return nil, false
+	}
+}
+
+func claimantsFromEnvelope(t TB, env *xdr.TransactionEnvelope) ([]xdr.Claimant, bool) {
+	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
+	var ops []xdr.Operation
+	switch env.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		if env.V0 != nil {
+			ops = env.V0.Tx.Operations
+		}
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		if env.V1 != nil {
+			ops = env.V1.Tx.Operations
+		}
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		if env.FeeBump != nil && env.FeeBump.Tx.InnerTx.V1 != nil {
+			ops = env.FeeBump.Tx.InnerTx.V1.Tx.Operations
+		}
+	}
+	for _, op := range ops {
+		if op.Body.Type == xdr.OperationTypeCreateClaimableBalance && op.Body.CreateClaimableBalanceOp != nil {
+			return op.Body.CreateClaimableBalanceOp.Claimants, true
+		}
+	}
+	t.Errorf("%s: envelope contains no CreateClaimableBalance operation", assertion)
+	return nil, false
+}
+
+func claimantsFromMeta(t TB, meta any) ([]xdr.Claimant, bool) {
+	t.Helper()
+	const assertion = "AssertClaimPredicateTree"
+	changes, ok := ledgerChanges(t, assertion, meta)
+	if !ok {
+		return nil, false
+	}
+	for _, c := range changes {
+		if c.entry != nil && c.entry.Data.Type == xdr.LedgerEntryTypeClaimableBalance && c.entry.Data.ClaimableBalance != nil {
+			return c.entry.Data.ClaimableBalance.Claimants, true
+		}
+	}
+	t.Errorf("%s: meta contains no claimable balance entry changes", assertion)
+	return nil, false
+}
+
+// diffClaimPredicateTree recursively compares two ClaimPredicates, returning a diff message and false if they differ.
+func diffClaimPredicateTree(path string, want, got xdr.ClaimPredicate) (string, bool) {
+	if want.Type != got.Type {
+		return fmt.Sprintf("at path %q: predicate type mismatch: want %s, got %s",
+			path, formatClaimPredicateType(want.Type), formatClaimPredicateType(got.Type)), false
+	}
+	switch want.Type {
+	case xdr.ClaimPredicateTypeClaimPredicateUnconditional:
+		return "", true
+
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime:
+		if want.AbsBefore == nil || got.AbsBefore == nil {
+			if want.AbsBefore != got.AbsBefore {
+				return fmt.Sprintf("at path %q: absolute time mismatch (nil pointer)", path), false
+			}
+			return "", true
+		}
+		w := int64(*want.AbsBefore)
+		g := int64(*got.AbsBefore)
+		if w != g {
+			return fmt.Sprintf("at path %q: absolute time mismatch: want %d (%s), got %d (%s)",
+				path, w, time.Unix(w, 0).UTC().Format(time.RFC3339),
+				g, time.Unix(g, 0).UTC().Format(time.RFC3339)), false
+		}
+		return "", true
+
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime:
+		if want.RelBefore == nil || got.RelBefore == nil {
+			if want.RelBefore != got.RelBefore {
+				return fmt.Sprintf("at path %q: relative time mismatch (nil pointer)", path), false
+			}
+			return "", true
+		}
+		w := int64(*want.RelBefore)
+		g := int64(*got.RelBefore)
+		if w != g {
+			return fmt.Sprintf("at path %q: relative time mismatch: want %ds (%s), got %ds (%s)",
+				path, w, time.Duration(w*int64(time.Second)).String(),
+				g, time.Duration(g*int64(time.Second)).String()), false
+		}
+		return "", true
+
+	case xdr.ClaimPredicateTypeClaimPredicateNot:
+		if want.NotPredicate == nil || *want.NotPredicate == nil ||
+			got.NotPredicate == nil || *got.NotPredicate == nil {
+			if (want.NotPredicate == nil || *want.NotPredicate == nil) !=
+				(got.NotPredicate == nil || *got.NotPredicate == nil) {
+				return fmt.Sprintf("at path %q: NOT predicate nil mismatch", path), false
+			}
+			return "", true
+		}
+		return diffClaimPredicateTree(path+".not", **want.NotPredicate, **got.NotPredicate)
+
+	case xdr.ClaimPredicateTypeClaimPredicateAnd:
+		wPreds := want.AndPredicates
+		gPreds := got.AndPredicates
+		if wPreds == nil || gPreds == nil {
+			if (wPreds == nil) != (gPreds == nil) {
+				return fmt.Sprintf("at path %q: AND child list nil mismatch", path), false
+			}
+			return "", true
+		}
+		if len(*wPreds) != len(*gPreds) {
+			return fmt.Sprintf("at path %q: AND child count mismatch: want %d, got %d",
+				path, len(*wPreds), len(*gPreds)), false
+		}
+		for i := range *wPreds {
+			childPath := fmt.Sprintf("%s.and[%d]", path, i)
+			if diff, ok := diffClaimPredicateTree(childPath, (*wPreds)[i], (*gPreds)[i]); !ok {
+				return diff, false
+			}
+		}
+		return "", true
+
+	case xdr.ClaimPredicateTypeClaimPredicateOr:
+		wPreds := want.OrPredicates
+		gPreds := got.OrPredicates
+		if wPreds == nil || gPreds == nil {
+			if (wPreds == nil) != (gPreds == nil) {
+				return fmt.Sprintf("at path %q: OR child list nil mismatch", path), false
+			}
+			return "", true
+		}
+		if len(*wPreds) != len(*gPreds) {
+			return fmt.Sprintf("at path %q: OR child count mismatch: want %d, got %d",
+				path, len(*wPreds), len(*gPreds)), false
+		}
+		for i := range *wPreds {
+			childPath := fmt.Sprintf("%s.or[%d]", path, i)
+			if diff, ok := diffClaimPredicateTree(childPath, (*wPreds)[i], (*gPreds)[i]); !ok {
+				return diff, false
+			}
+		}
+		return "", true
+	}
+	return "", true
+}
+
+func formatClaimPredicateType(t xdr.ClaimPredicateType) string {
+	switch t {
+	case xdr.ClaimPredicateTypeClaimPredicateUnconditional:
+		return "UNCONDITIONAL"
+	case xdr.ClaimPredicateTypeClaimPredicateAnd:
+		return "AND"
+	case xdr.ClaimPredicateTypeClaimPredicateOr:
+		return "OR"
+	case xdr.ClaimPredicateTypeClaimPredicateNot:
+		return "NOT"
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime:
+		return "BEFORE_ABSOLUTE_TIME"
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime:
+		return "BEFORE_RELATIVE_TIME"
+	default:
+		return t.String()
+	}
+}
+
+// prettyClaimPredicateTree renders a human-readable indented view of a ClaimPredicate tree.
+func prettyClaimPredicateTree(p xdr.ClaimPredicate, depth int) string {
+	prefix := strings.Repeat("  ", depth)
+	switch p.Type {
+	case xdr.ClaimPredicateTypeClaimPredicateUnconditional:
+		return prefix + "- unconditional"
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeAbsoluteTime:
+		if p.AbsBefore != nil {
+			t := int64(*p.AbsBefore)
+			return fmt.Sprintf("%s- before absolute time: %d (%s)", prefix, t, time.Unix(t, 0).UTC().Format(time.RFC3339))
+		}
+		return prefix + "- before absolute time (nil)"
+	case xdr.ClaimPredicateTypeClaimPredicateBeforeRelativeTime:
+		if p.RelBefore != nil {
+			s := int64(*p.RelBefore)
+			return fmt.Sprintf("%s- before relative time: %ds (%s)", prefix, s, (time.Duration(s) * time.Second).String())
+		}
+		return prefix + "- before relative time (nil)"
+	case xdr.ClaimPredicateTypeClaimPredicateNot:
+		if p.NotPredicate != nil && *p.NotPredicate != nil {
+			return prefix + "- not:\n" + prettyClaimPredicateTree(**p.NotPredicate, depth+1)
+		}
+		return prefix + "- not (nil)"
+	case xdr.ClaimPredicateTypeClaimPredicateAnd:
+		if p.AndPredicates != nil {
+			lines := []string{prefix + "- and:"}
+			for _, child := range *p.AndPredicates {
+				lines = append(lines, prettyClaimPredicateTree(child, depth+1))
+			}
+			return strings.Join(lines, "\n")
+		}
+		return prefix + "- and (nil)"
+	case xdr.ClaimPredicateTypeClaimPredicateOr:
+		if p.OrPredicates != nil {
+			lines := []string{prefix + "- or:"}
+			for _, child := range *p.OrPredicates {
+				lines = append(lines, prettyClaimPredicateTree(child, depth+1))
+			}
+			return strings.Join(lines, "\n")
+		}
+		return prefix + "- or (nil)"
+	default:
+		return prefix + "- " + p.Type.String()
+	}
 }

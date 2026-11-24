@@ -79,6 +79,65 @@ func AssertSignatureThreshold(t TB, envelope Value, threshold int, expectedPubKe
 	return assertSignaturesPresent(t, assertion, envelope, threshold, expectedPubKeys)
 }
 
+// AssertSignatureHints checks that the envelope carries a signature for each
+// of the wanted hints.
+//
+// A Stellar signature is decorated: it carries a four-byte hint plus the
+// signature bytes. The hint is all the envelope says about who signed — by
+// convention the last four bytes of the signer's public key — so a test that
+// holds the hint can check that a particular signer signed without holding
+// the key itself.
+//
+// AssertSignedBy is the same check for a signer named by its public key.
+func AssertSignatureHints(t TB, envelope Value, wantHints ...[4]byte) bool {
+	t.Helper()
+	const assertion = "AssertSignatureHints"
+
+	if len(wantHints) == 0 {
+		t.Errorf("%s: no signature hints were given; pass at least one hint", assertion)
+		return false
+	}
+
+	want := make([]expectedSigner, 0, len(wantHints))
+	for _, h := range wantHints {
+		want = append(want, expectedSigner{
+			label: hex.EncodeToString(h[:]),
+			hint:  xdr.SignatureHint(h),
+		})
+	}
+	return assertHintsPresent(t, assertion, envelope, want, len(want), "hint")
+}
+
+// AssertSignedBy checks that the envelope carries a signature from each of
+// the wanted public keys.
+//
+// wantPublicKeys are strkey addresses — the "G…" form of an ed25519 account,
+// and the "T…", "X…" and "P…" forms of the other signer kinds — and each
+// signature is recognised by the hint the protocol derives from its key.
+//
+// AssertSignaturesPresent accepts the same keys along with more forms; this
+// one takes strkeys only, so what a test passes is checked by the compiler.
+func AssertSignedBy(t TB, envelope Value, wantPublicKeys ...string) bool {
+	t.Helper()
+	const assertion = "AssertSignedBy"
+
+	if len(wantPublicKeys) == 0 {
+		t.Errorf("%s: no public keys were given; pass at least one signer", assertion)
+		return false
+	}
+
+	want := make([]expectedSigner, 0, len(wantPublicKeys))
+	for i, key := range wantPublicKeys {
+		signer, err := expectedSignerFrom(key)
+		if err != nil {
+			t.Errorf("%s: wantPublicKeys[%d] could not be read as a signer: %v", assertion, i, err)
+			return false
+		}
+		want = append(want, signer)
+	}
+	return assertHintsPresent(t, assertion, envelope, want, len(want), "signer")
+}
+
 // expectedSigner is one wanted signer reduced to the strkey a message prints
 // and the hint a signature must carry.
 type expectedSigner struct {
@@ -111,6 +170,21 @@ func assertSignaturesPresent(t TB, assertion string, envelope Value, required in
 	if !ok {
 		return false
 	}
+	return assertHintsPresent(t, assertion, envelope, want, required, "signer")
+}
+
+// assertHintsPresent checks that the envelope carries a signature for each of
+// the wanted signers, and reports the ones that are missing.
+//
+// The wanted signers are reduced to hints before they get here, so an
+// assertion that names a hint and one that names a public key are checked the
+// same way.
+//
+// word names what the wanted signers are — "signer" or "hint" — so the
+// message reads as the assertion that made it.
+func assertHintsPresent(t TB, assertion string, envelope Value, want []expectedSigner, required int, word string) bool {
+	t.Helper()
+
 	sigs, ok := envelopeSignatures(t, assertion, envelope)
 	if !ok {
 		return false
@@ -134,13 +208,13 @@ func assertSignaturesPresent(t TB, assertion string, envelope Value, required in
 
 	var b strings.Builder
 	if required == len(want) {
-		fmt.Fprintf(&b, "%s: %d of %d expected signer(s) have no matching signature\n\n",
-			assertion, len(want)-present, len(want))
+		fmt.Fprintf(&b, "%s: %d of %d expected %s(s) have no matching signature\n\n",
+			assertion, len(want)-present, len(want), word)
 	} else {
-		fmt.Fprintf(&b, "%s: only %d of %d expected signer(s) signed, want at least %d\n\n",
-			assertion, present, len(want), required)
+		fmt.Fprintf(&b, "%s: only %d of %d expected %s(s) signed, want at least %d\n\n",
+			assertion, present, len(want), word, required)
 	}
-	fmt.Fprintf(&b, "%s\n\n%s", describeExpectedSigners(want, matchedAt, sigs), describeAttachedSignatures(sigs))
+	fmt.Fprintf(&b, "%s\n\n%s", describeExpectedSigners(want, matchedAt, sigs, word), describeAttachedSignatures(sigs))
 	t.Errorf("%s", b.String())
 	return false
 }
@@ -312,9 +386,9 @@ func envelopeSignatures(t TB, assertion string, envelope Value) ([]attachedSigna
 // describeExpectedSigners renders every expected signer and whether a
 // signature matched it, which tells the reader who did sign as well as who did
 // not.
-func describeExpectedSigners(want []expectedSigner, matchedAt []int, sigs []attachedSignature) string {
+func describeExpectedSigners(want []expectedSigner, matchedAt []int, sigs []attachedSignature, word string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "expected signers (%d):\n", len(want))
+	fmt.Fprintf(&b, "expected %ss (%d):\n", word, len(want))
 	for i, w := range want {
 		status := "no signature"
 		if j := matchedAt[i]; j >= 0 {

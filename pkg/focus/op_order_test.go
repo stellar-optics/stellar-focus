@@ -10,54 +10,6 @@ import (
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
 
-func createAccountOp(t *testing.T) xdr.Operation {
-	t.Helper()
-	return xdr.Operation{Body: xdr.OperationBody{
-		Type: xdr.OperationTypeCreateAccount,
-		CreateAccountOp: &xdr.CreateAccountOp{
-			Destination:     mustAccountID(t, testDest),
-			StartingBalance: xdr.Int64(10_0000000),
-		},
-	}}
-}
-
-func changeTrustOp(t *testing.T) xdr.Operation {
-	t.Helper()
-
-	var asset xdr.Asset
-	if err := asset.SetCredit("USDC", mustAccountID(t, testIssuer)); err != nil {
-		t.Fatalf("building asset: %v", err)
-	}
-	return xdr.Operation{Body: xdr.OperationBody{
-		Type: xdr.OperationTypeChangeTrust,
-		ChangeTrustOp: &xdr.ChangeTrustOp{
-			Line:  asset.ToChangeTrustAsset(),
-			Limit: xdr.Int64(1_000_0000000),
-		},
-	}}
-}
-
-func bumpSequenceOp(t *testing.T) xdr.Operation {
-	t.Helper()
-	to := xdr.SequenceNumber(99999)
-	return xdr.Operation{Body: xdr.OperationBody{
-		Type:           xdr.OperationTypeBumpSequence,
-		BumpSequenceOp: &xdr.BumpSequenceOp{BumpTo: to},
-	}}
-}
-
-func manageDataOp(t *testing.T) xdr.Operation {
-	t.Helper()
-	value := xdr.DataValue("focus")
-	return xdr.Operation{Body: xdr.OperationBody{
-		Type: xdr.OperationTypeManageData,
-		ManageDataOp: &xdr.ManageDataOp{
-			DataName:  "test",
-			DataValue: &value,
-		},
-	}}
-}
-
 func TestAssertOperationSequencePasses(t *testing.T) {
 	t.Parallel()
 
