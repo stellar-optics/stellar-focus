@@ -468,7 +468,9 @@ func resolveLedgerKey(t TB, assertion string, v Value) (ledgerKey, bool) {
 	if s, ok := v.(string); ok {
 		s = strings.TrimSpace(s)
 		if cached, ok := resolvedKeyCache.Load(s); ok {
-			return cached.(ledgerKey), true
+			if lk, ok := cached.(ledgerKey); ok {
+				return lk, true
+			}
 		}
 	}
 
@@ -529,7 +531,9 @@ func coerceLedgerKey(v Value) (xdr.LedgerKey, error) {
 	case string:
 		val = strings.TrimSpace(val)
 		if cached, ok := ledgerKeyCache.Load(val); ok {
-			return cached.(xdr.LedgerKey), nil
+			if k, ok := cached.(xdr.LedgerKey); ok {
+				return k, nil
+			}
 		}
 		var key xdr.LedgerKey
 		if err := xdr.SafeUnmarshalBase64(val, &key); err == nil {

@@ -137,7 +137,7 @@ precedence.`,
 		newRefreshCmd(stdout, stderr),
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
-		newStatsCmd(cfg, stdout),
+		newStatsCmd(stdout),
 	)
 	return root
 }
@@ -419,7 +419,10 @@ archive holds envelopes and results but not transaction meta.`,
 						if rec.Type == "TransactionEnvelope" {
 							var env xdr.TransactionEnvelope
 							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
-								specPaths, _ := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								specPaths, err := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								if err != nil {
+									return err
+								}
 								for _, sp := range specPaths {
 									fmt.Fprintf(stdout, "wrote %s\n", sp)
 								}
@@ -459,7 +462,10 @@ archive holds envelopes and results but not transaction meta.`,
 						if rec.Type == "TransactionEnvelope" {
 							var env xdr.TransactionEnvelope
 							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
-								specPaths, _ := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								specPaths, err := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								if err != nil {
+									return err
+								}
 								for _, sp := range specPaths {
 									fmt.Fprintf(stdout, "wrote %s\n", sp)
 								}

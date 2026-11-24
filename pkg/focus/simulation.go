@@ -24,8 +24,13 @@ func AssertNoFootprintConflicts(t TB, txs []xdr.TransactionEnvelope) bool {
 	fmt.Fprintf(&b, "AssertNoFootprintConflicts: found %d footprint conflict(s) across %d transaction(s):\n\n",
 		len(conflicts), len(txs))
 	for i, c := range conflicts {
-		raw, _ := c.Key.MarshalBinary()
-		keyB64 := base64.StdEncoding.EncodeToString(raw)
+		raw, err := c.Key.MarshalBinary()
+		var keyB64 string
+		if err != nil {
+			keyB64 = "<invalid-key>"
+		} else {
+			keyB64 = base64.StdEncoding.EncodeToString(raw)
+		}
 		fmt.Fprintf(&b, "  [%d] tx %d and tx %d: %s conflict on key %s (%s)\n",
 			i, c.TxAIndex, c.TxBIndex, c.ConflictType, describeLedgerKey(c.Key), keyB64)
 	}

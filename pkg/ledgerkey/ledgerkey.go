@@ -46,7 +46,9 @@ var (
 func Decode(b64 string) (xdr.LedgerKey, error) {
 	b64 = strings.TrimSpace(b64)
 	if val, ok := keyCache.Load(b64); ok {
-		return val.(xdr.LedgerKey), nil
+		if k, ok := val.(xdr.LedgerKey); ok {
+			return k, nil
+		}
 	}
 
 	var key xdr.LedgerKey

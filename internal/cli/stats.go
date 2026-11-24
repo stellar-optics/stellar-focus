@@ -71,7 +71,7 @@ protocol version distribution, and total/average disk footprint.`,
 	return cmd
 }
 
-func newStatsCmd(cfg *config, stdout io.Writer) *cobra.Command {
+func newStatsCmd(stdout io.Writer) *cobra.Command {
 	return NewStatsCmd(stdout)
 }
 
@@ -93,7 +93,7 @@ func CollectStats(paths []string) (*StatsReport, error) {
 		if !info.IsDir() {
 			if isFixtureFile(p) && !seenFiles[p] {
 				seenFiles[p] = true
-				_ = analyzeFixtureFile(p, info.Size(), report)
+				analyzeFixtureFile(p, info.Size(), report)
 			}
 			continue
 		}
@@ -113,9 +113,9 @@ func CollectStats(paths []string) (*StatsReport, error) {
 				seenFiles[path] = true
 				fileInfo, err := d.Info()
 				if err != nil {
-					return nil
+					return err
 				}
-				_ = analyzeFixtureFile(path, fileInfo.Size(), report)
+				analyzeFixtureFile(path, fileInfo.Size(), report)
 			}
 			return nil
 		})
@@ -158,7 +158,7 @@ func fixtureFormat(path string) string {
 	}
 }
 
-func analyzeFixtureFile(path string, size int64, report *StatsReport) error {
+func analyzeFixtureFile(path string, size int64, report *StatsReport) {
 	fmtType := fixtureFormat(path)
 
 	// Attempt golden.Load
@@ -170,7 +170,7 @@ func analyzeFixtureFile(path string, size int64, report *StatsReport) error {
 			report.TotalBytes += size
 			report.Formats[fmtType]++
 		}
-		return nil
+		return
 	}
 
 	report.TotalFixtures++
@@ -241,8 +241,6 @@ func analyzeFixtureFile(path string, size int64, report *StatsReport) error {
 			}
 		}
 	}
-
-	return nil
 }
 
 func opStatsTypeName(t xdr.OperationType) string {

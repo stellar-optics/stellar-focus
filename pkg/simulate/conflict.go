@@ -33,7 +33,11 @@ type FootprintConflict struct {
 
 // String returns a human-readable description of the conflict.
 func (c FootprintConflict) String() string {
-	raw, _ := c.Key.MarshalBinary()
+	raw, err := c.Key.MarshalBinary()
+	if err != nil {
+		return fmt.Sprintf("tx %d and tx %d have %s conflict on invalid ledger key",
+			c.TxAIndex, c.TxBIndex, c.ConflictType)
+	}
 	keyB64 := base64.StdEncoding.EncodeToString(raw)
 	return fmt.Sprintf("tx %d and tx %d have %s conflict on ledger key %s",
 		c.TxAIndex, c.TxBIndex, c.ConflictType, keyB64)
