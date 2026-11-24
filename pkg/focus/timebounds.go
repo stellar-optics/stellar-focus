@@ -522,15 +522,6 @@ func contains(s []string, x string) bool {
 	return false
 }
 
-// preconditionTypeName returns a human-readable name for a precondition.
-func preconditionTypeName(cond interface{}) string {
-	switch v := cond.(type) {
-	case *xdr.PreconditionsV2:
-		return "V2"
-	default:
-		return fmt.Sprintf("unknown type %T", v)
-	}
-}
 func describeTimebounds(b timebounds) string {
 	if !b.Set || (b.MinTime == 0 && b.MaxTime == 0) {
 		return "no time bounds (valid indefinitely)"

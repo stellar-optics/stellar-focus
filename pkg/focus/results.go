@@ -68,9 +68,9 @@ type ResultCodeInfo struct {
 func ValidateResultCode(code string) (ResultCodeInfo, bool) {
 	if info, ok := lens.ReasonByCode(code); ok {
 		return ResultCodeInfo{
-			Code: info.Code,
+			Code:    info.Code,
 			Summary: info.Summary,
-			Hint: info.Hint,
+			Hint:    info.Hint,
 		}, true
 	}
 	return ResultCodeInfo{}, false
