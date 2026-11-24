@@ -107,21 +107,78 @@ func describeOperationSequence(names []string) string {
 // XDR prefix and snake_casing the rest, so a failure message uses the same
 // words as `lens explain` for the same transaction.
 func operationTypeName(t xdr.OperationType) string {
-	name := strings.TrimPrefix(t.String(), "OperationType")
-	if name == "" {
-		return fmt.Sprintf("operation_type_%d", t)
-	}
-
-	var b strings.Builder
-	for i, r := range name {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r + ('a' - 'A'))
-			continue
+	switch t {
+	case xdr.OperationTypeCreateAccount:
+		return "create_account"
+	case xdr.OperationTypePayment:
+		return "payment"
+	case xdr.OperationTypePathPaymentStrictReceive:
+		return "path_payment_strict_receive"
+	case xdr.OperationTypeManageSellOffer:
+		return "manage_sell_offer"
+	case xdr.OperationTypeCreatePassiveSellOffer:
+		return "create_passive_sell_offer"
+	case xdr.OperationTypeSetOptions:
+		return "set_options"
+	case xdr.OperationTypeChangeTrust:
+		return "change_trust"
+	case xdr.OperationTypeAllowTrust:
+		return "allow_trust"
+	case xdr.OperationTypeAccountMerge:
+		return "account_merge"
+	case xdr.OperationTypeInflation:
+		return "inflation"
+	case xdr.OperationTypeManageData:
+		return "manage_data"
+	case xdr.OperationTypeBumpSequence:
+		return "bump_sequence"
+	case xdr.OperationTypeManageBuyOffer:
+		return "manage_buy_offer"
+	case xdr.OperationTypePathPaymentStrictSend:
+		return "path_payment_strict_send"
+	case xdr.OperationTypeCreateClaimableBalance:
+		return "create_claimable_balance"
+	case xdr.OperationTypeClaimClaimableBalance:
+		return "claim_claimable_balance"
+	case xdr.OperationTypeBeginSponsoringFutureReserves:
+		return "begin_sponsoring_future_reserves"
+	case xdr.OperationTypeEndSponsoringFutureReserves:
+		return "end_sponsoring_future_reserves"
+	case xdr.OperationTypeRevokeSponsorship:
+		return "revoke_sponsorship"
+	case xdr.OperationTypeClawback:
+		return "clawback"
+	case xdr.OperationTypeClawbackClaimableBalance:
+		return "clawback_claimable_balance"
+	case xdr.OperationTypeSetTrustLineFlags:
+		return "set_trust_line_flags"
+	case xdr.OperationTypeLiquidityPoolDeposit:
+		return "liquidity_pool_deposit"
+	case xdr.OperationTypeLiquidityPoolWithdraw:
+		return "liquidity_pool_withdraw"
+	case xdr.OperationTypeInvokeHostFunction:
+		return "invoke_host_function"
+	case xdr.OperationTypeExtendFootprintTtl:
+		return "extend_footprint_ttl"
+	case xdr.OperationTypeRestoreFootprint:
+		return "restore_footprint"
+	default:
+		name := strings.TrimPrefix(t.String(), "OperationType")
+		if name == "" {
+			return fmt.Sprintf("operation_type_%d", t)
 		}
-		b.WriteRune(r)
+
+		var b strings.Builder
+		for i, r := range name {
+			if r >= 'A' && r <= 'Z' {
+				if i > 0 {
+					b.WriteByte('_')
+				}
+				b.WriteRune(r + ('a' - 'A'))
+				continue
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
 	}
-	return b.String()
 }

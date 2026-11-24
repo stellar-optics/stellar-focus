@@ -2,6 +2,7 @@ package capture_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -624,5 +625,94 @@ func TestFilterRecordsKeepsRecordsThatAreNotTransactions(t *testing.T) {
 	}
 	if len(kept) != 1 || kept[0].Type != "LedgerEntry" {
 		t.Errorf("kept %d records, want only the ledger entry", len(kept))
+	}
+}
+
+func TestExtractTransactionContractSpecs(t *testing.T) {
+	t.Parallel()
+
+	fn := xdr.ScSpecFunctionV0{Doc: "", Name: "increment"}
+	code := wasmWithSpec(t, []xdr.ScSpecEntry{{
+		Kind:       xdr.ScSpecEntryKindScSpecEntryFunctionV0,
+		FunctionV0: &fn,
+	}})
+	src := contractSource(t, contractCodeEntry(t, code, false))
+
+	var contractHash xdr.Hash
+	rawHex, err := hex.DecodeString(testContractID)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	copy(contractHash[:], rawHex)
+
+	env := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(filterAccount),
+				Fee:           100,
+				SeqNum:        1,
+				Ext: xdr.TransactionExt{
+					V: 1,
+					SorobanData: &xdr.SorobanTransactionData{
+						Resources: xdr.SorobanResources{
+							Footprint: xdr.LedgerFootprint{
+								ReadOnly: []xdr.LedgerKey{{
+									Type: xdr.LedgerEntryTypeContractCode,
+									ContractCode: &xdr.LedgerKeyContractCode{
+										Hash: contractHash,
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	txHash := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	saved, err := capture.ExtractTransactionContractSpecs(context.Background(), src, txHash, env, tmpDir)
+	if err != nil {
+		t.Fatalf("ExtractTransactionContractSpecs error: %v", err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("expected 1 saved spec file, got %d", len(saved))
+	}
+
+	expectedFile := filepath.Join(tmpDir, txHash+".spec.json")
+	if saved[0] != expectedFile {
+		t.Errorf("saved path = %q, want %q", saved[0], expectedFile)
+	}
+
+	loadedSpec, err := capture.LoadContractSpec(expectedFile)
+	if err != nil {
+		t.Fatalf("LoadContractSpec error: %v", err)
+	}
+	if len(loadedSpec) != 1 || loadedSpec[0].FunctionV0.Name != "increment" {
+		t.Errorf("loaded spec = %v, want increment function", loadedSpec)
+	}
+
+	b64Env, err := xdr.MarshalBase64(env)
+	if err != nil {
+		t.Fatalf("marshal env: %v", err)
+	}
+
+	fixture := &capture.CaptureFixture{
+		Name: "soroban_call",
+		Fixture: &golden.Fixture{
+			Type: "TransactionEnvelope",
+			XDR:  b64Env,
+		},
+		FixturePath: "tx.golden.json",
+		SpecPath:    txHash + ".spec.json",
+	}
+	generatedCode, err := capture.GenerateReplayTest(fixture)
+	if err != nil {
+		t.Fatalf("GenerateReplayTest error: %v", err)
+	}
+	if !strings.Contains(generatedCode, "LoadContractSpec") || !strings.Contains(generatedCode, txHash+".spec.json") {
+		t.Errorf("generated code does not reference spec file:\n%s", generatedCode)
 	}
 }

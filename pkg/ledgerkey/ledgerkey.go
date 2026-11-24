@@ -23,12 +23,57 @@ package ledgerkey
 
 import (
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
+
+// keyCache maps base64 strings to decoded xdr.LedgerKey instances.
+// It is thread-safe and lock-free on reads for hot assertion loops.
+var (
+	keyCache   sync.Map
+	cacheCount atomic.Int64
+)
+
+// Decode decodes a base64-encoded LedgerKey string into an xdr.LedgerKey.
+// Results are cached in a thread-safe cache to avoid redundant base64 decoding
+// and unmarshaling on hot assertion loops.
+func Decode(b64 string) (xdr.LedgerKey, error) {
+	b64 = strings.TrimSpace(b64)
+	if val, ok := keyCache.Load(b64); ok {
+		if k, ok := val.(xdr.LedgerKey); ok {
+			return k, nil
+		}
+	}
+
+	var key xdr.LedgerKey
+	if err := xdr.SafeUnmarshalBase64(b64, &key); err != nil {
+		return xdr.LedgerKey{}, fmt.Errorf("decode ledger key: %w", err)
+	}
+
+	keyCache.Store(b64, key)
+	cacheCount.Add(1)
+	return key, nil
+}
+
+// ClearCache clears all entries from the ledger key cache.
+func ClearCache() {
+	keyCache.Range(func(k, v any) bool {
+		keyCache.Delete(k)
+		return true
+	})
+	cacheCount.Store(0)
+}
+
+// CacheLen returns the number of entries currently stored in the ledger key cache.
+func CacheLen() int {
+	return int(cacheCount.Load())
+}
 
 // Account returns the LedgerKey for an account, as base64 XDR.
 func Account(address string) (string, error) {
@@ -214,6 +259,11 @@ func validateAsset(asset xdr.Asset) error {
 	default:
 		return fmt.Errorf("asset type %d is not a trustline asset", asset.Type)
 	}
+}
+
+// Encode returns the canonical base64 XDR of a ledger key.
+func Encode(key xdr.LedgerKey) (string, error) {
+	return encode(key)
 }
 
 // encode returns the canonical base64 XDR of a ledger key.

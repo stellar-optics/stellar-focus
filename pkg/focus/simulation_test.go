@@ -344,3 +344,68 @@ func TestPreflightSimulationAssertions(t *testing.T) {
 		}
 	})
 }
+
+func TestAssertNoFootprintConflicts(t *testing.T) {
+	t.Parallel()
+
+	makeEnvelope := func(readOnly, readWrite []xdr.LedgerKey) xdr.TransactionEnvelope {
+		return xdr.TransactionEnvelope{
+			Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+			V1: &xdr.TransactionV1Envelope{
+				Tx: xdr.Transaction{
+					Ext: xdr.TransactionExt{
+						V: 1,
+						SorobanData: &xdr.SorobanTransactionData{
+							Resources: xdr.SorobanResources{
+								Footprint: xdr.LedgerFootprint{
+									ReadOnly:  readOnly,
+									ReadWrite: readWrite,
+								},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	key1 := xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.LedgerKeyContractCode{
+			Hash: xdr.Hash{1},
+		},
+	}
+	key2 := xdr.LedgerKey{
+		Type: xdr.LedgerEntryTypeContractCode,
+		ContractCode: &xdr.LedgerKeyContractCode{
+			Hash: xdr.Hash{2},
+		},
+	}
+
+	t.Run("passing when no conflicts", func(t *testing.T) {
+		tb := faketb.New()
+		tx1 := makeEnvelope([]xdr.LedgerKey{key1}, nil)
+		tx2 := makeEnvelope([]xdr.LedgerKey{key2}, nil)
+
+		if !focus.AssertNoFootprintConflicts(tb, []xdr.TransactionEnvelope{tx1, tx2}) {
+			t.Fatalf("expected pass, got failure:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("failing when conflict exists", func(t *testing.T) {
+		tb := faketb.New()
+		tx1 := makeEnvelope(nil, []xdr.LedgerKey{key1})
+		tx2 := makeEnvelope([]xdr.LedgerKey{key1}, nil)
+
+		if focus.AssertNoFootprintConflicts(tb, []xdr.TransactionEnvelope{tx1, tx2}) {
+			t.Fatal("expected failure on conflict, got pass")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "ReadWrite conflict") {
+			t.Errorf("message does not mention ReadWrite conflict:\n%s", msg)
+		}
+	})
+}
