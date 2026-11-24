@@ -76,7 +76,12 @@ func TestHorizonSourceRejectsHTTPError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := NewHorizonSource(NetworkTestnet, srv.URL, time.Second).Transaction(context.Background(), "abc123")
+	// Use MaxRetries:0 so the first (and only) 502 response is returned
+	// immediately without retrying; we want to verify the error body is
+	// propagated, not that retry exhaustion produces a timeout.
+	src := NewHorizonSourceWithRetry(NetworkTestnet, srv.URL, time.Second,
+		RetryConfig{MaxRetries: 0})
+	_, err := src.Transaction(context.Background(), "abc123")
 	if err == nil || !strings.Contains(err.Error(), "upstream unavailable") {
 		t.Fatalf("Transaction() error = %v, want upstream response body", err)
 	}

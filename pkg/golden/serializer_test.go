@@ -948,3 +948,166 @@ func canonicalJSON(t *testing.T, raw []byte) any {
 	}
 	return v
 }
+
+// TestCompactJSONFormatAutoDetection verifies that fixture paths ending in
+// .min.json or .compact.json are auto-detected as Compact format (issue #345).
+func TestCompactJSONFormatAutoDetection(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path string
+		want golden.Format
+	}{
+		{"testdata/payment.min.json", golden.Compact},
+		{"testdata/payment.compact.json", golden.Compact},
+		{"testdata/payment.golden.json", golden.JSON},
+		{"testdata/payment.golden.yaml", golden.YAML},
+		{"testdata/payment.golden.txt", golden.Text},
+	}
+
+	for _, tc := range cases {
+		got := golden.FormatForPath(tc.path)
+		if got != tc.want {
+			t.Errorf("FormatForPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+		ser := golden.SerializerForPath(tc.path)
+		if ser.Format() != tc.want {
+			t.Errorf("SerializerForPath(%q).Format() = %q, want %q", tc.path, ser.Format(), tc.want)
+		}
+	}
+}
+
+// TestCompactJSONSingleLine verifies that compact JSON produces a single-line
+// output (one terminating newline only).
+func TestCompactJSONSingleLine(t *testing.T) {
+	t.Parallel()
+
+	fixture := trickyFixture()
+	ser, err := golden.SerializerFor(golden.Compact)
+	if err != nil {
+		t.Fatalf("SerializerFor(Compact) error = %v", err)
+	}
+
+	data, err := ser.Marshal(fixture)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Errorf("compact JSON has %d lines, want exactly 1:\n%s", len(lines), string(data))
+	}
+
+	// Must round-trip correctly.
+	unmarshaled, err := ser.Unmarshal(data)
+	if err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if unmarshaled.XDR != fixture.XDR {
+		t.Errorf("XDR = %q, want %q", unmarshaled.XDR, fixture.XDR)
+	}
+}
+
+// TestCompactJSONCanonicalKeySorting verifies that map keys are sorted
+// deterministically in compact JSON mode.
+func TestCompactJSONCanonicalKeySorting(t *testing.T) {
+	t.Parallel()
+
+	fixture := trickyFixture()
+	ser, _ := golden.SerializerFor(golden.Compact)
+
+	data1, err := ser.Marshal(fixture)
+	if err != nil {
+		t.Fatalf("Marshal 1 error = %v", err)
+	}
+	data2, err := ser.Marshal(fixture)
+	if err != nil {
+		t.Fatalf("Marshal 2 error = %v", err)
+	}
+
+	if !bytes.Equal(data1, data2) {
+		t.Error("two compact serializations produced different bytes (non-deterministic key ordering)")
+	}
+
+	// Verify top-level struct key order matches Fixture declaration order:
+	// "format", "type", "description", "xdr", "decoded"
+	s := string(data1)
+	idxFormat := strings.Index(s, `"format"`)
+	idxType := strings.Index(s, `"type"`)
+	idxDesc := strings.Index(s, `"description"`)
+	idxXDR := strings.Index(s, `"xdr"`)
+	idxDecoded := strings.Index(s, `"decoded"`)
+
+	if idxFormat >= idxType || idxType >= idxDesc || idxDesc >= idxXDR || idxXDR >= idxDecoded {
+		t.Errorf("keys not in canonical order in compact JSON: %s", s)
+	}
+}
+
+// TestWithCompactOption verifies that WithCompact(true) sets the fixture
+// format to Compact and WithCompact(false) resets it to JSON (issue #345).
+func TestWithCompactOption(t *testing.T) {
+	t.Parallel()
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithCompact(true))
+	path := g.Path("testcase")
+	if !strings.HasSuffix(path, ".min.json") {
+		t.Errorf("Path with WithCompact(true) = %q, want ending with .min.json", path)
+	}
+
+	g2 := golden.New(tb, golden.WithCompact(true), golden.WithCompact(false))
+	path2 := g2.Path("testcase")
+	if !strings.HasSuffix(path2, ".golden.json") {
+		t.Errorf("Path with WithCompact(false) = %q, want ending with .golden.json", path2)
+	}
+}
+
+// BenchmarkIndentedVsCompactJSON compares disk space and read/write speeds
+// between indented and compact JSON fixtures (issue #345).
+func BenchmarkIndentedVsCompactJSON(b *testing.B) {
+	fixture := trickyFixture()
+
+	serIndented, _ := golden.SerializerFor(golden.JSON)
+	serCompact, _ := golden.SerializerFor(golden.Compact)
+
+	indentedBytes, err := serIndented.Marshal(fixture)
+	if err != nil {
+		b.Fatal(err)
+	}
+	compactBytes, err := serCompact.Marshal(fixture)
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	reduction := 100.0 * (1.0 - float64(len(compactBytes))/float64(len(indentedBytes)))
+	b.Logf("Fixture size: Indented=%d bytes, Compact=%d bytes (%.1f%% reduction)",
+		len(indentedBytes), len(compactBytes), reduction)
+
+	b.Run("Marshal/Indented", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serIndented.Marshal(fixture)
+		}
+	})
+
+	b.Run("Marshal/Compact", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serCompact.Marshal(fixture)
+		}
+	})
+
+	b.Run("Unmarshal/Indented", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serIndented.Unmarshal(indentedBytes)
+		}
+	})
+
+	b.Run("Unmarshal/Compact", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = serCompact.Unmarshal(compactBytes)
+		}
+	})
+}

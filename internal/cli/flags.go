@@ -76,6 +76,8 @@ const (
 	keyMinOps      = "min-ops"
 	keyOnlySoroban = "only-soroban"
 	keyFailedOnly  = "failed-only"
+	keyMaxRetries  = "max-retries"
+	keyRetryDelay  = "retry-delay"
 )
 
 // The capture sources the command can talk to.
@@ -112,6 +114,8 @@ const (
 	defaultMinOps      = 0
 	defaultOnlySoroban = false
 	defaultFailedOnly  = false
+	defaultMaxRetries  = 5
+	defaultRetryDelay  = 500 * time.Millisecond
 )
 
 // discoveredConfigFiles are checked, in order, when --config is not given.
@@ -155,6 +159,8 @@ func newConfig() *config {
 	v.SetDefault(keyMinOps, defaultMinOps)
 	v.SetDefault(keyOnlySoroban, defaultOnlySoroban)
 	v.SetDefault(keyFailedOnly, defaultFailedOnly)
+	v.SetDefault(keyMaxRetries, defaultMaxRetries)
+	v.SetDefault(keyRetryDelay, defaultRetryDelay)
 
 	return &config{v: v}
 }
@@ -221,6 +227,10 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 		"replace data entry values with "+capture.RedactedData)
 	flags.Bool(keyKeys, false,
 		"replace anything shaped like a secret key (S...) with "+capture.RedactedSecretKey)
+	flags.Int(keyMaxRetries, defaultMaxRetries,
+		"maximum number of HTTP retries on transient errors (429, 502, 503, 504)")
+	flags.Duration(keyRetryDelay, defaultRetryDelay,
+		"delay before the first HTTP retry attempt")
 
 	c.bind(flags, keyOut)
 	c.bind(flags, keyPrefix)
@@ -231,6 +241,8 @@ func (c *config) bindCaptureFlags(cmd *cobra.Command) {
 	c.bind(flags, keyMemoAlias)
 	c.bind(flags, keyData)
 	c.bind(flags, keyKeys)
+	c.bind(flags, keyMaxRetries)
+	c.bind(flags, keyRetryDelay)
 }
 
 // bindFilterFlags declares the flags that narrow which transactions a capture
@@ -599,5 +611,21 @@ func (c *config) sanitizer() capture.Sanitizer {
 		MaskMemo:  all || c.v.GetBool(keyMemo) || c.v.GetBool(keyMemoAlias),
 		ScrubData: all || c.v.GetBool(keyData),
 		ScrubKeys: all || c.v.GetBool(keyKeys),
+	}
+}
+
+func (c *config) maxRetries() int {
+	return c.v.GetInt(keyMaxRetries)
+}
+
+func (c *config) retryDelay() time.Duration {
+	return c.v.GetDuration(keyRetryDelay)
+}
+
+func (c *config) retryConfig() capture.RetryConfig {
+	return capture.RetryConfig{
+		MaxRetries:   c.maxRetries(),
+		BaseInterval: c.retryDelay(),
+		MaxInterval:  30 * time.Second,
 	}
 }

@@ -28,7 +28,11 @@ type TB struct {
 func New() *TB { return &TB{TestName: "TestFake"} }
 
 // Helper implements focus.TB.
-func (t *TB) Helper() { t.Helpers++ }
+func (t *TB) Helper() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.Helpers++
+}
 
 // Errorf implements focus.TB.
 func (t *TB) Errorf(format string, args ...any) {
@@ -53,7 +57,11 @@ func (t *TB) Fatalf(format string, args ...any) {
 func (t *TB) Name() string { return t.TestName }
 
 // Failed reports whether anything was recorded.
-func (t *TB) Failed() bool { return len(t.Errors) > 0 || len(t.Fatals) > 0 }
+func (t *TB) Failed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.Errors) > 0 || len(t.Fatals) > 0
+}
 
 // Output joins everything recorded, for substring assertions.
 func (t *TB) Output() string {
