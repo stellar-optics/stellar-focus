@@ -11,6 +11,9 @@ import (
 // Claimable balance assertions read the entry a create-claimable-balance
 // operation puts in the ledger.
 //
+// See docs/cookbook/claimable_balances.md for creation, predicate, claim and
+// revocation testing patterns.
+//
 // It is not visible in the envelope. The balance id is derived by the protocol
 // from the operation and the transaction's source account and sequence number,
 // so a test that only inspects what it submitted cannot name the balance it
