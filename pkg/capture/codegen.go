@@ -12,6 +12,9 @@ package capture
 // Generation is deterministic: the same fixture and options always produce
 // byte-identical output, with no timestamps and no map iteration, so a
 // regenerated test shows up in review as no diff at all.
+//
+// For an end-to-end walkthrough on capturing RPC fixtures and building offline
+// replay test suites, see docs/guides/offline_replay_suites.md.
 
 import (
 	"fmt"

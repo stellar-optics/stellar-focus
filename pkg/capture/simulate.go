@@ -44,6 +44,9 @@ const SimulationFormat = "focus/simulation/v1"
 // trees and resource footprint are all in there, and projecting them into a
 // smaller struct would lose the parts a later assertion needs. Network,
 // Endpoint and Request record the context that produced it.
+//
+// For guide and best practices on preflight simulation and resource assertions,
+// see docs/guides/simulation_testing.md.
 type Simulation struct {
 	// Format identifies the serialized layout.
 	Format string `json:"format,omitempty"`

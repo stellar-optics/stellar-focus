@@ -1042,6 +1042,9 @@ go test -v ./examples/...
 - [Fake Test Harness Guide](docs/contributing/fake_test_harness.md) — How `stellar-focus` tests its own assertion messages using `faketb` and `fakesource`, and how to adopt the patterns in downstream projects.
 - [CI/CD Integration Playbook](docs/ci/integration_playbook.md) — GitHub Actions and GitLab CI configurations for `focus verify`, exit-code handling, caching, and PR comment summaries.
 - [Inflation and Fee-Pool Guide](docs/guides/inflation_and_fee_pool.md) — Asserting on inflation payouts and ledger fee-pool balance movements for historical indexers and test networks.
+- [TimeBounds and LedgerBounds Testing Guide](docs/guides/time_and_ledger_bounds.md) — Clock-free deterministic validation patterns for transaction validity windows, ledger bounds, and CAP-0021 extra signers.
+- [Soroban Simulation & Resource Footprints Guide](docs/guides/simulation_testing.md) — Preflight simulation fixtures, exact and partial storage footprint assertions, and resource fee budgeting.
+- [Offline Replay Test Suites Guide](docs/guides/offline_replay_suites.md) — Capturing live network transactions and generating hermetic, deterministic Go replay tests.
 
 
 ## Fuzzing

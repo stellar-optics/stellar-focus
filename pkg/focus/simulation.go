@@ -41,6 +41,9 @@ func AssertNoFootprintConflicts(t TB, txs []xdr.TransactionEnvelope) bool {
 // AssertSimulationResourcesWithin checks that the resources a Soroban
 // simulation reported stay within the given budgets.
 //
+// For a comprehensive guide on simulation fixtures and footprint assertions,
+// see docs/guides/simulation_testing.md.
+//
 // simResponse accepts either the transaction data a simulation produced — an
 // xdr.SorobanTransactionData in any documented Value form — or the SDK's
 // protocol.SimulateTransactionResponse (or its pointer), whose

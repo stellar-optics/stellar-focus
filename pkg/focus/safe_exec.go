@@ -6,6 +6,9 @@
 // someone's test binary destroys the output of every other test in the
 // package, so every assertion runs its inspection behind guard/SafeExec,
 // which converts a panic into an ordinary test failure.
+//
+// For complete architectural details and guidelines for authoring panic-safe
+// assertion extensions, see docs/architecture/panic_safety.md.
 package focus
 
 import (
