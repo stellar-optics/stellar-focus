@@ -22,6 +22,9 @@ import (
 //
 // For a fee-bump envelope the bounds read here are the inner transaction's,
 // since that is the transaction whose validity the protocol checks.
+//
+// For detailed guidelines, patterns, and examples of deterministic clock-free
+// testing, see docs/guides/time_and_ledger_bounds.md.
 
 // timebounds are the effective time bounds of an envelope.
 //

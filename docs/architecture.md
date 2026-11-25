@@ -225,6 +225,9 @@ into an ordinary test failure that also asks for a bug report.
 `TestAssertionsNeverPanic` feeds nil, empty strings, non-base64, truncated
 payloads, wrong types and mismatched XDR through every exported assertion.
 
+For complete architectural details, recovery mechanics, and guidelines for
+authoring panic-safe custom assertions, see the [Panic Safety Architecture Guide](architecture/panic_safety.md).
+
 ## Terminal output
 
 Colour highlights exactly which field mismatched. `pkg/focus/terminal.go`
