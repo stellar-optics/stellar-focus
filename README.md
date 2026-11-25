@@ -9,6 +9,7 @@ A Go testing toolkit for Stellar and Soroban: assert on XDR, manage golden fixtu
 
 Part of [stellar-optics](https://github.com/stellar-optics) — Go tools that make Stellar and Soroban data legible. Siblings: [stellar-xdr-lens](https://github.com/stellar-optics/stellar-xdr-lens) (decode, explain, diff) and [stellar-prism](https://github.com/stellar-optics/stellar-prism) (tail live data).
 
+
 ## Why this exists
 
 Testing Go code that produces Stellar XDR means comparing two base64 strings.
@@ -22,6 +23,7 @@ When they differ, `assert.Equal` tells you this:
 
 That is technically correct and completely useless. focus tells you which
 field changed:
+
 
 ```
 --- FAIL: TestPaymentEnvelope (0.00s)
@@ -402,6 +404,7 @@ Soroban authorization entries carry a nonce and a signature that are fresh on
 every run. `IgnoreSorobanAuth` suppresses the credentials tree while still
 comparing the authorized invocation, and discloses the ignored credential
 paths in the failure output like any other ignore rule.
+
 
 Patterns match the dotted paths lens reports: `*` is one segment, `**` is any
 depth, and indexes accept `[*]`. Within a segment, `*`, `?` and `[abc]`/`[!abc]`
