@@ -6,6 +6,8 @@ package focus_test
 import (
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
@@ -53,5 +55,38 @@ func BenchmarkIgnorePaths_Filter(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		focus.AssertEnvelopeEqual(faketb.New(), want, got, focus.IgnorePaths(patterns...))
+	}
+}
+
+// BenchmarkAssertLedgerEntries_HighVolume measures high-volume ledger change assertions
+// with cached decoded keys and fast discriminant switches.
+func BenchmarkAssertLedgerEntries_HighVolume(b *testing.B) {
+	entry := accountEntryValue(b, testSource, 100_0000000, xdr.Thresholds{1, 0, 0, 0})
+	key, err := entry.LedgerKey()
+	if err != nil {
+		b.Fatalf("getting ledger key: %v", err)
+	}
+	keyB64, err := key.MarshalBinary()
+	if err != nil {
+		b.Fatalf("marshaling ledger key: %v", err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		focus.AssertLedgerEntriesEqual(faketb.New(), entry, entry)
+		focus.AssertLedgerKeyEqual(faketb.New(), key, keyB64)
+	}
+}
+
+// BenchmarkAssertOperations_HighVolume measures hot-path assertion loops over operations
+// using static discriminant dispatch.
+func BenchmarkAssertOperations_HighVolume(b *testing.B) {
+	op := paymentOp(b, 100_0000000)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		focus.AssertOperationsEqual(faketb.New(), op, op)
 	}
 }

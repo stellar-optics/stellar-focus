@@ -110,6 +110,10 @@ layer (including the `require` packages) with module downloads disabled. This
 keeps assertions usable without fixture, capture, or CLI dependencies; capture
 can still use golden fixtures, and golden can use focus assertions.
 
+For the bundle manifest and library capture/verification workflow, see the
+[multi-transaction bundles guide](guides/multi_transaction_bundles.md). The
+current CLI does not expose a bundle subcommand.
+
 ## CLI configuration
 
 A setting has three spellings — a flag, a `FOCUS_`-prefixed environment

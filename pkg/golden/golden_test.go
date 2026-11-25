@@ -1,6 +1,7 @@
 package golden_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -866,5 +867,123 @@ func TestPassphraseIsWrittenAndReadBack(t *testing.T) {
 	}
 	if loaded.Captured == nil || loaded.Captured.NetworkPassphrase != passphrase {
 		t.Errorf("loaded provenance = %+v, want passphrase %q", loaded.Captured, passphrase)
+	}
+}
+
+// TestSummaryTableWithColor verifies that red ANSI color codes are applied to
+// DRIFTED and MISSING statuses when useColor is true (issue #346).
+func TestSummaryTableWithColor(t *testing.T) {
+	t.Parallel()
+
+	rows := []golden.SummaryRow{
+		{Name: "payment_v20.json", Status: "DRIFTED", Paths: "tx.fee, tx.signatures[0].hint"},
+		{Name: "soroban_invoke.json", Status: "MISSING", Paths: "<file not found on disk>"},
+		{Name: "claimable_bal.json", Status: "DRIFTED", Paths: "meta.v3.changes[2].amount"},
+	}
+
+	var buf bytes.Buffer
+	golden.RenderSummaryRows(&buf, rows, 45, 3, true)
+
+	out := buf.String()
+	if !strings.Contains(out, "FAILED GOLDEN FIXTURES (3 / 45):") {
+		t.Errorf("output missing header:\n%s", out)
+	}
+	if !strings.Contains(out, "\033[31m") {
+		t.Errorf("expected ANSI red code in colored table output:\n%s", out)
+	}
+	if !strings.Contains(out, "\033[0m") {
+		t.Errorf("expected ANSI reset code in colored table output:\n%s", out)
+	}
+	if !strings.Contains(out, "payment_v20.json") {
+		t.Errorf("missing fixture name in output:\n%s", out)
+	}
+	if !strings.Contains(out, "tx.fee, tx.signatures[0].hint") {
+		t.Errorf("missing differing field paths in output:\n%s", out)
+	}
+}
+
+// TestSummaryTableWithoutColor verifies that no ANSI escape codes are emitted
+// when useColor is false (issue #346).
+func TestSummaryTableWithoutColor(t *testing.T) {
+	t.Parallel()
+
+	rows := []golden.SummaryRow{
+		{Name: "payment_v20.json", Status: "DRIFTED", Paths: "tx.fee"},
+		{Name: "soroban_invoke.json", Status: "MISSING", Paths: "<file not found on disk>"},
+	}
+
+	var buf bytes.Buffer
+	golden.RenderSummaryRows(&buf, rows, 45, 2, false)
+
+	out := buf.String()
+	if strings.Contains(out, "\033[") {
+		t.Errorf("ANSI escape codes found in uncolored table output:\n%s", out)
+	}
+	if !strings.Contains(out, "DRIFTED") || !strings.Contains(out, "MISSING") {
+		t.Errorf("expected plain status text in uncolored table output:\n%s", out)
+	}
+}
+
+// TestAssertAllSummaryTableOnFailure verifies that AssertAll emits the
+// FAILED GOLDEN FIXTURES table when assertions fail (issue #346).
+func TestAssertAllSummaryTableOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	env := buildEnvelope(t, 100)
+
+	cases := []golden.Case{
+		{Name: "payment_v20", Value: env},
+		{Name: "soroban_invoke", Value: env},
+	}
+	ok := g.AssertAll(cases)
+	if ok {
+		t.Fatal("AssertAll() returned true; want false (both fixtures are missing)")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "FAILED GOLDEN FIXTURES (2 / 2):") {
+		t.Errorf("output does not contain summary table header:\n%s", out)
+	}
+	if !strings.Contains(out, "payment_v20") || !strings.Contains(out, "soroban_invoke") {
+		t.Errorf("output does not contain fixture names:\n%s", out)
+	}
+	if !strings.Contains(out, "MISSING") {
+		t.Errorf("output does not contain MISSING status:\n%s", out)
+	}
+	if !strings.Contains(out, "Run 'go test -focus.update' to accept new values.") {
+		t.Errorf("output does not contain re-record hint:\n%s", out)
+	}
+}
+
+// TestAssertAllParallelSummaryTableOnFailure verifies that AssertAllParallel
+// emits the summary table on failure (issue #346).
+func TestAssertAllParallelSummaryTableOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir))
+
+	env := buildEnvelope(t, 100)
+
+	cases := []golden.Case{
+		{Name: "parallel_case_1", Value: env},
+		{Name: "parallel_case_2", Value: env},
+	}
+	ok := g.AssertAllParallel(cases)
+	if ok {
+		t.Fatal("AssertAllParallel() returned true; want false")
+	}
+
+	out := tb.Output()
+	if !strings.Contains(out, "FAILED GOLDEN FIXTURES (2 / 2):") {
+		t.Errorf("output does not contain summary table header:\n%s", out)
+	}
+	if !strings.Contains(out, "parallel_case_1") || !strings.Contains(out, "parallel_case_2") {
+		t.Errorf("output does not contain fixture names:\n%s", out)
 	}
 }

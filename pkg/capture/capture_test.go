@@ -2,12 +2,15 @@ package capture_test
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/internal/fakesource"
 	"github.com/stellar-optics/stellar-focus/pkg/capture"
@@ -399,4 +402,317 @@ func fixtureFromFile(t *testing.T, name string) string {
 		t.Fatalf("reading %s: %v", name, err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+// filterAccount is a valid, empty account used by the envelopes the filter
+// tests build.
+const filterAccount = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF"
+
+// paymentEnvelopeXDR builds a classic V1 envelope carrying ops payments.
+func paymentEnvelopeXDR(t *testing.T, ops int) string {
+	t.Helper()
+
+	operations := make([]xdr.Operation, 0, ops)
+	for i := 0; i < ops; i++ {
+		operations = append(operations, xdr.Operation{
+			Body: xdr.OperationBody{
+				Type: xdr.OperationTypePayment,
+				PaymentOp: &xdr.PaymentOp{
+					Destination: xdr.MustMuxedAddress(filterAccount),
+					Asset:       xdr.Asset{Type: xdr.AssetTypeAssetTypeNative},
+					Amount:      1,
+				},
+			},
+		})
+	}
+
+	encoded, err := xdr.MarshalBase64(xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(filterAccount),
+				Fee:           xdr.Uint32(100 * len(operations)),
+				SeqNum:        1,
+				Operations:    operations,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encoding the payment envelope: %v", err)
+	}
+	return encoded
+}
+
+// successResultXDR builds the result of a transaction that succeeded.
+func successResultXDR(t *testing.T) string {
+	t.Helper()
+
+	results := []xdr.OperationResult{}
+	encoded, err := xdr.MarshalBase64(xdr.TransactionResult{
+		FeeCharged: 100,
+		Result: xdr.TransactionResultResult{
+			Code:    xdr.TransactionResultCodeTxSuccess,
+			Results: &results,
+		},
+	})
+	if err != nil {
+		t.Fatalf("encoding the success result: %v", err)
+	}
+	return encoded
+}
+
+// sorobanEnvelopeXDR returns the envelope of a Soroban transaction.
+func sorobanEnvelopeXDR(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "pkg", "fuzz", "testdata", "tx_soroban.env.txt"))
+	if err != nil {
+		t.Fatalf("reading fixture: %v", err)
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// recordsOf returns the transaction's records in the order a source returns
+// them.
+func recordsOf(hash string, envelope, result string) []capture.Record {
+	records := []capture.Record{
+		{Name: "envelope", Type: "TransactionEnvelope", XDR: envelope, Ledger: 1234, TxHash: hash},
+	}
+	if result != "" {
+		records = append(records, capture.Record{
+			Name: "result", Type: "TransactionResult", XDR: result, Ledger: 1234, TxHash: hash,
+		})
+	}
+	return records
+}
+
+// hashesOf lists the transactions the kept records belong to.
+func hashesOf(records []capture.Record) []string {
+	var out []string
+	for _, r := range records {
+		if len(out) == 0 || out[len(out)-1] != r.TxHash {
+			out = append(out, r.TxHash)
+		}
+	}
+	return out
+}
+
+func TestFilterRecordsWithoutFiltersKeepsEverything(t *testing.T) {
+	t.Parallel()
+
+	records := recordsOf("one", paymentEnvelopeXDR(t, 1), "")
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if len(kept) != len(records) {
+		t.Fatalf("kept %d records, want all %d", len(kept), len(records))
+	}
+}
+
+func TestFilterRecordsMinOps(t *testing.T) {
+	t.Parallel()
+
+	records := append(
+		recordsOf("small", paymentEnvelopeXDR(t, 1), resultXDR(t)),
+		recordsOf("multi", paymentEnvelopeXDR(t, 5), resultXDR(t))...,
+	)
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{MinOps: 3})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if len(kept) != 2 {
+		t.Fatalf("kept %d records, want the 2 records of one transaction", len(kept))
+	}
+	for _, r := range kept {
+		if r.TxHash != "multi" {
+			t.Errorf("kept a %s record of %q, want only the transaction with 5 operations",
+				r.Type, r.TxHash)
+		}
+	}
+}
+
+func TestFilterRecordsOnlySoroban(t *testing.T) {
+	t.Parallel()
+
+	records := append(
+		recordsOf("classic", paymentEnvelopeXDR(t, 1), ""),
+		recordsOf("soroban", sorobanEnvelopeXDR(t), "")...,
+	)
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{OnlySoroban: true})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if got := hashesOf(kept); len(got) != 1 || got[0] != "soroban" {
+		t.Errorf("kept the transactions %v, want only %q", got, "soroban")
+	}
+}
+
+func TestFilterRecordsFailedOnly(t *testing.T) {
+	t.Parallel()
+
+	records := append(
+		recordsOf("ok", paymentEnvelopeXDR(t, 1), successResultXDR(t)),
+		recordsOf("failed", paymentEnvelopeXDR(t, 1), resultXDR(t))...,
+	)
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{FailedOnly: true})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if got := hashesOf(kept); len(got) != 1 || got[0] != "failed" {
+		t.Errorf("kept the transactions %v, want only %q", got, "failed")
+	}
+}
+
+// TestFilterRecordsCompound covers the acceptance case: --only-soroban
+// --failed-only keeps only the Soroban transactions that failed.
+func TestFilterRecordsCompound(t *testing.T) {
+	t.Parallel()
+
+	records := append(append(append(
+		recordsOf("classic-ok", paymentEnvelopeXDR(t, 4), successResultXDR(t)),
+		recordsOf("classic-failed", paymentEnvelopeXDR(t, 4), resultXDR(t))...),
+		recordsOf("soroban-ok", sorobanEnvelopeXDR(t), successResultXDR(t))...),
+		recordsOf("soroban-failed", sorobanEnvelopeXDR(t), resultXDR(t))...,
+	)
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{
+		MinOps:      1,
+		OnlySoroban: true,
+		FailedOnly:  true,
+	})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if got := hashesOf(kept); len(got) != 1 || got[0] != "soroban-failed" {
+		t.Errorf("kept the transactions %v, want only %q", got, "soroban-failed")
+	}
+	if len(kept) != 2 {
+		t.Errorf("kept %d records, want both records of the failing Soroban transaction", len(kept))
+	}
+}
+
+// TestFilterRecordsDropsTransactionsMissingTheRecordAFilterNeeds checks that
+// a transaction that cannot be judged is skipped rather than kept.
+func TestFilterRecordsDropsTransactionsMissingTheRecordAFilterNeeds(t *testing.T) {
+	t.Parallel()
+
+	records := recordsOf("no-result", sorobanEnvelopeXDR(t), "")
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{FailedOnly: true})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if len(kept) != 0 {
+		t.Errorf("kept %d records of a transaction with no result, want none", len(kept))
+	}
+}
+
+// TestFilterRecordsKeepsRecordsThatAreNotTransactions checks that a ledger
+// entry captured alongside transactions is not dropped by a transaction
+// filter.
+func TestFilterRecordsKeepsRecordsThatAreNotTransactions(t *testing.T) {
+	t.Parallel()
+
+	entry := capture.Record{Name: "entry", Type: "LedgerEntry", XDR: "AAAA", Ledger: 1234}
+	records := append([]capture.Record{entry}, recordsOf("classic", paymentEnvelopeXDR(t, 1), "")...)
+
+	kept, err := capture.FilterRecords(records, capture.FilterOptions{OnlySoroban: true})
+	if err != nil {
+		t.Fatalf("FilterRecords() error = %v", err)
+	}
+	if len(kept) != 1 || kept[0].Type != "LedgerEntry" {
+		t.Errorf("kept %d records, want only the ledger entry", len(kept))
+	}
+}
+
+func TestExtractTransactionContractSpecs(t *testing.T) {
+	t.Parallel()
+
+	fn := xdr.ScSpecFunctionV0{Doc: "", Name: "increment"}
+	code := wasmWithSpec(t, []xdr.ScSpecEntry{{
+		Kind:       xdr.ScSpecEntryKindScSpecEntryFunctionV0,
+		FunctionV0: &fn,
+	}})
+	src := contractSource(t, contractCodeEntry(t, code, false))
+
+	var contractHash xdr.Hash
+	rawHex, err := hex.DecodeString(testContractID)
+	if err != nil {
+		t.Fatalf("hex decode: %v", err)
+	}
+	copy(contractHash[:], rawHex)
+
+	env := xdr.TransactionEnvelope{
+		Type: xdr.EnvelopeTypeEnvelopeTypeTx,
+		V1: &xdr.TransactionV1Envelope{
+			Tx: xdr.Transaction{
+				SourceAccount: xdr.MustMuxedAddress(filterAccount),
+				Fee:           100,
+				SeqNum:        1,
+				Ext: xdr.TransactionExt{
+					V: 1,
+					SorobanData: &xdr.SorobanTransactionData{
+						Resources: xdr.SorobanResources{
+							Footprint: xdr.LedgerFootprint{
+								ReadOnly: []xdr.LedgerKey{{
+									Type: xdr.LedgerEntryTypeContractCode,
+									ContractCode: &xdr.LedgerKeyContractCode{
+										Hash: contractHash,
+									},
+								}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	txHash := "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+	saved, err := capture.ExtractTransactionContractSpecs(context.Background(), src, txHash, env, tmpDir)
+	if err != nil {
+		t.Fatalf("ExtractTransactionContractSpecs error: %v", err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("expected 1 saved spec file, got %d", len(saved))
+	}
+
+	expectedFile := filepath.Join(tmpDir, txHash+".spec.json")
+	if saved[0] != expectedFile {
+		t.Errorf("saved path = %q, want %q", saved[0], expectedFile)
+	}
+
+	loadedSpec, err := capture.LoadContractSpec(expectedFile)
+	if err != nil {
+		t.Fatalf("LoadContractSpec error: %v", err)
+	}
+	if len(loadedSpec) != 1 || loadedSpec[0].FunctionV0.Name != "increment" {
+		t.Errorf("loaded spec = %v, want increment function", loadedSpec)
+	}
+
+	b64Env, err := xdr.MarshalBase64(env)
+	if err != nil {
+		t.Fatalf("marshal env: %v", err)
+	}
+
+	fixture := &capture.CaptureFixture{
+		Name: "soroban_call",
+		Fixture: &golden.Fixture{
+			Type: "TransactionEnvelope",
+			XDR:  b64Env,
+		},
+		FixturePath: "tx.golden.json",
+		SpecPath:    txHash + ".spec.json",
+	}
+	generatedCode, err := capture.GenerateReplayTest(fixture)
+	if err != nil {
+		t.Fatalf("GenerateReplayTest error: %v", err)
+	}
+	if !strings.Contains(generatedCode, "LoadContractSpec") || !strings.Contains(generatedCode, txHash+".spec.json") {
+		t.Errorf("generated code does not reference spec file:\n%s", generatedCode)
+	}
 }

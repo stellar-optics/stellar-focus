@@ -21,13 +21,16 @@ package golden
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
@@ -36,6 +39,11 @@ import (
 
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
+
+// streamThreshold is the fixture size in bytes above which Assert switches
+// from the in-memory diff to the streaming diff implemented in stream_diff.go.
+// 1 MB matches the requirement from issue #349.
+const streamThreshold = 1 << 20 // 1 MiB
 
 // updateFlag is registered on the default command line so any test binary
 // importing this package accepts -focus.update.
@@ -290,8 +298,61 @@ func (g *Golden) assert(
 	if !ok {
 		tb.Errorf("golden: %s is out of date.\n"+
 			"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n", path)
+
+		// For large fixtures, also emit a streaming diff so the terminal
+		// does not have to hold two full copies of the fixture in memory.
+		g.maybeStreamDiff(tb, path, want.XDR, actual, typeName)
 	}
 	return ok
+}
+
+// maybeStreamDiff emits a streaming diff when the serialized fixture exceeds
+// streamThreshold bytes. It is a best-effort hint: errors are logged but do
+// not cause the test to fail twice.
+func (g *Golden) maybeStreamDiff(tb focus.TB, path, wantXDR string, actual focus.Value, typeName string) {
+	ser := SerializerForPath(path)
+	var r1 io.Reader
+
+	if fi, err := os.Stat(path); err == nil && fi.Size() >= streamThreshold {
+		f1, err := os.Open(path)
+		if err == nil {
+			defer f1.Close()
+			if strings.HasSuffix(path, GzipSuffix) {
+				gz, gzErr := gzip.NewReader(f1)
+				if gzErr == nil {
+					defer gz.Close()
+					r1 = gz
+				}
+			} else {
+				r1 = f1
+			}
+		}
+	}
+
+	if r1 == nil {
+		wantFixture := &Fixture{Format: FormatVersion, Type: typeName, XDR: wantXDR}
+		wantBytes, err := ser.Marshal(wantFixture)
+		if err != nil || len(wantBytes) < streamThreshold {
+			return
+		}
+		r1 = bytes.NewReader(wantBytes)
+	}
+
+	gotFixture, err := Build(actual, typeName, "", nil)
+	if err != nil {
+		return
+	}
+	gotBytes, err := ser.Marshal(gotFixture)
+	if err != nil {
+		return
+	}
+
+	var out bytes.Buffer
+	differed, err := StreamDiff(r1, bytes.NewReader(gotBytes), &out, DefaultMaxStreamDifferences)
+	if err != nil || !differed {
+		return
+	}
+	tb.Errorf("golden: streaming diff for %s (fixture >1 MB):\n%s", path, out.String())
 }
 
 // options merges the suite's assertion options with a case's own.
@@ -368,6 +429,9 @@ func (g *Golden) write(path string, actual focus.Value, description string) erro
 
 // Case is one entry of a table-driven golden test.
 //
+// See docs/guides/table_driven_golden.md for table construction and runner
+// behavior.
+//
 // The description and the options travel with the entry rather than with the
 // suite, so a failure can say which entry failed and what it was for — the
 // context a list of bare names cannot carry.
@@ -441,6 +505,77 @@ func (g *Golden) AssertAll(cases []Case) bool {
 			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
 		}
 	}
+
+	// Print the structured summary table so a reviewer can see at a glance
+	// which fixtures failed and which fields changed (issue #346).
+	var tableBuf bytes.Buffer
+	RenderSummaryTable(&tableBuf, results, failed)
+	if tableBuf.Len() > 0 {
+		g.t.Errorf("%s", tableBuf.String())
+	}
+
+	return false
+}
+
+// AssertAllParallel compares every case of a table against its golden file
+// in parallel.
+//
+// Each case runs concurrently in its own goroutine while results are collected
+// and reported in table order. When any case fails, the summary table and
+// individual failure diffs are printed.
+func (g *Golden) AssertAllParallel(cases []Case) bool {
+	g.t.Helper()
+
+	ignores, err := LoadIgnore(g.dir)
+	if err != nil {
+		g.t.Errorf("golden: %v", err)
+		return false
+	}
+	cases, skipped := g.unignored(cases, ignores)
+	if skipped > 0 {
+		g.logf("golden: %d of %d case(s) skipped by %s",
+			skipped, skipped+len(cases), IgnoreFileName)
+	}
+
+	results := make([]caseResult, len(cases))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	failed := 0
+
+	for i, c := range cases {
+		wg.Add(1)
+		go func(idx int, cs Case) {
+			defer wg.Done()
+			res := g.runCase(idx+1, cs)
+			mu.Lock()
+			results[idx] = res
+			if !res.ok {
+				failed++
+			}
+			mu.Unlock()
+		}(i, c)
+	}
+	wg.Wait()
+
+	summary := tableSummary(results, failed)
+	if failed == 0 {
+		g.logf("%s", summary)
+		return true
+	}
+
+	g.t.Errorf("%s", summary)
+	for _, r := range results {
+		for _, msg := range r.messages {
+			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
+		}
+	}
+
+	var tableBuf bytes.Buffer
+	RenderSummaryTable(&tableBuf, results, failed)
+	if tableBuf.Len() > 0 {
+		g.t.Errorf("%s", tableBuf.String())
+	}
+
 	return false
 }
 

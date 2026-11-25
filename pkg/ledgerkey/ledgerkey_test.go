@@ -363,3 +363,40 @@ func mustMarshalScVal(tb testing.TB, v xdr.ScVal) string {
 	}
 	return encoded
 }
+
+func TestKeyCache(t *testing.T) {
+	ledgerkey.ClearCache()
+	if got := ledgerkey.CacheLen(); got != 0 {
+		t.Fatalf("CacheLen = %d, want 0", got)
+	}
+
+	encoded, err := ledgerkey.Account(testAccount)
+	if err != nil {
+		t.Fatalf("Account: %v", err)
+	}
+
+	key1, err := ledgerkey.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if got := ledgerkey.CacheLen(); got != 1 {
+		t.Errorf("CacheLen = %d, want 1", got)
+	}
+
+	key2, err := ledgerkey.Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode second call: %v", err)
+	}
+	if got := ledgerkey.CacheLen(); got != 1 {
+		t.Errorf("CacheLen after hit = %d, want 1", got)
+	}
+
+	if key1.Type != key2.Type {
+		t.Errorf("keys differ: %v vs %v", key1, key2)
+	}
+
+	ledgerkey.ClearCache()
+	if got := ledgerkey.CacheLen(); got != 0 {
+		t.Errorf("CacheLen after clear = %d, want 0", got)
+	}
+}

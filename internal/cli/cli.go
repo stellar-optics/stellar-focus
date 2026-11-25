@@ -23,6 +23,7 @@ import (
 	"github.com/spf13/cobra"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 
@@ -32,6 +33,9 @@ import (
 
 // Version is the build version, overridden at release time via ldflags.
 var Version = "dev"
+
+// currentRetryConfig is the retry policy applied by default when creating network sources.
+var currentRetryConfig = capture.DefaultRetryConfig
 
 // newSource builds the capture source. It is a variable so tests can
 // substitute a fake and exercise the commands without a network.
@@ -44,9 +48,9 @@ var newSource = func(kind, network, endpoint string, timeout time.Duration) capt
 	case sourceFile:
 		return capture.NewFileSource(endpoint).ForNetwork(network)
 	case sourceHorizon:
-		return capture.NewHorizonSource(network, endpoint, timeout)
+		return capture.NewHorizonSourceWithRetry(network, endpoint, timeout, currentRetryConfig)
 	default:
-		return capture.NewRPCSource(network, endpoint, timeout)
+		return capture.NewRPCSourceWithRetry(network, endpoint, timeout, currentRetryConfig)
 	}
 }
 
@@ -58,6 +62,7 @@ func openSource(cfg *config) (capture.Source, error) {
 	if err != nil {
 		return nil, usageErrorf("%v", err)
 	}
+	currentRetryConfig = cfg.retryConfig()
 	src := newSource(cfg.source(), cfg.network(), endpoint, cfg.timeout())
 	if url := cfg.archiveURL(); url != "" {
 		archive := capture.NewArchivalSource(cfg.network(), url, cfg.timeout())
@@ -134,9 +139,19 @@ precedence.`,
 		newLedgerKeyCmd(stdout),
 		newVerifyCmd(cfg, stdout, stderr),
 		newRefreshCmd(stdout, stderr),
+		newFmtCmd(stdout, stderr),
 		newVersionCmd(stdout),
 		newLintCmd(stdout, stderr),
+		newDoctorCmd(cfg, stdout),
+		newStatsCmd(stdout),
 	)
+	return root
+}
+
+// NewRootCmdForTest creates a root command configured with the provided extra subcommands.
+func NewRootCmdForTest(extra ...*cobra.Command) *cobra.Command {
+	root := newRootCmd(os.Stdout, os.Stderr)
+	root.AddCommand(extra...)
 	return root
 }
 
@@ -337,6 +352,12 @@ captured is reported and the batch carries on.
 A batch names each fixture after the transaction it came from, so two
 transactions in one batch do not overwrite each other.
 
+A capture can be narrowed before anything is written: --min-ops keeps only
+transactions with at least that many operations, --only-soroban keeps only
+transactions that invoke the Soroban host, and --failed-only keeps only
+transactions whose result is a failure. A transaction that matches none of
+them is skipped, and no fixture is written for it.
+
 A capture from a private or staging network may carry data that must not be
 committed. --sanitize masks text memos, data entry values and anything shaped
 like a secret key; --mask-memo, --scrub-data and --scrub-keys pick one each.
@@ -350,6 +371,8 @@ archive holds envelopes and results but not transaction meta.`,
   focus capture tx 2b2e276a… --out testdata/ --prefix failed_payment
   focus capture tx 2b2e276a… --out testdata/ --sanitize
   focus capture tx --batch hashes.txt --out testdata/ --concurrency 4
+  focus capture tx --batch hashes.txt --out testdata/ --only-soroban --failed-only
+  focus capture tx --batch hashes.txt --out testdata/ --min-ops 5
   focus capture tx 2b2e276a… --network standalone --rpc-url http://localhost:8000/rpc \
     --passphrase "Standalone Network ; February 2017"
 
@@ -380,8 +403,41 @@ archive holds envelopes and results but not transaction meta.`,
 			if err != nil {
 				return err
 			}
-			return writeFixtures(cmd.Context(), src, records,
-				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
+
+			records, err = capture.FilterRecords(records, cfg.filters())
+			if err != nil {
+				return err
+			}
+			if len(records) == 0 {
+				fmt.Fprintf(stdout, "skipped tx %s: it does not match the capture filters\n",
+					shortHash(args[0]))
+				return nil
+			}
+
+			if err := writeFixtures(cmd.Context(), src, records,
+				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout); err != nil {
+				return err
+			}
+
+			if cfg.extractSpecs() {
+				if wasmSrc, ok := src.(capture.ContractWASMSource); ok {
+					for _, rec := range records {
+						if rec.Type == "TransactionEnvelope" {
+							var env xdr.TransactionEnvelope
+							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
+								specPaths, err := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								if err != nil {
+									return err
+								}
+								for _, sp := range specPaths {
+									fmt.Fprintf(stdout, "wrote %s\n", sp)
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil
 		},
 	}
 
@@ -399,8 +455,32 @@ archive holds envelopes and results but not transaction meta.`,
 			if err != nil {
 				return err
 			}
-			return writeFixtures(cmd.Context(), src, records,
-				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout)
+			// Ledger entries are not transactions, so the capture filters do
+			// not apply to them.
+			if err := writeFixtures(cmd.Context(), src, records,
+				cfg.outDir(), cfg.prefix(), cfg.force(), cfg.maskAddresses(), cfg.sanitizer(), stdout); err != nil {
+				return err
+			}
+
+			if cfg.extractSpecs() {
+				if wasmSrc, ok := src.(capture.ContractWASMSource); ok {
+					for _, rec := range records {
+						if rec.Type == "TransactionEnvelope" {
+							var env xdr.TransactionEnvelope
+							if err := xdr.SafeUnmarshalBase64(rec.XDR, &env); err == nil {
+								specPaths, err := capture.ExtractTransactionContractSpecs(cmd.Context(), wasmSrc, rec.TxHash, env, cfg.outDir())
+								if err != nil {
+									return err
+								}
+								for _, sp := range specPaths {
+									fmt.Fprintf(stdout, "wrote %s\n", sp)
+								}
+							}
+						}
+					}
+				}
+			}
+			return nil
 		},
 	}
 
@@ -490,6 +570,7 @@ talking about.`,
 		"ledger the transaction closed in; needed to find it in a history archive")
 
 	cfg.bindCaptureFlags(cmd)
+	cfg.bindFilterFlags(txCmd)
 	cfg.bindBatchFlags(txCmd)
 	cmd.AddCommand(txCmd, entryCmd, simCmd, wasmCmd)
 	return cmd
@@ -855,4 +936,116 @@ func changedLinesLineByLine(oldLines, newLines []string) []diffLine {
 		}
 	}
 	return out
+}
+
+// newFmtCmd builds the command that rewrites golden fixtures in canonical
+// form.
+//
+// It is the gofmt of fixtures: the data is already valid, but its encoding can
+// drift — a hand-edit leaves four-space indentation, a Windows checkout leaves
+// CRLF, a merge reorders YAML keys. Re-serializing with the format's own
+// serializer settles all of that, and --check lets CI fail on drift without
+// rewriting anything.
+func newFmtCmd(stdout, stderr io.Writer) *cobra.Command {
+	var check bool
+
+	cmd := &cobra.Command{
+		Use:   "fmt [paths...]",
+		Short: "Reformat golden fixtures in place",
+		Long: `Reformat golden fixture files in place.
+
+Every file is parsed and re-serialized by the canonical serializer for its
+format: JSON uses the field order the writer defines with two-space
+indentation, YAML and the text form sort their keys, and every line ending is
+LF with trailing whitespace removed. The fixture's data is not refreshed — a
+stale decoded tree stays stale until focus refresh — only its encoding is
+normalized.
+
+Paths may be files, directories or patterns. A directory is searched all the
+way down, so fixtures kept in subdirectories are formatted too; a pattern is
+matched like a shell pattern, with "**" standing for any number of
+directories. Hidden directories and the paths listed in a .focusignore file
+are skipped.
+
+With no path, testdata is formatted.
+
+With --check nothing is written: the command exits with status 1 when any
+fixture is not formatted, which is what a CI job should run.`,
+		Example: `  focus fmt testdata/
+  focus fmt testdata/ --check
+  focus fmt testdata/payment.golden.json`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{defaultVerifyDir}
+			}
+
+			paths, err := collectFixtures(args)
+			if err != nil {
+				return failureErrorf("%v", err)
+			}
+			if len(paths) == 0 {
+				return failureErrorf("no fixture files found in %s", strings.Join(args, ", "))
+			}
+
+			var changed, unchanged, errored int
+			for _, path := range paths {
+				formatted, err := formatFixture(path, check)
+				if err != nil {
+					fmt.Fprintf(stderr, "%-40s ERROR   %v\n", path, err)
+					errored++
+					continue
+				}
+				if formatted {
+					word := "updated"
+					if check {
+						word = "would change"
+					}
+					fmt.Fprintf(stdout, "%-40s %s\n", path, word)
+					changed++
+					continue
+				}
+				fmt.Fprintf(stdout, "%-40s unchanged\n", path)
+				unchanged++
+			}
+
+			fmt.Fprintf(stdout, "\n%d checked: %d %s, %d unchanged",
+				len(paths), changed, fmtVerb(check), unchanged)
+			if errored > 0 {
+				fmt.Fprintf(stdout, ", %d errored", errored)
+			}
+			fmt.Fprintln(stdout)
+
+			if errored > 0 {
+				return failureErrorf("%d fixture(s) could not be formatted", errored)
+			}
+			if check && changed > 0 {
+				return failureErrorf("%d fixture(s) are not formatted", changed)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&check, "check", false,
+		"exit with status 1 if any file is not formatted (CI-friendly)")
+
+	return cmd
+}
+
+// formatFixture canonicalizes one fixture, or — in check mode — reports
+// whether it would change and writes nothing.
+func formatFixture(path string, check bool) (bool, error) {
+	if check {
+		return golden.CheckFile(path)
+	}
+	return golden.FormatFile(path)
+}
+
+// fmtVerb names what the command did, which is not the same word in a check
+// run as in a formatting one.
+func fmtVerb(check bool) string {
+	if check {
+		return "would change"
+	}
+	return "updated"
 }

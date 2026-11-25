@@ -70,6 +70,24 @@ func Equal(t focus.TB, want, got focus.Value, opts ...focus.Option) {
 	focus.AssertEqual(fatal(t), want, got, opts...)
 }
 
+// LedgerEntriesEqual is focus.AssertLedgerEntriesEqual, stopping the test on failure.
+func LedgerEntriesEqual(t focus.TB, want, got focus.Value, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerEntriesEqual(fatal(t), want, got, opts...)
+}
+
+// OperationsEqual is focus.AssertOperationsEqual, stopping the test on failure.
+func OperationsEqual(t focus.TB, want, got focus.Value, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertOperationsEqual(fatal(t), want, got, opts...)
+}
+
+// NoFootprintConflicts is focus.AssertNoFootprintConflicts, stopping the test on failure.
+func NoFootprintConflicts(t focus.TB, txs []xdr.TransactionEnvelope) {
+	t.Helper()
+	focus.AssertNoFootprintConflicts(fatal(t), txs)
+}
+
 // EqualAs is focus.AssertEqualAs, stopping the test on failure.
 func EqualAs(t focus.TB, typeName string, want, got focus.Value, opts ...focus.Option) {
 	t.Helper()
@@ -124,6 +142,24 @@ func TimeBoundsWindow(t focus.TB, envelope focus.Value, wantDuration time.Durati
 func NoTimeBounds(t focus.TB, envelope focus.Value) {
 	t.Helper()
 	focus.AssertNoTimeBounds(fatal(t), envelope)
+}
+
+// ExtraSigners is focus.AssertExtraSigners, stopping the test on failure.
+func ExtraSigners(t focus.TB, envelope focus.Value, wantSigners ...string) {
+	t.Helper()
+	focus.AssertExtraSigners(fatal(t), envelope, wantSigners...)
+}
+
+// SequenceAge is focus.AssertSequenceAge, stopping the test on failure.
+func SequenceAge(t focus.TB, envelope focus.Value, wantMinAge time.Duration, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSequenceAge(fatal(t), envelope, wantMinAge, opts...)
+}
+
+// AuthInvocationTree is focus.AssertAuthInvocationTree, stopping the test on failure.
+func AuthInvocationTree(t focus.TB, xdrInput any, rootContract string, rootFunction string, subInvocations ...focus.ExpectedInvocation) {
+	t.Helper()
+	focus.AssertAuthInvocationTree(fatal(t), xdrInput, rootContract, rootFunction, subInvocations...)
 }
 
 // LedgerboundsValid is focus.AssertLedgerboundsValid, stopping the test on
@@ -740,19 +776,20 @@ func ContractLogMessage(t focus.TestingT, metaInput any, pattern string, opts ..
 	focus.AssertContractLogMessage(fatal(t), metaInput, pattern, opts...)
 }
 
-// SignerWeight is focus.AssertSignerWeight, stopping the test on failure.
-func SignerWeight(t focus.TestingT, opOrEntry any, signerKey string, wantWeight uint32, opts ...focus.Option) {
+// LedgerHeader is focus.AssertLedgerHeader, stopping the test on failure.
+func LedgerHeader(t focus.TB, header focus.Value, wantSeq, wantBaseFee, wantBaseReserve uint32) {
 	t.Helper()
-	focus.AssertSignerWeight(fatal(t), opOrEntry, signerKey, wantWeight, opts...)
+	focus.AssertLedgerHeader(fatal(t), header, wantSeq, wantBaseFee, wantBaseReserve)
 }
 
-// AccountThresholds is focus.AssertAccountThresholds, stopping the test on failure.
-func AccountThresholds(
-	t focus.TestingT,
-	opOrEntry any,
-	wantMasterWeight, wantLow, wantMed, wantHigh uint32,
-	opts ...focus.Option,
-) {
+// FootprintExact is focus.AssertFootprintExact, stopping the test on failure.
+func FootprintExact(t focus.TB, envelope focus.Value, wantReadOnly, wantReadWrite []string, opts ...focus.Option) {
 	t.Helper()
-	focus.AssertAccountThresholds(fatal(t), opOrEntry, wantMasterWeight, wantLow, wantMed, wantHigh, opts...)
+	focus.AssertFootprintExact(fatal(t), envelope, wantReadOnly, wantReadWrite, opts...)
+}
+
+// FootprintContains is focus.AssertFootprintContains, stopping the test on failure.
+func FootprintContains(t focus.TB, envelope focus.Value, readOnlyKeys, readWriteKeys []string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertFootprintContains(fatal(t), envelope, readOnlyKeys, readWriteKeys, opts...)
 }

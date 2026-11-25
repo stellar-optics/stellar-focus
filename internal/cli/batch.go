@@ -39,6 +39,9 @@ type batchOutcome struct {
 	entry batchEntry
 	// paths are the fixtures written, when the capture succeeded.
 	paths []string
+	// skipped reports that the transaction was dropped by the capture
+	// filters, so nothing was written for it.
+	skipped bool
 	// err is why the capture failed, when it did.
 	err error
 }
@@ -54,6 +57,7 @@ type batchReporter struct {
 	stderr io.Writer
 
 	captured int
+	skipped  int
 	missing  int
 	failed   int
 }
@@ -65,6 +69,10 @@ func (r *batchReporter) report(outcome batchOutcome) {
 
 	entry := outcome.entry
 	switch {
+	case outcome.err == nil && outcome.skipped:
+		r.skipped++
+		fmt.Fprintf(r.stdout, "[%d/%d] skipped tx %s: it does not match the capture filters\n",
+			entry.index, r.total, shortHash(entry.hash))
 	case outcome.err == nil:
 		r.captured++
 		target := ""
@@ -86,8 +94,12 @@ func (r *batchReporter) report(outcome batchOutcome) {
 
 // summary prints the totals of a batch.
 func (r *batchReporter) summary(stdout io.Writer) {
-	fmt.Fprintf(stdout, "\n%d transaction(s): %d captured, %d not found, %d failed\n",
+	fmt.Fprintf(stdout, "\n%d transaction(s): %d captured, %d not found, %d failed",
 		r.total, r.captured, r.missing, r.failed)
+	if r.skipped > 0 {
+		fmt.Fprintf(stdout, ", %d skipped by the capture filters", r.skipped)
+	}
+	fmt.Fprintln(stdout)
 }
 
 // captureBatchCmd captures every transaction listed in a batch file.
@@ -180,6 +192,16 @@ func captureBatchEntry(
 	records, err := src.Transaction(ctx, entry.hash)
 	if err != nil {
 		outcome.err = err
+		return outcome
+	}
+
+	records, err = capture.FilterRecords(records, cfg.filters())
+	if err != nil {
+		outcome.err = err
+		return outcome
+	}
+	if len(records) == 0 {
+		outcome.skipped = true
 		return outcome
 	}
 
