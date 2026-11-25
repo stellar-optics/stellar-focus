@@ -429,6 +429,9 @@ func (g *Golden) write(path string, actual focus.Value, description string) erro
 
 // Case is one entry of a table-driven golden test.
 //
+// See docs/guides/table_driven_golden.md for table construction and runner
+// behavior.
+//
 // The description and the options travel with the entry rather than with the
 // suite, so a failure can say which entry failed and what it was for — the
 // context a list of bare names cannot carry.
