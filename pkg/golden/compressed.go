@@ -8,43 +8,54 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // GzipSuffix marks a gzipped golden file, e.g. envelope.golden.json.gz.
 const GzipSuffix = ".gz"
 
+// ZstdSuffix marks a zstd-compressed golden file, e.g. envelope.golden.json.zst.
+const ZstdSuffix = ".zst"
+
 // gzipMagic opens every gzip member, so a compressed file is recognised by
-// what it is rather than by what it is called: a fixture renamed without its
-// .gz still loads, and a mislabelled plain file is never handed to a
-// decompressor.
+// what it is rather than by what it is called.
 var gzipMagic = []byte{0x1f, 0x8b}
 
-// IsCompressed reports whether path names a gzipped file. It decides how
-// WriteFile stores content, which is the one place the name matters.
+// zstdMagic is the standard magic number for Zstandard compressed data (0xFD2FB528).
+var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
+
+// IsCompressed reports whether path names a compressed file (.gz or .zst).
 func IsCompressed(path string) bool {
-	return strings.HasSuffix(path, GzipSuffix)
+	return strings.HasSuffix(path, GzipSuffix) || strings.HasSuffix(path, ZstdSuffix)
 }
 
-// ReadFile reads a golden file's content: transparently decompressing a gzip
-// payload and normalizing line endings, so callers — Load, assertions,
-// checksums, diffs — compare content rather than storage.
-//
-// A missing file is reported as os.ErrNotExist wrapped, so errors.Is keeps
-// working and Assert can still offer to create it.
+// ReadFile reads a golden file's content: transparently decompressing gzip or zstd
+// payloads and normalizing line endings, so callers compare content rather than storage.
 func ReadFile(path string) ([]byte, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasPrefix(raw, gzipMagic) {
+
+	var decompressed []byte
+	var decErr error
+
+	if bytes.HasPrefix(raw, gzipMagic) || strings.HasSuffix(path, GzipSuffix) {
+		decompressed, decErr = gunzip(path, raw)
+	} else if bytes.HasPrefix(raw, zstdMagic) || strings.HasSuffix(path, ZstdSuffix) {
+		decompressed, decErr = gunzstd(path, raw)
+	} else {
 		return NormalizeLineEndings(raw), nil
 	}
-	return gunzip(path, raw)
+
+	if decErr != nil {
+		return nil, decErr
+	}
+	return NormalizeLineEndings(decompressed), nil
 }
 
-// gunzip decompresses raw, validating the checksum gzip carries, and
-// normalizes the result: decompressed fixture text goes through the same
-// line-ending handling as an uncompressed one.
+// gunzip decompresses raw gzip payload.
 func gunzip(path string, raw []byte) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(raw))
 	if err != nil {
@@ -58,23 +69,52 @@ func gunzip(path string, raw []byte) ([]byte, error) {
 	if closeErr != nil {
 		return nil, fmt.Errorf("decompressing %s: %w", path, closeErr)
 	}
-	return NormalizeLineEndings(out), nil
+	return out, nil
+}
+
+// gunzstd decompresses raw zstd payload.
+func gunzstd(path string, raw []byte) ([]byte, error) {
+	dec, err := zstd.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("decompressing %s: %w", path, err)
+	}
+	defer dec.Close()
+
+	out, err := io.ReadAll(dec)
+	if err != nil {
+		return nil, fmt.Errorf("decompressing %s: %w", path, err)
+	}
+	return out, nil
 }
 
 // WriteFile writes data to path, creating the directory if needed, storing it
-// gzip-compressed when the path asks for .gz and as plain bytes otherwise.
-// The same content written to the same path produces the same bytes, so a
-// compressed fixture that only decompresses does not churn in review.
+// compressed when the path asks for .gz or .zst and as plain bytes otherwise.
 func WriteFile(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
 	}
 
 	out := data
-	if IsCompressed(path) {
+	var err error
+
+	if strings.HasSuffix(path, GzipSuffix) {
 		var buf bytes.Buffer
 		zw := gzip.NewWriter(&buf)
 		if _, err := zw.Write(data); err != nil {
+			return fmt.Errorf("compressing %s: %w", path, err)
+		}
+		if err := zw.Close(); err != nil {
+			return fmt.Errorf("compressing %s: %w", path, err)
+		}
+		out = buf.Bytes()
+	} else if strings.HasSuffix(path, ZstdSuffix) {
+		var buf bytes.Buffer
+		zw, zErr := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.DefaultCompression))
+		if zErr != nil {
+			return fmt.Errorf("compressing %s: %w", path, zErr)
+		}
+		if _, err := zw.Write(data); err != nil {
+			_ = zw.Close()
 			return fmt.Errorf("compressing %s: %w", path, err)
 		}
 		if err := zw.Close(); err != nil {
