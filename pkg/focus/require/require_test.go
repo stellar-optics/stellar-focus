@@ -238,6 +238,78 @@ func TestMessagesMatchTheAssertPackage(t *testing.T) {
 	}
 }
 
+// TestGroupReportsEveryFailureBeforeStopping is the reason Group exists: a
+// group of related field checks reports all of its mismatches in one run and
+// then stops the test, so downstream logic never sees a value that failed a
+// prerequisite.
+func TestGroupReportsEveryFailureBeforeStopping(t *testing.T) {
+	t.Parallel()
+
+	env := envelope(t, 100)
+	tb := faketb.New()
+
+	require.Group(tb, func(g focus.TB) {
+		focus.AssertFee(g, env, 999)
+		focus.AssertSourceAccount(g, env, "GWRONG")
+		focus.AssertOperationCount(g, env, 9)
+		focus.AssertMemo(g, env, "text: invoice-42")
+	})
+
+	if got := tb.ErrorCount(); got != 4 {
+		t.Errorf("Group reported %d errors, want 4; every assertion must be flushed:\n%s",
+			got, tb.Output())
+	}
+	if !tb.FatalfCalled() {
+		t.Error("Group did not stop the test after reporting its failures")
+	}
+	if fatal := tb.LastFatal(); fatal != "group assertions failed" {
+		t.Errorf("Group fatal message = %q, want %q", fatal, "group assertions failed")
+	}
+
+	out := tb.Output()
+	for _, want := range []string{"AssertFee", "AssertSourceAccount", "AssertOperationCount", "AssertMemo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Group lost the %s failure:\n%s", want, out)
+		}
+	}
+}
+
+// TestGroupStaysSilentOnSuccess guards against a group that stops the test
+// even when every assertion passed.
+func TestGroupStaysSilentOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	env := envelope(t, 100)
+	tb := faketb.New()
+
+	require.Group(tb, func(g focus.TB) {
+		focus.AssertFee(g, env, 100)
+		focus.AssertSourceAccount(g, env, "GCJNHFXJEQEY54NPKU4DBMT5WOBJUHMYSFBDAQF4OMTEGJN4BQU7ZST6")
+		focus.AssertOperationCount(g, env, 1)
+		focus.AssertNoMemo(g, env)
+	})
+
+	if tb.Failed() {
+		t.Errorf("a passing group reported a failure:\n%s", tb.Output())
+	}
+}
+
+// TestGroupPassesThroughTheTestName checks that the TB handed to the closure
+// still behaves like the caller's test, apart from failure handling.
+func TestGroupPassesThroughTheTestName(t *testing.T) {
+	t.Parallel()
+
+	tb := faketb.New()
+	tb.TestName = "TestSomethingSpecific"
+
+	var name string
+	require.Group(tb, func(g focus.TB) { name = g.Name() })
+
+	if name != tb.TestName {
+		t.Errorf("group TB Name() = %q, want %q", name, tb.TestName)
+	}
+}
+
 // focusEvent returns an empty matcher, used where an assertion only needs to
 // be driven to its failure path.
 func focusEvent() focus.Event { return focus.Event{} }
