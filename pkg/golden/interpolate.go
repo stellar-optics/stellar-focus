@@ -4,17 +4,161 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 )
+
+// toInt converts various numeric types or numeric strings to int for template arithmetic.
+func toInt(v any) (int, error) {
+	switch val := v.(type) {
+	case int:
+		return val,
+			nil
+	case int64:
+		return int(val),
+			nil
+	case int32:
+		return int(val),
+			nil
+	case uint:
+		return int(val),
+			nil
+	case uint64:
+		return int(val),
+			nil
+	case uint32:
+		return int(val),
+			nil
+	case float64:
+		return int(val),
+			nil
+	case float32:
+		return int(val),
+			nil
+	default:
+		vVal := reflect.ValueOf(v)
+		switch vVal.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			return int(vVal.Int()), nil
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			return int(vVal.Uint()), nil
+		case reflect.Float32, reflect.Float64:
+			return int(vVal.Float()), nil
+		}
+		return 0, fmt.Errorf("cannot convert %T (%v) to int", v, v)
+	}
+}
+
+// add adds two numbers.
+func add(a, b any) (int, error) {
+	aInt, err := toInt(a)
+	if err != nil {
+		return 0, fmt.Errorf("add: first argument: %w", err)
+	}
+	bInt, err := toInt(b)
+	if err != nil {
+		return 0, fmt.Errorf("add: second argument: %w", err)
+	}
+	return aInt + bInt,
+		nil
+}
+
+// sub subtracts b from a.
+func sub(a, b any) (int, error) {
+	aInt, err := toInt(a)
+	if err != nil {
+		return 0, fmt.Errorf("sub: first argument: %w", err)
+	}
+	bInt, err := toInt(b)
+	if err != nil {
+		return 0, fmt.Errorf("sub: second argument: %w", err)
+	}
+	return aInt - bInt,
+		nil
+}
+
+// timeOffset parses a duration string (or takes a time.Duration) and offsets the base time or current time.
+func timeOffset(args ...any) (string, error) {
+	var durationStr string
+	var base time.Time = time.Unix(0, 0).UTC() // Deterministic base time if not provided
+
+	if len(args) == 1 {
+		switch v := args[0].(type) {
+		case string:
+			durationStr = v
+		case time.Duration:
+			return base.Add(v).Format(time.RFC3339),
+			nil
+		default:
+			arrayVal, err := toInt(v)
+			if err == nil {
+				durationStr = fmt.Sprintf("%ds", arrayVal)
+			} else {
+				return "", fmt.Errorf("invalid timeOffset argument %T", args[0])
+			}
+		}
+	} else if len(args) >= 2 {
+		switch v := args[0].(type) {
+		case time.Time:
+			base = v
+		case string:
+			t, err := time.Parse(time.RFC3339, v)
+			if err == nil {
+				base = t
+			} else {
+				durationStr = v
+			}
+		}
+		switch v := args[1].(type) {
+		case string:
+			durationStr = v
+		case time.Duration:
+			return base.Add(v).Format(time.RFC3339),
+			nil
+		}
+	}
+
+	if durationStr == "" {
+		return base.Format(time.RFC3339), nil
+	}
+
+	d, err := time.ParseDuration(durationStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid duration %q: %w", durationStr, err)
+	}
+	return base.Add(d).Format(time.RFC3339),
+		nil
+}
+
+// accountID generates a mock account ID or returns a indexed one if variables provide it.
+func accountID(args ...any) string {
+	idx := 0
+	if len(args) > 0 {
+		if n, err := toInt(args[0]); err == nil {
+			idx = n
+		}
+	}
+	// Generate a deterministic Stellar public key-like string based on index
+	return fmt.Sprintf("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF%04d", idx)
+}
+
+// templateFuncs provides the expanded helper function map for golden file interpolation.
+var templateFuncs = template.FuncMap{
+	"add":        add,
+	"sub":        sub,
+	"timeOffset": timeOffset,
+	"AccountID":  accountID,
+}
 
 // Interpolate applies Go template syntax to text using data as its context.
 func Interpolate(text string, data any) (string, error) {
 	if !strings.Contains(text, "{{") {
 		return text, nil
 	}
-	parsed, err := template.New("golden").Option("missingkey=error").Parse(text)
+	parsed, err := template.New("golden").Funcs(templateFuncs).Option("missingkey=error").Parse(text)
 	if err != nil {
 		return "", fmt.Errorf("parsing fixture template: %w", err)
 	}
@@ -105,7 +249,7 @@ func interpolateTree(value any, data any) (any, error) {
 		for key := range typed {
 			keys = append(keys, key)
 		}
-		sort.Strings(keys)
+	sort.Strings(keys)
 		for _, key := range keys {
 			child := typed[key]
 			renderedKey, err := Interpolate(key, data)
