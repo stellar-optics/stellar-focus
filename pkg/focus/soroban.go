@@ -557,7 +557,10 @@ func AssertInvokeHostFunctionArgs(
 	copy(wantID[:], wantIDBytes)
 	gotID, ok := invoke.ContractAddress.GetContractId()
 	if !ok {
-		gotAddress, _ := invoke.ContractAddress.String()
+		gotAddress, err := invoke.ContractAddress.String()
+		if err != nil {
+			gotAddress = "<invalid contract address>"
+		}
 		t.Errorf("%s: contract address is %s, want contract %s",
 			assertion, gotAddress, wantContractID)
 		return false
