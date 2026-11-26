@@ -42,6 +42,7 @@ type config struct {
 type normalizer struct {
 	pattern string
 	fn      func(any) any
+	pathFn  func(string, any) any
 }
 
 // sorter describes one array treated as an unordered set.
@@ -200,6 +201,15 @@ func NormalizePath(pattern string, fn func(any) any) Option {
 	}
 	return func(c *config) {
 		c.normalize = append(c.normalize, normalizer{pattern: pattern, fn: fn})
+	}
+}
+
+// NormalizeEachPath applies fn to every changed decoded value, passing its
+// dotted path as well as the value. It is intended for integrations that
+// need to make domain-specific redactions without keeping global state.
+func NormalizeEachPath(fn func(path string, value any) any) Option {
+	return func(c *config) {
+		c.normalize = append(c.normalize, normalizer{pattern: "**", pathFn: fn})
 	}
 }
 

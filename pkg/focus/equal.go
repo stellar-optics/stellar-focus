@@ -216,6 +216,11 @@ func applyNormalizers(changes []lens.Change, c *config) []lens.Change {
 	out := make([]lens.Change, 0, len(changes))
 	for _, ch := range changes {
 		for _, n := range c.normalize {
+			if n.pathFn != nil {
+				ch.Before = n.pathFn(ch.Path, ch.Before)
+				ch.After = n.pathFn(ch.Path, ch.After)
+				continue
+			}
 			if !matchPath(n.pattern, ch.Path) {
 				continue
 			}

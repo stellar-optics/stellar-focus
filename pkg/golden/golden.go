@@ -102,15 +102,16 @@ type Provenance struct {
 
 // Golden compares values against golden files on disk.
 type Golden struct {
-	t                focus.TB
-	dir              string
-	suffix           string
-	format           Format
-	opts             []focus.Option
-	noiseSuppression bool
-	desc             string
-	typeHnt          string
-	vars             any
+	t                 focus.TB
+	dir               string
+	suffix            string
+	format            Format
+	opts              []focus.Option
+	noiseSuppression  bool
+	desc              string
+	typeHnt           string
+	vars              any
+	customNormalizers []NormalizerFunc
 	// diffContext is how many unchanged sibling fields a failure diff shows
 	// around each difference. nil means the focus default.
 	diffContext *int
@@ -423,6 +424,10 @@ func (g *Golden) write(path string, actual focus.Value, description string) erro
 	fixture, err := Build(actual, g.typeHnt, description, nil)
 	if err != nil {
 		return err
+	}
+	fixture.Decoded, err = normalizeDecoded(fixture.Decoded, g.customNormalizers)
+	if err != nil {
+		return fmt.Errorf("normalizing decoded fixture: %w", err)
 	}
 	return SaveAs(path, fixture, g.format)
 }

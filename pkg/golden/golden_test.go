@@ -3,8 +3,10 @@ package golden_test
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +25,43 @@ func envelope(t *testing.T) string {
 		t.Fatalf("reading fixture: %v", err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+func TestWithCustomNormalizerRedactsByPath(t *testing.T) {
+	wasUpdating := golden.Update()
+	if err := flag.Set("focus.update", "true"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = flag.Set("focus.update", strconv.FormatBool(wasUpdating)) }()
+
+	dir := t.TempDir()
+	normalizer := golden.WithCustomNormalizer(func(path string, value any) any {
+		if strings.HasSuffix(path, ".Amount") {
+			return "<redacted>"
+		}
+		return value
+	})
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), normalizer)
+	if !g.Assert("env", buildEnvelope(t, 100)) {
+		t.Fatalf("recording normalized fixture failed: %s", tb.Output())
+	}
+
+	fixture, err := golden.Load(filepath.Join(dir, "env.golden.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(fixture.Decoded, []byte("redacted")) {
+		t.Fatalf("decoded fixture did not redact Amount by path: %s", fixture.Decoded)
+	}
+
+	if err := flag.Set("focus.update", "false"); err != nil {
+		t.Fatal(err)
+	}
+	tb = faketb.New()
+	if !golden.New(tb, golden.WithDir(dir), normalizer).Assert("env", buildEnvelope(t, 200)) {
+		t.Fatalf("custom normalizer was not used during comparison: %s", tb.Output())
+	}
 }
 
 func TestBuildAndSaveRoundTrip(t *testing.T) {
