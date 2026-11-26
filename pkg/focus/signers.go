@@ -424,8 +424,8 @@ func extractSignerFromSetOptions(t TB, assertion string, op *xdr.SetOptionsOp, s
 	}
 
 	if !matchSignerKey(op.Signer.Key, signerKey) {
-		gotKey, _ := op.Signer.Key.GetAddress()
-		if gotKey == "" {
+		gotKey, err := op.Signer.Key.GetAddress()
+		if err != nil || gotKey == "" {
 			gotKey = "unknown"
 		}
 		t.Errorf("%s: SetOptionsOp signer key is %s, want %s",
@@ -438,13 +438,14 @@ func extractSignerFromSetOptions(t TB, assertion string, op *xdr.SetOptionsOp, s
 		return true
 	}
 
-	if wantWeight == 0 {
+	switch {
+	case wantWeight == 0:
 		t.Errorf("%s: signer %s was not removed: weight is %d, want 0",
 			assertion, shorten(signerKey), gotWeight)
-	} else if gotWeight == 0 {
+	case gotWeight == 0:
 		t.Errorf("%s: signer %s was removed (weight 0), want weight %d",
 			assertion, shorten(signerKey), wantWeight)
-	} else {
+	default:
 		t.Errorf("%s: signer %s weight is %d, want %d",
 			assertion, shorten(signerKey), gotWeight, wantWeight)
 	}

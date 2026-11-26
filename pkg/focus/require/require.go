@@ -793,3 +793,20 @@ func FootprintContains(t focus.TB, envelope focus.Value, readOnlyKeys, readWrite
 	t.Helper()
 	focus.AssertFootprintContains(fatal(t), envelope, readOnlyKeys, readWriteKeys, opts...)
 }
+
+// SignerWeight is focus.AssertSignerWeight, stopping the test on failure.
+func SignerWeight(t focus.TestingT, opOrEntry any, signerKey string, wantWeight uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSignerWeight(fatal(t), opOrEntry, signerKey, wantWeight, opts...)
+}
+
+// AccountThresholds is focus.AssertAccountThresholds, stopping the test on failure.
+func AccountThresholds(
+	t focus.TestingT,
+	opOrEntry any,
+	wantMasterWeight, wantLow, wantMed, wantHigh uint32,
+	opts ...focus.Option,
+) {
+	t.Helper()
+	focus.AssertAccountThresholds(fatal(t), opOrEntry, wantMasterWeight, wantLow, wantMed, wantHigh, opts...)
+}
