@@ -240,6 +240,9 @@ usually captured, so colour defaults to off via `focus.WithColor("never")`
 and is enabled explicitly with `focus.WithColor("always")`; `auto` honours
 `NO_COLOR` and `TERM=dumb`.
 
+See [Terminal failure rendering](architecture/terminal_rendering.md) for the
+color modes, ANSI codes, and examples.
+
 The structural diff itself is rendered by `message.go`, not by lens's
 formatter. Each change gets the field path on its own line and then one
 labelled line per side — `want │ …` beside `got  │ …` — because a reader

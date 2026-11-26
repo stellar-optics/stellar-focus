@@ -735,9 +735,9 @@ func AccountDataDeleted(t focus.TB, meta focus.Value, key string) {
 
 // LiquidityPoolDeposit is focus.AssertLiquidityPoolDeposit, stopping the test
 // on failure.
-func LiquidityPoolDeposit(t focus.TB, meta, pool focus.Value, want focus.PoolChange) {
+func LiquidityPoolDeposit(t focus.TB, input focus.Value, args ...any) {
 	t.Helper()
-	focus.AssertLiquidityPoolDeposit(fatal(t), meta, pool, want)
+	focus.AssertLiquidityPoolDeposit(fatal(t), input, args...)
 }
 
 // LiquidityPoolWithdrawal is focus.AssertLiquidityPoolWithdrawal, stopping the
