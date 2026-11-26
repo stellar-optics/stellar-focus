@@ -551,6 +551,128 @@ func AssertResourceFee(t TB, envelope Value, wantFee int64) bool {
 	return false
 }
 
+// AssertContractDataDurability checks the durability a transaction gave a
+// contract's storage entry.
+//
+// Soroban storage is either temporary or persistent, and the choice is part of
+// what a contract promises: an entry that holds a balance must survive, while
+// one that holds a cached price may expire. The durability is written into the
+// ContractDataEntry in the transaction meta, so this assertion reads it back
+// from the meta of the transaction that created or modified the entry.
+//
+// contractID is the strkey C… address of the contract, and key is the ScVal
+// storage key the contract used — the same value a LedgerKey carries. Instance
+// storage is a contract data entry whose key is the contract instance key, so
+// it is asserted the same way.
+//
+//	focus.AssertContractDataDurability(t, meta, contractID, counterKey,
+//	    xdr.ContractDataDurabilityPersistent)
+//
+// A failure names the key and the contract, and says what durability was found
+// beside the one that was wanted. If the transaction wrote no entry for the
+// key, the failure lists the contract data the meta does carry, so a wrong key
+// or a wrong contract id is visible at a glance.
+func AssertContractDataDurability(t TestingT, metaInput any, contractID string, key xdr.ScVal, wantDurability xdr.ContractDataDurability, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertContractDataDurability"
+
+	name := newConfig(opts...).assertionName(assertion)
+
+	contractID = strings.TrimSpace(contractID)
+	if contractID == "" {
+		t.Errorf("%s: contractID is empty; pass the strkey C… address of the contract", name)
+		return false
+	}
+	if _, err := strkey.Decode(strkey.VersionByteContract, contractID); err != nil {
+		t.Errorf("%s: contractID %q is not a valid strkey contract address: %v",
+			name, contractID, err)
+		return false
+	}
+
+	keyID, err := scValID(key)
+	if err != nil {
+		t.Errorf("%s: key could not be read: %v", name, err)
+		return false
+	}
+
+	changes, ok := ledgerChanges(t, name, metaInput)
+	if !ok {
+		return false
+	}
+
+	var (
+		got     xdr.ContractDataEntry
+		found   bool
+		present []string
+	)
+	if !guard(t, name, func() {
+		for _, change := range changes {
+			if change.entryType != xdr.LedgerEntryTypeContractData || change.entry == nil {
+				continue
+			}
+			// A "state" change is the value before an update, not something
+			// the transaction wrote, and a removed entry carries only its key.
+			switch change.kind {
+			case xdr.LedgerEntryChangeTypeLedgerEntryCreated,
+				xdr.LedgerEntryChangeTypeLedgerEntryUpdated,
+				xdr.LedgerEntryChangeTypeLedgerEntryRestored:
+			default:
+				continue
+			}
+
+			data, isContractData := change.entry.Data.GetContractData()
+			if !isContractData {
+				continue
+			}
+			address, addrErr := data.Contract.String()
+			if addrErr != nil {
+				continue
+			}
+			entryKeyID, keyErr := scValID(data.Key)
+			if keyErr != nil {
+				continue
+			}
+
+			present = append(present, fmt.Sprintf("%s  %-10s  %s",
+				shorten(address), durabilityLabel(data.Durability), describeStorageKey(data.Key)))
+
+			if address != contractID || entryKeyID != keyID {
+				continue
+			}
+			got, found = data, true
+		}
+	}) {
+		return false
+	}
+
+	if !found {
+		t.Errorf("%s: the transaction wrote no contract data for key %s on contract %s\n\n%s\n\n"+
+			"The durability of an entry is recorded in the meta of the transaction that created or "+
+			"modified it, so check the contract id, the storage key, and that this is that transaction.",
+			name, describeStorageKey(key), shorten(contractID), indent(describeContractDataPresent(present)))
+		return false
+	}
+
+	if got.Durability == wantDurability {
+		return true
+	}
+
+	t.Errorf("%s: contract data %s for %s has %s durability, want %s\n\n%s",
+		name, describeStorageKey(key), shorten(contractID),
+		durabilityLabel(got.Durability), durabilityLabel(wantDurability),
+		indent(describeContractDataPresent(present)))
+	return false
+}
+
+// describeContractDataPresent renders the contract data a meta carries, so a
+// failed lookup shows what was written instead of only what was wanted.
+func describeContractDataPresent(present []string) string {
+	if len(present) == 0 {
+		return "the transaction meta carries no contract data changes"
+	}
+	return fmt.Sprintf("contract data present (%d):\n%s", len(present), strings.Join(present, "\n"))
+}
+
 // AssertContractError checks that a contract invocation failed with a
 // particular error, and that the error is the one the test expects.
 //

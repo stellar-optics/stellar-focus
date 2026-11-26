@@ -402,6 +402,13 @@ func ResourceFee(t focus.TB, envelope focus.Value, wantFee int64) {
 	focus.AssertResourceFee(fatal(t), envelope, wantFee)
 }
 
+// ContractDataDurability is focus.AssertContractDataDurability, stopping the
+// test on failure.
+func ContractDataDurability(t focus.TestingT, metaInput any, contractID string, key xdr.ScVal, wantDurability xdr.ContractDataDurability, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertContractDataDurability(fatal(t), metaInput, contractID, key, wantDurability, opts...)
+}
+
 // ReturnValue is focus.AssertReturnValue, stopping the test on failure.
 func ReturnValue(t focus.TB, meta focus.Value, want focus.Value) {
 	t.Helper()
