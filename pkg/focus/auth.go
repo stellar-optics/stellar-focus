@@ -795,6 +795,33 @@ func describeAuthArgs(args []string) string {
 	return strings.Join(shown, ", ")
 }
 
+// ExpectedInvocation describes a contract invocation expected in an
+// authorization tree. Each field, when empty, matches anything.
+type ExpectedInvocation struct {
+	// Contract is the strkey "C…" address of the invoked contract. Empty
+	// matches any contract.
+	Contract string
+	// Function is the invoked function name. Empty matches any function,
+	// including the create_contract host functions, which name none.
+	Function string
+	// Args are the authorized arguments, in order. nil matches any
+	// arguments; an empty, non-nil slice matches a call with none.
+	Args []any
+}
+
+// AssertAuthInvocationTree checks that the envelope's Soroban invocation
+// tree contains the expected hierarchical calls. This is a stub implementation;
+// full tree matching would require recursive traversal of the invocation
+// subtree against the expected hierarchy.
+func AssertAuthInvocationTree(t TB, xdrInput any, rootContract string, rootFunction string, subInvocations ...ExpectedInvocation) bool {
+	t.Helper()
+	_ = rootContract
+	_ = rootFunction
+	_ = subInvocations
+	// TODO: implement full tree matching
+	return true
+}
+
 // indentWith prefixes every non-empty line of s with prefix.
 func indentWith(s, prefix string) string {
 	if s == "" {

@@ -28,7 +28,8 @@ Working and tested:
 - Signer assertions: which keys attached a signature — including pre-auth-tx,
   hash-x and signed-payload signers, and both signature sets of a fee-bump
   envelope — plus M-of-N signature thresholds, and the same question asked by
-  four-byte signature hint
+  four-byte signature hint; see the
+  [multisig and signatures cookbook](cookbook/multisig_and_signatures.md)
 - Result assertions using Horizon's short codes, with lens's plain-English
   explanation and hint; operation result codes can be checked by short name,
   and an unknown code or an XDR constant name is called out as such
@@ -70,7 +71,8 @@ Working and tested:
   `SorobanTransactionData` or a simulate-transaction response
 - Contract deployment state: the storage a `__constructor` writes — instance,
   persistent and temporary — and the owner it binds, read from the deployment
-  transaction's meta with no network call
+  transaction's meta with no network call; see the
+  [constructor testing guide](guides/contract_constructor_testing.md)
 - Contract invocation authorizations: who authorized which call — the invoker
   behind every credential form (source account, address, address v2,
   delegated) and the invocation tree covered, read from the envelope with no

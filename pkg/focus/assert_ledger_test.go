@@ -5,9 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
-	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func closeMeta(version int32, protocol uint32, closeTime uint64) xdr.LedgerCloseMeta {
