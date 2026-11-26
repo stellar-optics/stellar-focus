@@ -197,6 +197,90 @@ func AssertTrustlineFlags(t TestingT, metaOrEntry any, account string, asset str
 	return checkTrustlineFlags(t, spec.id, addr, mod.flags, wantFlags, mod)
 }
 
+// AssertSetTrustLineFlags checks the trustor, asset, and flag masks of an
+// operation that sets trustline flags.
+func AssertSetTrustLineFlags(
+	t TestingT, op xdr.Operation, wantTrustor string, wantAsset xdr.Asset,
+	wantSet uint32, wantClear uint32, opts ...Option,
+) bool {
+	t.Helper()
+	const assertion = "AssertSetTrustLineFlags"
+	_ = newConfig(opts...)
+
+	if op.Body.Type != xdr.OperationTypeSetTrustLineFlags || op.Body.SetTrustLineFlagsOp == nil {
+		t.Errorf("%s: operation is %s, want SetTrustLineFlags",
+			assertion, operationTypeName(op.Body.Type))
+		return false
+	}
+	actual := op.Body.SetTrustLineFlagsOp
+
+	wantAccount, err := addressFromString(wantTrustor)
+	if err != nil {
+		t.Errorf("%s: trustor could not be read as an account: %v", assertion, err)
+		return false
+	}
+	gotAccount, ok := accountAddressOf(t, assertion, actual.Trustor)
+	if !ok {
+		return false
+	}
+	matched := true
+	if gotAccount != wantAccount {
+		t.Errorf("%s: trustor is %s, want %s", assertion, shorten(gotAccount), shorten(wantAccount))
+		matched = false
+	}
+
+	gotAsset, err := assetSpecFromAsset(actual.Asset)
+	if err != nil {
+		t.Errorf("%s: operation asset could not be read: %v", assertion, err)
+		return false
+	}
+	expectedAsset, err := assetSpecFromAsset(wantAsset)
+	if err != nil {
+		t.Errorf("%s: expected asset could not be read: %v", assertion, err)
+		return false
+	}
+	if gotAsset.id != expectedAsset.id {
+		t.Errorf("%s: asset is %s, want %s", assertion, gotAsset.id, expectedAsset.id)
+		matched = false
+	}
+
+	gotSet, gotClear := uint32(actual.SetFlags), uint32(actual.ClearFlags)
+	if gotSet != wantSet {
+		t.Errorf("%s: set flags are %s, want %s",
+			assertion, describeSetTrustlineFlags(gotSet), describeSetTrustlineFlags(wantSet))
+		matched = false
+	}
+	if gotClear != wantClear {
+		t.Errorf("%s: clear flags are %s, want %s",
+			assertion, describeSetTrustlineFlags(gotClear), describeSetTrustlineFlags(wantClear))
+		matched = false
+	}
+	return matched
+}
+
+func describeSetTrustlineFlags(flags uint32) string {
+	var names []string
+	if flags&uint32(xdr.TrustLineFlagsAuthorizedFlag) != 0 {
+		names = append(names, "AUTHORIZED")
+	}
+	if flags&uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) != 0 {
+		names = append(names, "MAINTAIN_LIABILITIES")
+	}
+	if flags&uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag) != 0 {
+		names = append(names, "CLAWBACK_ENABLED")
+	}
+	known := uint32(xdr.TrustLineFlagsAuthorizedFlag) |
+		uint32(xdr.TrustLineFlagsAuthorizedToMaintainLiabilitiesFlag) |
+		uint32(xdr.TrustLineFlagsTrustlineClawbackEnabledFlag)
+	if unknown := flags &^ known; unknown != 0 {
+		names = append(names, fmt.Sprintf("UNKNOWN_0x%x", unknown))
+	}
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, "|")
+}
+
 // DescribeTrustlineFlags returns human-readable active flag names for a trustline flag bitmask.
 func DescribeTrustlineFlags(flags uint32) string {
 	var parts []string
