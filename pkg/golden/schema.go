@@ -26,24 +26,50 @@ type schemaNode struct {
 
 // Validate checks a fixture against the package's embedded JSON Schema.
 func Validate(f *Fixture) error {
-	if f == nil {
-		return fmt.Errorf("fixture is nil")
-	}
-	if f.Format != "" && f.Format != FormatVersion {
-		return fmt.Errorf("fixture was written in format %q, but this version reads %q", f.Format, FormatVersion)
-	}
-	data, err := json.Marshal(f)
-	if err != nil {
-		return fmt.Errorf("encoding fixture for schema validation: %w", err)
-	}
-	return validateFixtureJSON(data)
+	return ValidateFixtureSchema(f, false)
 }
 
-func validateFixtureJSON(data []byte) error {
-	var schema schemaNode
-	if err := json.Unmarshal(fixtureSchemaJSON, &schema); err != nil {
-		return fmt.Errorf("loading embedded fixture schema: %w", err)
+// ValidateFixtureSchema validates raw or struct fixture data against the embedded
+// fixture.schema.json, supporting strict mode where unknown fields are disallowed
+// and required top-level attributes (version, type, payload/xdr, metadata, etc.) are verified.
+func ValidateFixtureSchema(input any, strict bool) error {
+	var data []byte
+	var err error
+	switch v := input.(type) {
+	case []byte:
+		data = v
+	case *Fixture:
+		if v == nil {
+			return fmt.Errorf("fixture is nil")
+		}
+		if v.Format != "" && v.Format != FormatVersion {
+			return fmt.Errorf("fixture was written in format %q, but this version reads %q", v.Format, FormatVersion)
+		}
+		data, err = json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("encoding fixture for schema validation: %w", err)
+		}
+	case Fixture:
+		if v.Format != "" && v.Format != FormatVersion {
+			return fmt.Errorf("fixture was written in format %q, but this version reads %q", v.Format, FormatVersion)
+		}
+		data, err = json.Marshal(v)
+		if err != nil {
+			return fmt.Errorf("encoding fixture for schema validation: %w", err)
+		}
+	default:
+		data, err = json.Marshal(input)
+		if err != nil {
+			return fmt.Errorf("encoding input for schema validation: %w", err)
+		}
 	}
+
+	var schema schemaNode
+	if err := json.Unmarshal(fixtureSchemaJSON, &schema);
+		err != nil {
+			return fmt.Errorf("loading embedded fixture schema: %w", err)
+		}
+
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var value any
@@ -57,10 +83,11 @@ func validateFixtureJSON(data []byte) error {
 		}
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
-	return validateSchemaNode(value, schema, "fixture")
+
+	return validateSchemaNode(value, schema, "fixture", strict)
 }
 
-func validateSchemaNode(value any, schema schemaNode, path string) error {
+func validateSchemaNode(value any, schema schemaNode, path string, strict bool) error {
 	if !matchesSchemaType(value, schema.Type) {
 		return fmt.Errorf("%s must be %s", path, schema.Type)
 	}
@@ -69,6 +96,8 @@ func validateSchemaNode(value any, schema schemaNode, path string) error {
 		if !ok {
 			return fmt.Errorf("%s must be object", path)
 		}
+
+		// Validate required properties
 		for _, key := range schema.Required {
 			if _, exists := object[key]; !exists {
 				if path == "fixture" && key == "xdr" {
@@ -77,20 +106,28 @@ func validateSchemaNode(value any, schema schemaNode, path string) error {
 				return fmt.Errorf("%s.%s is required", path, key)
 			}
 		}
+
+		// Enforce strict unknown field check if requested or specified by schema
+		disallowAdditional := strict
+		if schema.AdditionalProperties != nil && !*schema.AdditionalProperties {
+			disallowAdditional = true
+		}
+
 		keys := make([]string, 0, len(object))
 		for key := range object {
 			keys = append(keys, key)
 		}
 		sort.Strings(keys)
+
 		for _, key := range keys {
 			property, exists := schema.Properties[key]
 			if !exists {
-				if schema.AdditionalProperties != nil && !*schema.AdditionalProperties {
+				if disallowAdditional {
 					return fmt.Errorf("%s.%s is not allowed by the fixture schema", path, key)
 				}
 				continue
 			}
-			if err := validateSchemaNode(object[key], property, path+"."+key); err != nil {
+			if err := validateSchemaNode(object[key], property, path+"."+key, strict); err != nil {
 				return err
 			}
 		}

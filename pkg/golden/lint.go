@@ -50,9 +50,6 @@ func (e LintError) Error() string {
 }
 
 // fixtureFields are the fields a fixture may carry.
-//
-// The list mirrors the schema, and it is here so a fixture with a field
-// nobody knows about is reported rather than quietly ignored.
 var fixtureFields = map[string]bool{
 	"format":      true,
 	"type":        true,
@@ -63,23 +60,6 @@ var fixtureFields = map[string]bool{
 }
 
 // Lint checks a fixture file and returns every problem it finds.
-//
-// The checks are static: nothing is fetched, nothing is run, and no test is
-// executed. That is the point — a fixture that was merged by hand, or
-// corrupted by a bad merge, should be caught while it is being written
-// rather than when a test fails three weeks later.
-//
-// What is checked:
-//
-//   - the file is valid JSON (for a JSON fixture) and holds only fields a
-//     fixture has;
-//   - the format is the one this version reads;
-//   - the type and the XDR are present;
-//   - the XDR is valid base64;
-//   - the XDR decodes as the type the fixture claims;
-//   - a capture timestamp is RFC3339.
-//
-// An empty list means the fixture is clean.
 func Lint(path string) []LintError {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -88,8 +68,7 @@ func Lint(path string) []LintError {
 
 	var problems []LintError
 
-	// CRLF (or lone CR) line endings are a checkout artefact, not content:
-	// they make a fixture differ from byte to byte across platforms.
+	// CRLF (or lone CR) line endings are a checkout artefact, not content.
 	if idx := bytes.IndexByte(raw, '\r'); idx >= 0 {
 		line := 1
 		for i := 0; i < idx; i++ {
@@ -104,8 +83,7 @@ func Lint(path string) []LintError {
 		})
 	}
 
-	// A secret key that survived into a committed fixture is a leak, and a
-	// volatile value that was never masked.
+	// A secret key that survived into a committed fixture is a leak.
 	if loc := secretKeyPattern.FindIndex(raw); loc != nil {
 		line := 1
 		for i := 0; i < loc[0]; i++ {
@@ -130,13 +108,8 @@ func Lint(path string) []LintError {
 }
 
 // parseForLint reads a fixture for linting.
-//
-// It returns the fixture and any problem found while reading it. A nil
-// fixture means the file could not be read as a fixture at all.
 func parseForLint(path string, raw []byte) (*Fixture, []LintError) {
 	if FormatForPath(path) != JSON {
-		// The serializer reads, validates and decodes the other formats in
-		// one go, and its errors already say what is wrong.
 		fixture, err := LoadAs(path, FormatForPath(path))
 		if err != nil {
 			return nil, []LintError{{Message: err.Error()}}
@@ -157,13 +130,50 @@ func parseForLint(path string, raw []byte) (*Fixture, []LintError) {
 	}
 
 	var problems []LintError
+
+	// Run strict schema validation against fixture.schema.json
+	if err := ValidateFixtureSchema(raw, true); err != nil {
+		errStr := err.Error()
+		field := ""
+		// Extract property name if present in path like fixture.foo
+		parts := strings.Split(errStr, " ")
+		if len(parts) > 0 {
+			first := parts[0]
+			if strings.HasPrefix(first, "fixture.") {
+				field = strings.TrimPrefix(first, "fixture.")
+				if idx := strings.Index(field, " "); idx >= 0 {
+					field = field[:idx]
+				}
+			}
+		}
+		line := 0
+		if field != "" {
+			line = lineOfField(raw, strings.Split(field, ".")[0])
+		}
+		problems = append(problems, LintError{
+			Field:   field,
+			Message: errStr,
+			Line:    line,
+		})
+	}
+
 	for field := range doc {
 		if !fixtureFields[field] {
-			problems = append(problems, LintError{
-				Field:   field,
-				Message: "is not a field of a fixture",
-				Line:    lineOfField(raw, field),
-			})
+			// Avoid duplicate reporting if schema validation already caught it
+			found := false
+			for _, p := range problems {
+				if p.Field == field {
+					found = true
+					break
+				}
+			}
+			if !found {
+				problems = append(problems, LintError{
+					Field:   field,
+					Message: "is not a field of a fixture",
+					Line:    lineOfField(raw, field),
+				})
+			}
 		}
 	}
 
@@ -174,10 +184,6 @@ func parseForLint(path string, raw []byte) (*Fixture, []LintError) {
 		})
 	}
 
-	// The schema knows the shape of a fixture better than this file does:
-	// which fields are required, what each one holds and what the ranges
-	// are. The format version and the capture timestamp are checked
-	// separately, below, because the messages there can name the field.
 	schema := fixture
 	schema.Format = ""
 	if schema.Captured != nil {
@@ -238,8 +244,6 @@ func lintContent(f *Fixture) []LintError {
 		}
 	}
 
-	// The capture timestamp is checked last, and always: a fixture with
-	// several problems should hear about all of them in one run.
 	if f.Captured != nil && f.Captured.At != "" {
 		if _, err := time.Parse(time.RFC3339, f.Captured.At); err != nil {
 			problems = append(problems, LintError{
@@ -252,7 +256,6 @@ func lintContent(f *Fixture) []LintError {
 	return problems
 }
 
-// lineAt returns the line an offset falls on, counting from one.
 func lineAt(raw []byte, offset int64) int {
 	if offset <= 0 {
 		return 0
@@ -269,15 +272,12 @@ func lineAt(raw []byte, offset int64) int {
 	return line
 }
 
-// lineOfField returns the line a top-level field is declared on, or zero
-// when it cannot be found.
 func lineOfField(raw []byte, field string) int {
 	needle := []byte(`"` + field + `"`)
 	for i := 0; i+len(needle) <= len(raw); i++ {
 		if string(raw[i:i+len(needle)]) != string(needle) {
 			continue
 		}
-		// Only a key counts: the value of a field may hold the same word.
 		if i > 0 && raw[i-1] != ' ' && raw[i-1] != '\t' && raw[i-1] != '\n' {
 			continue
 		}
