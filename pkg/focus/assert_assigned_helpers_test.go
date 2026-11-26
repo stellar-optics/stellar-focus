@@ -7,9 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stellar/go-stellar-sdk/xdr"
+
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
 	"github.com/stellar-optics/stellar-focus/pkg/focus"
-	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 func TestAssertLiquidityPoolDepositOperation(t *testing.T) {

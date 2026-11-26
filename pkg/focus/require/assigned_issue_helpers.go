@@ -1,8 +1,9 @@
 package require
 
 import (
-	"github.com/stellar-optics/stellar-focus/pkg/focus"
 	"github.com/stellar/go-stellar-sdk/xdr"
+
+	"github.com/stellar-optics/stellar-focus/pkg/focus"
 )
 
 // ContractWasmHash is focus.AssertContractWasmHash, stopping on failure.
