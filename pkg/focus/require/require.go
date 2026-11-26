@@ -793,3 +793,27 @@ func FootprintContains(t focus.TB, envelope focus.Value, readOnlyKeys, readWrite
 	t.Helper()
 	focus.AssertFootprintContains(fatal(t), envelope, readOnlyKeys, readWriteKeys, opts...)
 }
+
+// LedgerCloseMetaProtocol is focus.AssertLedgerCloseMetaProtocol, stopping the test on failure.
+func LedgerCloseMetaProtocol(t focus.TB, meta xdr.LedgerCloseMeta, wantProtocol uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerCloseMetaProtocol(fatal(t), meta, wantProtocol, opts...)
+}
+
+// LedgerCloseTime is focus.AssertLedgerCloseTime, stopping the test on failure.
+func LedgerCloseTime(t focus.TB, meta xdr.LedgerCloseMeta, minUnix, maxUnix int64, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerCloseTime(fatal(t), meta, minUnix, maxUnix, opts...)
+}
+
+// ClawbackClaimableBalanceMeta is focus.AssertClawbackClaimableBalanceMeta, stopping the test on failure.
+func ClawbackClaimableBalanceMeta(t focus.TB, meta xdr.TransactionMeta, wantBalanceID xdr.ClaimableBalanceId, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertClawbackClaimableBalanceMeta(fatal(t), meta, wantBalanceID, opts...)
+}
+
+// LiquidityPoolWithdraw is focus.AssertLiquidityPoolWithdraw, stopping the test on failure.
+func LiquidityPoolWithdraw(t focus.TB, op xdr.Operation, poolID xdr.PoolId, shares xdr.Int64, minA, minB xdr.Int64, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLiquidityPoolWithdraw(fatal(t), op, poolID, shares, minA, minB, opts...)
+}
