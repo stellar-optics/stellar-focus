@@ -9,6 +9,7 @@ A Go testing toolkit for Stellar and Soroban: assert on XDR, manage golden fixtu
 
 Part of [stellar-optics](https://github.com/stellar-optics) — Go tools that make Stellar and Soroban data legible. Siblings: [stellar-xdr-lens](https://github.com/stellar-optics/stellar-xdr-lens) (decode, explain, diff) and [stellar-prism](https://github.com/stellar-optics/stellar-prism) (tail live data).
 
+
 ## Why this exists
 
 Testing Go code that produces Stellar XDR means comparing two base64 strings.
@@ -22,6 +23,7 @@ When they differ, `assert.Equal` tells you this:
 
 That is technically correct and completely useless. focus tells you which
 field changed:
+
 
 ```
 --- FAIL: TestPaymentEnvelope (0.00s)
@@ -402,6 +404,7 @@ Soroban authorization entries carry a nonce and a signature that are fresh on
 every run. `IgnoreSorobanAuth` suppresses the credentials tree while still
 comparing the authorized invocation, and discloses the ignored credential
 paths in the failure output like any other ignore rule.
+
 
 Patterns match the dotted paths lens reports: `*` is one segment, `**` is any
 depth, and indexes accept `[*]`. Within a segment, `*`, `?` and `[abc]`/`[!abc]`
@@ -1038,6 +1041,10 @@ go test -v ./examples/...
 
 - [End-to-End Soroban Contract Testing Guide](docs/soroban_testing_guide.md) — Comprehensive tutorial covering contract deployment, `__constructor` state, return value assertions, event sequence matching, trap/panic inspection, diagnostic logs, and resource budget checks.
 - [Golden Fixtures & CI Integration Guide](docs/golden_fixtures_guide.md) — Complete guide on fixture anatomy, recording updates with `-focus.update`, interactive drift resolution via `focus golden resolve`, and GitHub Actions CI integration.
+- [Glossary of Terms](docs/reference/glossary.md) — Centralized definitions of Stellar XDR and Soroban testing vocabulary, with links to assertion helpers.
+- [Fake Test Harness Guide](docs/contributing/fake_test_harness.md) — How `stellar-focus` tests its own assertion messages using `faketb` and `fakesource`, and how to adopt the patterns in downstream projects.
+- [CI/CD Integration Playbook](docs/ci/integration_playbook.md) — GitHub Actions and GitLab CI configurations for `focus verify`, exit-code handling, caching, and PR comment summaries.
+- [Inflation and Fee-Pool Guide](docs/guides/inflation_and_fee_pool.md) — Asserting on inflation payouts and ledger fee-pool balance movements for historical indexers and test networks.
 
 
 ## Fuzzing

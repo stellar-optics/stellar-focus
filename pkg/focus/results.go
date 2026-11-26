@@ -49,6 +49,33 @@ func AssertFailed(t TB, result Value) bool {
 	return true
 }
 
+// ResultCodeInfo describes a protocol result code.
+type ResultCodeInfo struct {
+	// Code is the short string form of the code, such as "tx_bad_seq".
+	Code string
+	// Summary is the plain-English explanation.
+	Summary string
+	// Hint is an actionable hint, or empty if none.
+	Hint string
+}
+
+// ValidateResultCode checks whether a result code string is valid and returns
+// its information. This is useful for developers writing custom test assertions,
+// fixture generators, or mock response helpers.
+//
+// The code is validated via lens.ReasonByCode. If the code is not recognized,
+// the second return value is false.
+func ValidateResultCode(code string) (ResultCodeInfo, bool) {
+	if info, ok := lens.ReasonByCode(code); ok {
+		return ResultCodeInfo{
+			Code:    info.Code,
+			Summary: info.Summary,
+			Hint:    info.Hint,
+		}, true
+	}
+	return ResultCodeInfo{}, false
+}
+
 // AssertResultCode checks the transaction-level result code, such as
 // "tx_bad_seq" or "tx_failed".
 //

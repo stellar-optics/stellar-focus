@@ -2,6 +2,15 @@
 
 This directory contains runnable examples demonstrating Stellar and Soroban workflows.
 
+## Go test assertion guides
+
+For offline Go tests using `stellar-focus`, see the
+[Soroban constructor testing guide](../docs/guides/contract_constructor_testing.md)
+and the [multisig and signatures cookbook](../docs/cookbook/multisig_and_signatures.md).
+For claimable balance lifecycles and multi-operation transactions, see the
+[claimable balances cookbook](../docs/cookbook/claimable_balances.md) and
+[multi-operation pipelines cookbook](../docs/cookbook/multi_operation_pipelines.md).
+
 ## Lifecycle Example (`lifecycle.ts`)
 
 A complete TypeScript example showing the full lifecycle of a Stellar transaction flow on testnet:

@@ -23,7 +23,12 @@ func AssertInvokeHostFunctionArgs(t TB, op xdr.Operation, wantContractID, wantFu
 	call := host.InvokeContract
 	actualID := ""
 	if call.ContractAddress.Type == xdr.ScAddressTypeScAddressTypeContract && call.ContractAddress.ContractId != nil {
-		actualID, _ = strkey.Encode(strkey.VersionByteContract, call.ContractAddress.ContractId[:])
+		encodedID, err := strkey.Encode(strkey.VersionByteContract, call.ContractAddress.ContractId[:])
+		if err != nil {
+			t.Errorf("%s: contract ID could not be encoded: %v", assertion, err)
+			return false
+		}
+		actualID = encodedID
 	}
 	if actualID != wantContractID {
 		t.Errorf("%s: contract ID is %s, want %s", assertion, actualID, wantContractID)
