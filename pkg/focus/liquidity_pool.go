@@ -99,9 +99,56 @@ func (m poolMovement) delta() poolReserves {
 // before it to the state it committed, so a transaction that deposits twice is
 // checked against the total. Creating the pool counts as a deposit into it,
 // since its reserves and shares are new to the ledger.
-func AssertLiquidityPoolDeposit(t TB, meta Value, pool Value, want PoolChange) bool {
+func AssertLiquidityPoolDeposit(t TB, input Value, args ...any) bool {
 	t.Helper()
-	return assertPoolChange(t, "AssertLiquidityPoolDeposit", meta, pool, want, true)
+	if op, ok := input.(xdr.Operation); ok {
+		if len(args) < 5 {
+			t.Errorf("AssertLiquidityPoolDeposit: operation form needs pool ID, two amount limits and two price bounds")
+			return false
+		}
+		poolID, poolOK := args[0].(xdr.PoolId)
+		maxA, amountAOK := poolDepositAmount(args[1])
+		maxB, amountBOK := poolDepositAmount(args[2])
+		minPrice, minOK := args[3].(xdr.Price)
+		maxPrice, maxOK := args[4].(xdr.Price)
+		if !poolOK || !amountAOK || !amountBOK || !minOK || !maxOK {
+			t.Errorf("AssertLiquidityPoolDeposit: invalid operation expectation types (pool ID %T, max A %T, max B %T, min price %T, max price %T)", args[0], args[1], args[2], args[3], args[4])
+			return false
+		}
+		var opts []Option
+		for _, arg := range args[5:] {
+			option, ok := arg.(Option)
+			if !ok {
+				t.Errorf("AssertLiquidityPoolDeposit: option has type %T, want focus.Option", arg)
+				return false
+			}
+			opts = append(opts, option)
+		}
+		return assertLiquidityPoolDepositOperation(t, op, poolID, maxA, maxB, minPrice, maxPrice, opts...)
+	}
+	if len(args) != 2 {
+		t.Errorf("AssertLiquidityPoolDeposit: ledger form needs pool and expected pool change")
+		return false
+	}
+	want, ok := args[1].(PoolChange)
+	if !ok {
+		t.Errorf("AssertLiquidityPoolDeposit: ledger expectation has type %T, want focus.PoolChange", args[1])
+		return false
+	}
+	return assertPoolChange(t, "AssertLiquidityPoolDeposit", input, args[0], want, true)
+}
+
+func poolDepositAmount(value any) (xdr.Int64, bool) {
+	switch amount := value.(type) {
+	case xdr.Int64:
+		return amount, true
+	case int64:
+		return xdr.Int64(amount), true
+	case int:
+		return xdr.Int64(amount), true
+	default:
+		return 0, false
+	}
 }
 
 // AssertLiquidityPoolWithdrawal checks that the transaction withdrew from a
