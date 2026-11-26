@@ -4,11 +4,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 	lensformat "github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
 	"github.com/stellar/go-stellar-sdk/strkey"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // Option configures an assertion.
@@ -837,4 +839,259 @@ func (c *config) unusedIgnores(changes []lens.Change) []string {
 		}
 	}
 	return unused
+}
+
+// AssertAccountThresholds checks that opOrEntry (a SetOptionsOp, Operation,
+// TransactionEnvelope, AccountEntry, LedgerEntry, or TransactionMeta) sets or
+// carries the master key weight and low/med/high signing thresholds.
+//
+// It validates threshold hierarchy ordering (low <= med <= high). If the hierarchy
+// is violated or thresholds mismatch, it fails with a detailed diff showing
+// expected vs actual thresholds.
+func AssertAccountThresholds(
+	t TestingT,
+	opOrEntry any,
+	wantMasterWeight, wantLow, wantMed, wantHigh uint32,
+	opts ...Option,
+) bool {
+	t.Helper()
+	cfg := newConfig(opts...)
+	assertion := cfg.assertionName("AssertAccountThresholds")
+
+	// Validate threshold hierarchy ordering (low <= med <= high)
+	if wantLow > wantMed || wantMed > wantHigh {
+		t.Errorf("%s: invalid threshold hierarchy: want low (%d) <= med (%d) <= high (%d)",
+			assertion, wantLow, wantMed, wantHigh)
+		return false
+	}
+
+	return SafeExec(t, assertion, func() bool {
+		return checkAccountThresholds(t, assertion, opOrEntry, wantMasterWeight, wantLow, wantMed, wantHigh)
+	})
+}
+
+type accountThresholdValues struct {
+	hasMaster bool
+	master    uint32
+	hasLow    bool
+	low       uint32
+	hasMed    bool
+	med       uint32
+	hasHigh   bool
+	high      uint32
+}
+
+func checkAccountThresholds(
+	t TB,
+	assertion string,
+	opOrEntry any,
+	wantMaster, wantLow, wantMed, wantHigh uint32,
+) bool {
+	t.Helper()
+	if opOrEntry == nil {
+		t.Errorf("%s: opOrEntry is nil", assertion)
+		return false
+	}
+
+	vals, ok := extractAccountThresholds(t, assertion, opOrEntry)
+	if !ok {
+		return false
+	}
+
+	if vals.hasMaster && vals.master == wantMaster &&
+		vals.hasLow && vals.low == wantLow &&
+		vals.hasMed && vals.med == wantMed &&
+		vals.hasHigh && vals.high == wantHigh {
+		return true
+	}
+
+	// Format detailed mismatch message showing expected vs actual threshold triplet
+	var lines []string
+	gotMasterStr := "<unset>"
+	if vals.hasMaster {
+		gotMasterStr = strconv.FormatUint(uint64(vals.master), 10)
+		if vals.master != wantMaster {
+			lines = append(lines, fmt.Sprintf("master weight is %d, want %d", vals.master, wantMaster))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("master weight is unset, want %d", wantMaster))
+	}
+
+	gotLowStr := "<unset>"
+	if vals.hasLow {
+		gotLowStr = strconv.FormatUint(uint64(vals.low), 10)
+		if vals.low != wantLow {
+			lines = append(lines, fmt.Sprintf("low threshold is %d, want %d", vals.low, wantLow))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("low threshold is unset, want %d", wantLow))
+	}
+
+	gotMedStr := "<unset>"
+	if vals.hasMed {
+		gotMedStr = strconv.FormatUint(uint64(vals.med), 10)
+		if vals.med != wantMed {
+			lines = append(lines, fmt.Sprintf("medium threshold is %d, want %d", vals.med, wantMed))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("medium threshold is unset, want %d", wantMed))
+	}
+
+	gotHighStr := "<unset>"
+	if vals.hasHigh {
+		gotHighStr = strconv.FormatUint(uint64(vals.high), 10)
+		if vals.high != wantHigh {
+			lines = append(lines, fmt.Sprintf("high threshold is %d, want %d", vals.high, wantHigh))
+		}
+	} else {
+		lines = append(lines, fmt.Sprintf("high threshold is unset, want %d", wantHigh))
+	}
+
+	t.Errorf("%s: account thresholds differ\n\n  %s\n\n  got  master %s  low %s  medium %s  high %s\n  want master %d  low %d  medium %d  high %d",
+		assertion,
+		strings.Join(lines, "\n  "),
+		gotMasterStr, gotLowStr, gotMedStr, gotHighStr,
+		wantMaster, wantLow, wantMed, wantHigh,
+	)
+	return false
+}
+
+func extractAccountThresholds(t TB, assertion string, opOrEntry any) (accountThresholdValues, bool) {
+	t.Helper()
+	switch v := opOrEntry.(type) {
+	case xdr.SetOptionsOp:
+		return thresholdsFromSetOptions(&v), true
+	case *xdr.SetOptionsOp:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.SetOptionsOp", assertion)
+			return accountThresholdValues{}, false
+		}
+		return thresholdsFromSetOptions(v), true
+	case xdr.Operation:
+		if v.Body.Type == xdr.OperationTypeSetOptions && v.Body.SetOptionsOp != nil {
+			return thresholdsFromSetOptions(v.Body.SetOptionsOp), true
+		}
+		t.Errorf("%s: operation is type %s, want SetOptions", assertion, operationTypeName(v.Body.Type))
+		return accountThresholdValues{}, false
+	case *xdr.Operation:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.Operation", assertion)
+			return accountThresholdValues{}, false
+		}
+		return extractAccountThresholds(t, assertion, *v)
+	case xdr.AccountEntry:
+		return thresholdsFromAccountEntry(&v), true
+	case *xdr.AccountEntry:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.AccountEntry", assertion)
+			return accountThresholdValues{}, false
+		}
+		return thresholdsFromAccountEntry(v), true
+	case xdr.LedgerEntry:
+		if v.Data.Type == xdr.LedgerEntryTypeAccount && v.Data.Account != nil {
+			return thresholdsFromAccountEntry(v.Data.Account), true
+		}
+		t.Errorf("%s: ledger entry is type %s, want Account", assertion, v.Data.Type.String())
+		return accountThresholdValues{}, false
+	case *xdr.LedgerEntry:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.LedgerEntry", assertion)
+			return accountThresholdValues{}, false
+		}
+		return extractAccountThresholds(t, assertion, *v)
+	case xdr.TransactionEnvelope:
+		return thresholdsFromEnvelope(t, assertion, &v)
+	case *xdr.TransactionEnvelope:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionEnvelope", assertion)
+			return accountThresholdValues{}, false
+		}
+		return thresholdsFromEnvelope(t, assertion, v)
+	case xdr.TransactionMeta:
+		return thresholdsFromMeta(t, assertion, v)
+	case *xdr.TransactionMeta:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *xdr.TransactionMeta", assertion)
+			return accountThresholdValues{}, false
+		}
+		return thresholdsFromMeta(t, assertion, *v)
+	case *lens.Value:
+		if v == nil {
+			t.Errorf("%s: opOrEntry is a nil *lens.Value", assertion)
+			return accountThresholdValues{}, false
+		}
+		return extractAccountThresholds(t, assertion, v.Raw)
+	default:
+		decoded, err := coerce(opOrEntry, "")
+		if err != nil {
+			t.Errorf("%s: opOrEntry could not be read: %v", assertion, err)
+			return accountThresholdValues{}, false
+		}
+		return extractAccountThresholds(t, assertion, decoded.Raw)
+	}
+}
+
+func thresholdsFromSetOptions(op *xdr.SetOptionsOp) accountThresholdValues {
+	var vals accountThresholdValues
+	if op.MasterWeight != nil {
+		vals.hasMaster = true
+		vals.master = uint32(*op.MasterWeight)
+	}
+	if op.LowThreshold != nil {
+		vals.hasLow = true
+		vals.low = uint32(*op.LowThreshold)
+	}
+	if op.MedThreshold != nil {
+		vals.hasMed = true
+		vals.med = uint32(*op.MedThreshold)
+	}
+	if op.HighThreshold != nil {
+		vals.hasHigh = true
+		vals.high = uint32(*op.HighThreshold)
+	}
+	return vals
+}
+
+func thresholdsFromAccountEntry(entry *xdr.AccountEntry) accountThresholdValues {
+	return accountThresholdValues{
+		hasMaster: true,
+		master:    uint32(entry.Thresholds[0]),
+		hasLow:    true,
+		low:       uint32(entry.Thresholds[1]),
+		hasMed:    true,
+		med:       uint32(entry.Thresholds[2]),
+		hasHigh:   true,
+		high:      uint32(entry.Thresholds[3]),
+	}
+}
+
+func thresholdsFromEnvelope(t TB, assertion string, env *xdr.TransactionEnvelope) (accountThresholdValues, bool) {
+	t.Helper()
+	ops, err := transactionOperations(env)
+	if err != nil {
+		t.Errorf("%s: could not read operations from envelope: %v", assertion, err)
+		return accountThresholdValues{}, false
+	}
+	for i := range ops {
+		if ops[i].Body.Type == xdr.OperationTypeSetOptions && ops[i].Body.SetOptionsOp != nil {
+			return thresholdsFromSetOptions(ops[i].Body.SetOptionsOp), true
+		}
+	}
+	t.Errorf("%s: transaction envelope carries no SetOptions operation", assertion)
+	return accountThresholdValues{}, false
+}
+
+func thresholdsFromMeta(t TB, assertion string, meta xdr.TransactionMeta) (accountThresholdValues, bool) {
+	t.Helper()
+	changes, ok := ledgerChanges(t, assertion, meta)
+	if !ok {
+		return accountThresholdValues{}, false
+	}
+	for _, c := range changes {
+		if c.entryType == xdr.LedgerEntryTypeAccount && c.entry != nil && c.entry.Data.Account != nil {
+			return thresholdsFromAccountEntry(c.entry.Data.Account), true
+		}
+	}
+	t.Errorf("%s: meta carries no account entry changes", assertion)
+	return accountThresholdValues{}, false
 }

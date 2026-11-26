@@ -11,6 +11,7 @@
 package require
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/stellar/go-stellar-sdk/xdr"
@@ -37,6 +38,61 @@ func (f fatalTB) Errorf(format string, args ...any) {
 
 func fatal(t focus.TB) focus.TB {
 	return fatalTB{TB: t}
+}
+
+// groupTB records the failures a Group's closure reports instead of passing
+// them straight to the test, so every assertion in the group can run before
+// the test is stopped.
+type groupTB struct {
+	focus.TB
+	messages []string
+}
+
+// Errorf records a failure rather than reporting it immediately.
+func (g *groupTB) Errorf(format string, args ...any) {
+	g.messages = append(g.messages, fmt.Sprintf(format, args...))
+}
+
+// Fatalf records a failure as well. A fatal assertion inside a group cannot
+// stop the test without hiding the rest of the group, which is the problem
+// Group exists to solve, so it is reported with the other failures at the
+// end.
+func (g *groupTB) Fatalf(format string, args ...any) {
+	g.Errorf(format, args...)
+}
+
+// Group runs several focus assertions as one fatal check.
+//
+// The assertions are given a recording focus.TB, so a mismatch in any of them
+// does not stop the closure: every assertion runs and every failure is
+// collected. If anything failed, the collected messages are reported through
+// Errorf and the test is then stopped with Fatalf, so downstream logic never
+// runs on a value that failed its prerequisites.
+//
+//	require.Group(t, func(g focus.TB) {
+//		focus.AssertFee(g, env, 100)
+//		focus.AssertSourceAccount(g, env, alice)
+//		focus.AssertOperationCount(g, env, 2)
+//	})
+//
+// A group that passes reports nothing.
+func Group(t focus.TB, fn func(g focus.TB)) {
+	t.Helper()
+	if fn == nil {
+		t.Fatalf("group assertions failed: no assertions were given")
+		return
+	}
+
+	recorder := &groupTB{TB: t}
+	fn(recorder)
+
+	if len(recorder.messages) == 0 {
+		return
+	}
+	for _, msg := range recorder.messages {
+		t.Errorf("%s", msg)
+	}
+	t.Fatalf("group assertions failed")
 }
 
 // EnvelopeEqual is focus.AssertEnvelopeEqual, stopping the test on failure.
@@ -396,6 +452,12 @@ func SorobanResources(t focus.TB, envelope focus.Value, maxInstructions uint32, 
 	focus.AssertSorobanResources(fatal(t), envelope, maxInstructions, readBytes, writeBytes)
 }
 
+// InvokeHostFunctionArgs is focus.AssertInvokeHostFunctionArgs, stopping the test on failure.
+func InvokeHostFunctionArgs(t focus.TB, op xdr.Operation, wantContractID, wantFunction string, wantArgs []any, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertInvokeHostFunctionArgs(fatal(t), op, wantContractID, wantFunction, wantArgs, opts...)
+}
+
 // ResourceFee is focus.AssertResourceFee, stopping the test on failure.
 func ResourceFee(t focus.TB, envelope focus.Value, wantFee int64) {
 	t.Helper()
@@ -734,6 +796,18 @@ func TrustlineFlags(t focus.TestingT, metaOrEntry any, account string, asset str
 	focus.AssertTrustlineFlags(fatal(t), metaOrEntry, account, asset, wantFlags, opts...)
 }
 
+// SetTrustLineFlags is focus.AssertSetTrustLineFlags, stopping the test on failure.
+func SetTrustLineFlags(t focus.TestingT, op xdr.Operation, wantTrustor string, wantAsset xdr.Asset, wantSet, wantClear uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertSetTrustLineFlags(fatal(t), op, wantTrustor, wantAsset, wantSet, wantClear, opts...)
+}
+
+// AccountFlags is focus.AssertAccountFlags, stopping the test on failure.
+func AccountFlags(t focus.TestingT, op xdr.Operation, wantSet, wantClear xdr.AccountFlags, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertAccountFlags(fatal(t), op, wantSet, wantClear, opts...)
+}
+
 // ClawbackRevocation is focus.AssertClawbackRevocation, stopping the test on failure.
 func ClawbackRevocation(t focus.TestingT, metaInput any, fromAccount, asset string, wantClawbackAmount int64, opts ...focus.Option) {
 	t.Helper()
@@ -750,6 +824,24 @@ func FeeBumpInnerResultCode(t focus.TestingT, resultInput any, wantInnerCode str
 func SponsorshipTransition(t focus.TestingT, metaInput any, targetKey string, wantPrevSponsor, wantNewSponsor string, opts ...focus.Option) {
 	t.Helper()
 	focus.AssertSponsorshipTransition(fatal(t), metaInput, targetKey, wantPrevSponsor, wantNewSponsor, opts...)
+}
+
+// RevokeSponsorship is focus.AssertRevokeSponsorship, stopping the test on failure.
+func RevokeSponsorship(t focus.TestingT, op xdr.Operation, wantType xdr.RevokeSponsorshipType, matcher func(xdr.RevokeSponsorshipOp) bool, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSponsorship(fatal(t), op, wantType, matcher, opts...)
+}
+
+// RevokeAccountSponsorship is focus.AssertRevokeAccountSponsorship, stopping the test on failure.
+func RevokeAccountSponsorship(t focus.TestingT, op xdr.Operation, accountID string, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeAccountSponsorship(fatal(t), op, accountID, opts...)
+}
+
+// RevokeSignerSponsorship is focus.AssertRevokeSignerSponsorship, stopping the test on failure.
+func RevokeSignerSponsorship(t focus.TestingT, op xdr.Operation, accountID string, signerKey xdr.SignerKey, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertRevokeSignerSponsorship(fatal(t), op, accountID, signerKey, opts...)
 }
 
 // PassiveOffer is focus.AssertPassiveOffer, stopping the test on failure.
@@ -794,26 +886,19 @@ func FootprintContains(t focus.TB, envelope focus.Value, readOnlyKeys, readWrite
 	focus.AssertFootprintContains(fatal(t), envelope, readOnlyKeys, readWriteKeys, opts...)
 }
 
-// LedgerCloseMetaProtocol is focus.AssertLedgerCloseMetaProtocol, stopping the test on failure.
-func LedgerCloseMetaProtocol(t focus.TB, meta xdr.LedgerCloseMeta, wantProtocol uint32, opts ...focus.Option) {
+// SignerWeight is focus.AssertSignerWeight, stopping the test on failure.
+func SignerWeight(t focus.TestingT, opOrEntry any, signerKey string, wantWeight uint32, opts ...focus.Option) {
 	t.Helper()
-	focus.AssertLedgerCloseMetaProtocol(fatal(t), meta, wantProtocol, opts...)
+	focus.AssertSignerWeight(fatal(t), opOrEntry, signerKey, wantWeight, opts...)
 }
 
-// LedgerCloseTime is focus.AssertLedgerCloseTime, stopping the test on failure.
-func LedgerCloseTime(t focus.TB, meta xdr.LedgerCloseMeta, minUnix, maxUnix int64, opts ...focus.Option) {
+// AccountThresholds is focus.AssertAccountThresholds, stopping the test on failure.
+func AccountThresholds(
+	t focus.TestingT,
+	opOrEntry any,
+	wantMasterWeight, wantLow, wantMed, wantHigh uint32,
+	opts ...focus.Option,
+) {
 	t.Helper()
-	focus.AssertLedgerCloseTime(fatal(t), meta, minUnix, maxUnix, opts...)
-}
-
-// ClawbackClaimableBalanceMeta is focus.AssertClawbackClaimableBalanceMeta, stopping the test on failure.
-func ClawbackClaimableBalanceMeta(t focus.TB, meta xdr.TransactionMeta, wantBalanceID xdr.ClaimableBalanceId, opts ...focus.Option) {
-	t.Helper()
-	focus.AssertClawbackClaimableBalanceMeta(fatal(t), meta, wantBalanceID, opts...)
-}
-
-// LiquidityPoolWithdraw is focus.AssertLiquidityPoolWithdraw, stopping the test on failure.
-func LiquidityPoolWithdraw(t focus.TB, op xdr.Operation, poolID xdr.PoolId, shares xdr.Int64, minA, minB xdr.Int64, opts ...focus.Option) {
-	t.Helper()
-	focus.AssertLiquidityPoolWithdraw(fatal(t), op, poolID, shares, minA, minB, opts...)
+	focus.AssertAccountThresholds(fatal(t), opOrEntry, wantMasterWeight, wantLow, wantMed, wantHigh, opts...)
 }

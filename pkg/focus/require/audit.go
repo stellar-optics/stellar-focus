@@ -87,6 +87,9 @@ func WrappersIn(dir string) (map[string]FuncSig, error) {
 		"MissingMirrors":      true,
 		"ExtraMirrors":        true,
 		"Audit":               true,
+		// Group is a combinator over the mirrors, not a mirror itself, so
+		// it has no focus assertion to be paired with.
+		"Group": true,
 	}
 	out := make(map[string]FuncSig, len(decls))
 	for _, d := range decls {

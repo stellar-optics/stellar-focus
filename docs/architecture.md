@@ -892,6 +892,8 @@ in a fixed order — so the same fixture always produces the same bytes.
 
 ### Why the YAML is a documented subset
 
+See [docs/serializer_architecture.md](serializer_architecture.md) for the full architectural reference on zero-dependency serialization, the strict YAML token subset, and the whitespace normalization pipeline.
+
 `pkg/golden` is imported into other people's test suites, and the permitted
 dependency set is the standard library, the Stellar SDK and lens — enforced by
 `TestLibraryStaysDependencyLight`. A YAML library would be inherited by every
