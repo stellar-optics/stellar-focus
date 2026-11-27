@@ -905,6 +905,7 @@ func TestAssertionsNeverPanic(t *testing.T) {
 			Entries:    map[string]any{"owner": v},
 		})
 		focus.AssertContractOwner(tb, v, "CAAAA", testSource)
+		focus.AssertContractInstanceOwner(tb, v, "CAAAA", testSource)
 		focus.AssertContractAuthValid(tb, v, testSource, focus.ContractCall{Args: []any{v}})
 		focus.AssertContractAuthValid(tb, v, testSource, focus.ContractCall{})
 		focus.AssertContractAuthValid(tb, v, "not-a-strkey", focus.ContractCall{})

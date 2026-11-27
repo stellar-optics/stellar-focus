@@ -709,6 +709,221 @@ func TestAssertContractOwnerDiagnosesBadInput(t *testing.T) {
 	}
 }
 
+// TestAssertContractInstanceOwnerPasses covers both spellings the instance
+// binding takes in practice: "Owner" for a custom contract's __constructor and
+// "Admin" for a Stellar Asset Contract.
+func TestAssertContractInstanceOwnerPasses(t *testing.T) {
+	t.Parallel()
+
+	contract := constructorContractID(t, 0x10)
+	ownerContract := constructorContractID(t, 0x20)
+
+	tests := []struct {
+		name string
+		meta string
+		want string
+	}{
+		{
+			name: "custom contract owner",
+			meta: deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+				xdr.ScMapEntry{Key: scSymbol("Owner"), Val: scAddress(t, testSource)}))),
+			want: testSource,
+		},
+		{
+			name: "SAC admin",
+			meta: deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+				xdr.ScMapEntry{Key: scSymbol("Admin"), Val: scAddress(t, testSource)}))),
+			want: testSource,
+		},
+		{
+			name: "contract owner address",
+			meta: deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+				xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, ownerContract)}))),
+			want: ownerContract,
+		},
+		{
+			name: "owner alongside other instance state",
+			meta: deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+				xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, testSource)},
+				xdr.ScMapEntry{Key: scSymbol("supply"), Val: scU32(1000)},
+				xdr.ScMapEntry{Key: scString("name"), Val: scString("USD Coin")},
+			))),
+			want: testSource,
+		},
+		{
+			// Both keys may be present; the address under either satisfies
+			// the check, because "owner" and "admin" are two spellings of the
+			// same binding.
+			name: "admin matches when owner is a different address",
+			meta: deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+				xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, ownerContract)},
+				xdr.ScMapEntry{Key: scSymbol("admin"), Val: scAddress(t, testSource)},
+			))),
+			want: testSource,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if !focus.AssertContractInstanceOwner(tb, tc.meta, contract, tc.want) {
+				t.Errorf("owner was not matched:\n%s", tb.Output())
+			}
+			if tb.Failed() {
+				t.Errorf("a passing assertion reported a failure:\n%s", tb.Output())
+			}
+		})
+	}
+}
+
+func TestAssertContractInstanceOwnerFailureMessages(t *testing.T) {
+	t.Parallel()
+
+	contract := constructorContractID(t, 0x10)
+	wrongOwner := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, testDest)})))
+	wrongAdmin := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("Admin"), Val: scAddress(t, testDest)})))
+	noBinding := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("supply"), Val: scU32(1)})))
+	emptyInstance := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract)))
+	notAddress := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("owner"), Val: scSymbol("alice")})))
+	// An owner outside the instance entry is contract state, not the instance
+	// binding this assertion checks.
+	persistentOnly := deploymentMeta(t,
+		createdChange(contractInstanceEntry(t, contract,
+			xdr.ScMapEntry{Key: scSymbol("supply"), Val: scU32(1)})),
+		createdChange(contractDataEntry(t, contract, scSymbol("owner"),
+			scAddress(t, testSource), xdr.ContractDataDurabilityPersistent)))
+
+	tests := []struct {
+		name     string
+		meta     focus.Value
+		contains []string
+	}{
+		{
+			name:     "wrong owner shows both addresses",
+			meta:     wrongOwner,
+			contains: []string{"binds owner to address GAPB7…WYXZ", "want address GCJNH…ZST6", "instance storage"},
+		},
+		{
+			name:     "SAC admin is named as admin",
+			meta:     wrongAdmin,
+			contains: []string{"binds admin to address GAPB7…WYXZ", "want address GCJNH…ZST6"},
+		},
+		{
+			name:     "missing binding lists instance storage",
+			meta:     noBinding,
+			contains: []string{"has no owner or admin binding", `"supply"`, "u32(1)"},
+		},
+		{
+			name:     "empty instance storage is reported",
+			meta:     emptyInstance,
+			contains: []string{"has no owner or admin binding", "the contract instance storage is empty"},
+		},
+		{
+			name:     "non-address binding is called out",
+			meta:     notAddress,
+			contains: []string{"is not an address", `"alice"`, "strkey account"},
+		},
+		{
+			name:     "persistent owner does not satisfy the instance check",
+			meta:     persistentOnly,
+			contains: []string{"has no owner or admin binding", "instance storage"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if focus.AssertContractInstanceOwner(tb, tc.meta, contract, testSource) {
+				t.Fatal("assertion passed when it should have failed")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
+
+func TestAssertContractInstanceOwnerDiagnosesBadInput(t *testing.T) {
+	t.Parallel()
+
+	contract := constructorContractID(t, 0x10)
+	valid := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, testSource)})))
+	classic := mustMarshal(t, xdr.TransactionMeta{V: 0, Operations: &[]xdr.OperationMeta{}})
+	noInstance := deploymentMeta(t, createdChange(contractDataEntry(t, contract,
+		scSymbol("owner"), scAddress(t, testSource), xdr.ContractDataDurabilityPersistent)))
+
+	tests := []struct {
+		name     string
+		meta     focus.Value
+		contract string
+		owner    string
+		contains []string
+	}{
+		{"empty contract id", valid, "", testSource, []string{"contractID is empty"}},
+		{"account instead of contract", valid, testSource, testSource, []string{"is not a contract address"}},
+		{"invalid contract id", valid, "CAAAA", testSource, []string{"not a valid strkey contract address"}},
+		{"empty owner", valid, contract, "", []string{"wantOwnerAddress is empty"}},
+		{"invalid owner", valid, contract, "alice", []string{"is not a strkey account"}},
+		{"nil meta", nil, contract, testSource, []string{"could not be read"}},
+		{"classic meta", classic, contract, testSource, []string{"no contract data for contract"}},
+		{"no instance entry", noInstance, contract, testSource, []string{"no contract instance entry"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tb := faketb.New()
+			if focus.AssertContractInstanceOwner(tb, tc.meta, tc.contract, tc.owner) {
+				t.Fatal("assertion passed for invalid input")
+			}
+			msg, err := tb.Message()
+			if err != nil {
+				t.Fatalf("%v", err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message does not contain %q:\n%s", want, msg)
+				}
+			}
+		})
+	}
+}
+
+// TestAssertContractInstanceOwnerUsesLabel checks that the assertion forwards
+// its options, so a labelled step is named in the failure.
+func TestAssertContractInstanceOwnerUsesLabel(t *testing.T) {
+	t.Parallel()
+
+	contract := constructorContractID(t, 0x10)
+	meta := deploymentMeta(t, createdChange(contractInstanceEntry(t, contract,
+		xdr.ScMapEntry{Key: scSymbol("owner"), Val: scAddress(t, testDest)})))
+
+	tb := faketb.New()
+	if focus.AssertContractInstanceOwner(tb, meta, contract, testSource,
+		focus.WithLabel("step 2: deploy")) {
+		t.Fatal("assertion passed for a wrong owner")
+	}
+	if !strings.Contains(tb.Output(), "AssertContractInstanceOwner [step 2: deploy]") {
+		t.Errorf("the label was not used:\n%s", tb.Output())
+	}
+}
+
 // TestAssertConstructorStateEmptyStorageMessage covers the deployment that ran
 // but wrote nothing: a real possibility for a constructor with no state, and
 // one that must be reported as a missing entry rather than a broken assertion.
@@ -861,6 +1076,20 @@ func TestRequireConstructorMirrors(t *testing.T) {
 
 		tb := faketb.New()
 		require.ContractOwner(tb, meta, contract, testDest)
+		if len(tb.Errors) != 0 || len(tb.Fatals) != 1 {
+			t.Errorf("require used Errorf instead of Fatalf (errors=%d fatals=%d)",
+				len(tb.Errors), len(tb.Fatals))
+		}
+		if !strings.Contains(tb.Output(), "binds owner to") {
+			t.Errorf("require lost the message:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("contract instance owner is fatal", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		require.ContractInstanceOwner(tb, meta, contract, testDest)
 		if len(tb.Errors) != 0 || len(tb.Fatals) != 1 {
 			t.Errorf("require used Errorf instead of Fatalf (errors=%d fatals=%d)",
 				len(tb.Errors), len(tb.Fatals))
