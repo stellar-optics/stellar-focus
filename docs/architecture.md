@@ -5,6 +5,7 @@ most often want to make:
 
 - [Adding an assertion](#adding-an-assertion)
 - [Adding a fixture source](#adding-a-fixture-source)
+- [Terminal failure rendering](architecture/terminal_rendering.md)
 
 ## The organising principle
 
