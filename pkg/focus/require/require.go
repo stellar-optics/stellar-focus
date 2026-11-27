@@ -892,6 +892,29 @@ func SignerWeight(t focus.TestingT, opOrEntry any, signerKey string, wantWeight 
 	focus.AssertSignerWeight(fatal(t), opOrEntry, signerKey, wantWeight, opts...)
 }
 
+// LiquidityPoolWithdraw is focus.AssertLiquidityPoolWithdraw, stopping the
+// test on failure.
+func LiquidityPoolWithdraw(
+	t focus.TB, op xdr.Operation, poolID xdr.PoolId, shares xdr.Int64, minA, minB xdr.Int64, opts ...focus.Option,
+) {
+	t.Helper()
+	focus.AssertLiquidityPoolWithdraw(fatal(t), op, poolID, shares, minA, minB, opts...)
+}
+
+// LedgerCloseMetaProtocol is focus.AssertLedgerCloseMetaProtocol, stopping
+// the test on failure.
+func LedgerCloseMetaProtocol(t focus.TB, meta xdr.LedgerCloseMeta, wantProtocol uint32, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerCloseMetaProtocol(fatal(t), meta, wantProtocol, opts...)
+}
+
+// LedgerCloseTime is focus.AssertLedgerCloseTime, stopping the test on
+// failure.
+func LedgerCloseTime(t focus.TB, meta xdr.LedgerCloseMeta, minUnix, maxUnix int64, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertLedgerCloseTime(fatal(t), meta, minUnix, maxUnix, opts...)
+}
+
 // AccountThresholds is focus.AssertAccountThresholds, stopping the test on failure.
 func AccountThresholds(
 	t focus.TestingT,
