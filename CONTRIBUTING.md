@@ -87,10 +87,12 @@ See [docs/architecture.md](docs/architecture.md) for the details.
 
 ### Add an assertion
 
-Put it in the file matching its subject, take `TB` first, return `bool`, call
+See the comprehensive [Assertion Authoring Guide](docs/authoring_assertions.md) for full architectural patterns, safe execution conventions, and require mirror generation.
+
+Put it in the file matching its subject, take `TestingT` (or `TB`) first, return `bool`, call
 `t.Helper()`, resolve inputs through `resolve` or `summarize`, wrap anything
-touching generated XDR accessors in `guard`, write a test asserting on the
-message, and add the mirror in `require/`.
+touching generated XDR accessors in `SafeExec` or `guard`, write a test asserting on the
+message, and add the mirror in `pkg/focus/require/`.
 
 Prefer building on `lens.Explain` over reaching into XDR directly, so the value
 a test asserts on is the same value `lens explain` prints.
@@ -195,6 +197,19 @@ Before opening one:
 - [ ] A changed failure message has a test asserting on its text
 - [ ] Public API changes carry doc comments
 - [ ] Commits follow Conventional Commits
+
+### Assertion Contribution Checklist
+
+When adding or modifying assertions in `pkg/focus`:
+
+- [ ] Function is prefixed with `Assert`, takes `TestingT` (or `TB`) first, accepts variadic `Option`s, and returns `bool`
+- [ ] First statement in the function is `t.Helper()`
+- [ ] XDR inspection and accessor calls execute inside `SafeExec` or `guard`
+- [ ] Failure messages follow library standards (clean diffs, shortened addresses, clear expected vs actual)
+- [ ] Matching fatal mirror is implemented in `pkg/focus/require/require.go`
+- [ ] Parity audit passes: `go test -v ./pkg/focus/require/ -run TestAudit`
+- [ ] Unit tests cover positive matches, failure messages (using `internal/faketb`), and edge cases
+- [ ] See [docs/authoring_assertions.md](docs/authoring_assertions.md) for full guide and examples
 
 Include the linked issue, what changed and why, and **evidence it works** —
 actual output, not a claim that you ran it. For a message change, paste the

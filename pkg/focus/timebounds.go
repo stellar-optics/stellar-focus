@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // Precondition assertions read the time and ledger bounds a transaction
@@ -39,6 +41,20 @@ type timebounds struct {
 type ledgerbounds struct {
 	MinLedger uint32
 	MaxLedger uint32
+	Set       bool
+}
+
+// extraSigners are the extra signers from V2 preconditions.
+type extraSigners struct {
+	// Signers are the strkey addresses of the extra signers.
+	Signers []string
+	Set     bool
+}
+
+// sequenceAge is the minimum sequence age from V2 preconditions.
+type sequenceAge struct {
+	// MinSeqAge is the minimum sequence age in seconds.
+	MinSeqAge int64
 	Set       bool
 }
 
@@ -263,9 +279,249 @@ func ledgerboundsFrom(t TB, assertion string, envelope Value) (ledgerbounds, boo
 	return out, true
 }
 
-// describeTimebounds renders a window the way a developer reads it: a
-// one-sided bound is named alone, and no bounds says so rather than printing
-// a pair of zeros.
+// AssertExtraSigners checks that the envelope's V2 preconditions carry the
+// expected extra signer keys. Each want signer is a strkey address ("G…") that
+// must appear in the envelope's ExtraSigners list.
+//
+// If the envelope does not carry V2 preconditions, the assertion fails with a
+// clear message noting what precondition form is present (or absent).
+//
+// Extra signers are a Protocol 19 (CAP-0021) feature: they are additional
+// signers beyond the transaction's source account that must validate the
+// transaction. This assertion verifies their presence.
+func AssertExtraSigners(t TB, envelope Value, wantSigners ...string) bool {
+	t.Helper()
+	const assertion = "AssertExtraSigners"
+
+	env, _, ok := envelopeFrom(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	got, ok := extraSignersFrom(t, assertion, env)
+	if !ok {
+		return false
+	}
+
+	if len(got.Signers) == 0 && len(wantSigners) > 0 {
+		t.Errorf("%s: the envelope does not carry V2 preconditions (no extra signers available)\n\n  got   no extra signers\n  want %s", assertion, wantSigners)
+		return false
+	}
+
+	if len(wantSigners) == 0 {
+		// Want no signers: pass if extra signers exist (they are simply ignored),
+		// or fail if they don't exist and the test expected none but the envelope
+		// has none - that's fine too. Actually, if wantSigners is empty, we just
+		// check that the envelope's extra signers (if any) don't cause a mismatch.
+		// Since there's nothing to check, this always passes.
+		return true
+	}
+
+	// Check that every wanted signer is present in the envelope's extra signers.
+	missing := make([]string, 0, len(wantSigners))
+	wantSet := make(map[string]bool, len(wantSigners))
+	for _, w := range wantSigners {
+		wantSet[w] = true
+	}
+	for _, g := range got.Signers {
+		wantSet[g] = false
+	}
+	for w, found := range wantSet {
+		if found {
+			missing = append(missing, w)
+		}
+	}
+
+	if len(missing) > 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "%s: extra signers differ\n\n", assertion)
+		fmt.Fprintf(&b, "  got   extra signers: %s\n", describeExtraSigners(got))
+		fmt.Fprintf(&b, "  want  %s\n\n", describeWantSigners(wantSigners, missing))
+		t.Errorf("%s", b.String())
+		return false
+	}
+
+	return true
+}
+
+// extraSignersFrom reads an envelope's V2 preconditions and extracts the
+// extra signers.
+func extraSignersFrom(t TB, assertion string, env *xdr.TransactionEnvelope) (extraSigners, bool) {
+	t.Helper()
+
+	var out extraSigners
+	if env.V1 == nil {
+		return out, false
+	}
+
+	// Access the V2 preconditions directly via the Cond struct field.
+	// env.V1.Tx.Cond is of type xdr.Preconditions which has a V2 field.
+	// We do not compare Cond to nil since Preconditions is a named struct type.
+	if cond := env.V1.Tx.Cond.V2; cond != nil {
+		// V2 preconditions — extract extra signers.
+		if cond.ExtraSigners == nil {
+			return out, true // V2 present but no extra signers
+		}
+
+		out.Set = true
+		out.Signers = make([]string, 0, len(cond.ExtraSigners))
+		for _, sk := range cond.ExtraSigners {
+			// SignerKey.Address is an AccountId; use GetAddress to get the strkey.
+			addr, err := sk.GetAddress()
+			if err != nil {
+				t.Errorf("%s: could not read extra signer address: %v", assertion, err)
+				continue
+			}
+			// Use the string representation for comparison; both forms should
+			// resolve to the same address.
+			out.Signers = append(out.Signers, addr)
+		}
+		return out, true
+	}
+
+	// No V2 preconditions (either V1 or none).
+	t.Errorf("%s: this envelope does not carry V2 preconditions; "+
+		"AssertExtraSigners requires V2 preconditions", assertion)
+	return out, false
+}
+
+// AssertSequenceAge checks that the envelope's V2 preconditions carry the
+// minimum sequence age the test wants. The duration is in seconds, matching
+// the protocol's own convention: a bound of zero means "unbounded".
+//
+// If the envelope does not carry V2 preconditions, the assertion fails with a
+// clear message noting what precondition form is present (or absent).
+//
+// Sequence age is a Protocol 19 (CAP-0021) feature: it sets a minimum amount
+// of time (measured in sequence numbers) that must elapse before a transaction
+// can be valid. This assertion verifies that the declared minimum matches.
+func AssertSequenceAge(t TB, envelope Value, wantMinAge time.Duration, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertSequenceAge"
+
+	env, _, ok := envelopeFrom(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	got, ok := sequenceAgeFrom(t, assertion, env)
+	if !ok {
+		return false
+	}
+
+	if !got.Set {
+		t.Errorf("%s: the envelope does not carry V2 preconditions (no sequence age available)\n\n  got   no sequence age\n  want %s", assertion, describeDuration(wantMinAge))
+		return false
+	}
+
+	if got.MinSeqAge == 0 && wantMinAge == 0 {
+		// Both zero means unbounded / no constraint — treat as match.
+		return true
+	}
+
+	if got.MinSeqAge == int64(wantMinAge.Seconds()) {
+		return true
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: sequence age differs\n\n", assertion)
+	fmt.Fprintf(&b, "  got   min seq age is %s (%d seconds)\n", renderSeqAge(got.MinSeqAge), got.MinSeqAge)
+	fmt.Fprintf(&b, "  want  min seq age is %s (%d seconds)\n\n", describeDuration(wantMinAge), int64(wantMinAge.Seconds()))
+	t.Errorf("%s", b.String())
+	return false
+}
+
+// sequenceAgeFrom reads an envelope's V2 preconditions and extracts the
+// minimum sequence age.
+func sequenceAgeFrom(t TB, assertion string, env *xdr.TransactionEnvelope) (sequenceAge, bool) {
+	t.Helper()
+
+	var out sequenceAge
+	if env.V1 == nil {
+		return out, false
+	}
+
+	// Access the V2 preconditions directly via the Cond struct field.
+	// env.V1.Tx.Cond is of type xdr.Preconditions which has a V2 field.
+	// We do not compare Cond to nil since Preconditions is a named struct type.
+	if cond := env.V1.Tx.Cond.V2; cond != nil {
+		// V2 preconditions — extract minimum sequence age.
+		if cond.MinSeqAge == 0 {
+			// Zero means unbounded / no constraint.
+			out.Set = true
+			return out, true
+		}
+
+		out.Set = true
+		out.MinSeqAge = int64(cond.MinSeqAge)
+		return out, true
+	}
+
+	// No V2 preconditions (either V1 or none).
+	t.Errorf("%s: this envelope does not carry V2 preconditions; "+
+		"AssertSequenceAge requires V2 preconditions", assertion)
+	return out, false
+}
+
+// describeExtraSigners renders the extra signers found in the envelope.
+func describeExtraSigners(got extraSigners) string {
+	if !got.Set || len(got.Signers) == 0 {
+		return "none"
+	}
+	if len(got.Signers) == 1 {
+		return got.Signers[0]
+	}
+	// Show first few, then count.
+	shown := make([]string, 0, len(got.Signers))
+	for i, s := range got.Signers {
+		if i >= 3 {
+			shown = append(shown, fmt.Sprintf("… +%d", len(got.Signers)-3))
+			break
+		}
+		shown = append(shown, s)
+	}
+	return strings.Join(shown, ", ")
+}
+
+// describeWantSigners renders the wanted signers, marking the missing ones.
+func describeWantSigners(wantSigners []string, missing []string) string {
+	var b strings.Builder
+	for i, w := range wantSigners {
+		if i > 0 {
+			fmt.Fprint(&b, ", ")
+		}
+		if contains(missing, w) {
+			fmt.Fprintf(&b, "%s (MISSING)", w)
+		} else {
+			fmt.Fprint(&b, w)
+		}
+	}
+	return b.String()
+}
+
+// renderSeqAge renders a minimum sequence age value, treating zero as unbounded.
+func renderSeqAge(age int64) string {
+	if age == 0 {
+		return "0 (unbounded)"
+	}
+	return fmt.Sprintf("%d", age)
+}
+
+// describeDuration renders a duration the way a developer reads it.
+func describeDuration(d time.Duration) string {
+	return fmt.Sprintf("%ds (%s)", int64(d/time.Second), d)
+}
+
+// contains reports whether slice s contains string x.
+func contains(s []string, x string) bool {
+	for _, f := range s {
+		if f == x {
+			return true
+		}
+	}
+	return false
+}
+
 func describeTimebounds(b timebounds) string {
 	if !b.Set || (b.MinTime == 0 && b.MaxTime == 0) {
 		return "no time bounds (valid indefinitely)"

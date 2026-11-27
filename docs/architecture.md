@@ -5,6 +5,7 @@ most often want to make:
 
 - [Adding an assertion](#adding-an-assertion)
 - [Adding a fixture source](#adding-a-fixture-source)
+- [Terminal failure rendering](architecture/terminal_rendering.md)
 
 ## The organising principle
 
@@ -112,6 +113,10 @@ The library packages also have a one-way dependency order:
 layer (including the `require` packages) with module downloads disabled. This
 keeps assertions usable without fixture, capture, or CLI dependencies; capture
 can still use golden fixtures, and golden can use focus assertions.
+
+For the bundle manifest and library capture/verification workflow, see the
+[multi-transaction bundles guide](guides/multi_transaction_bundles.md). The
+current CLI does not expose a bundle subcommand.
 
 ## CLI configuration
 
@@ -903,6 +908,8 @@ test flag enables auto-repair analysis:
   and generates a summary prune report highlighting stale rules for removal.
 
 ### Why the YAML is a documented subset
+
+See [docs/serializer_architecture.md](serializer_architecture.md) for the full architectural reference on zero-dependency serialization, the strict YAML token subset, and the whitespace normalization pipeline.
 
 `pkg/golden` is imported into other people's test suites, and the permitted
 dependency set is the standard library, the Stellar SDK and lens — enforced by

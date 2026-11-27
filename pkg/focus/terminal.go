@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	lensformat "github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
+	"github.com/stellar/go-stellar-sdk/xdr"
 )
 
 // Terminal rendering for assertion failures.
@@ -133,6 +134,34 @@ func FormatFieldMismatch(assertion, field string, want, got any, color bool) str
 	coloredWant := Colorize(render(want), ANSIGreen)
 	coloredGot := Colorize(render(got), ANSIRed)
 	return fmt.Sprintf("%s: %s is %s, want %s", assertion, coloredField, coloredGot, coloredWant)
+}
+
+// DescribeAccountFlags formats account flag bits using their protocol names.
+func DescribeAccountFlags(flags uint32) string {
+	var names []string
+	if flags&uint32(xdr.AccountFlagsAuthRequiredFlag) != 0 {
+		names = append(names, "AUTH_REQUIRED")
+	}
+	if flags&uint32(xdr.AccountFlagsAuthRevocableFlag) != 0 {
+		names = append(names, "AUTH_REVOCABLE")
+	}
+	if flags&uint32(xdr.AccountFlagsAuthImmutableFlag) != 0 {
+		names = append(names, "AUTH_IMMUTABLE")
+	}
+	if flags&uint32(xdr.AccountFlagsAuthClawbackEnabledFlag) != 0 {
+		names = append(names, "AUTH_CLAWBACK_ENABLED")
+	}
+	known := uint32(xdr.AccountFlagsAuthRequiredFlag) |
+		uint32(xdr.AccountFlagsAuthRevocableFlag) |
+		uint32(xdr.AccountFlagsAuthImmutableFlag) |
+		uint32(xdr.AccountFlagsAuthClawbackEnabledFlag)
+	if unknown := flags &^ known; unknown != 0 {
+		names = append(names, fmt.Sprintf("UNKNOWN_0x%x", unknown))
+	}
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
 }
 
 // HighlightMismatchField returns msg with every occurrence of field wrapped

@@ -305,3 +305,120 @@ func TestAssertSponsorshipTransition(t *testing.T) {
 		}
 	})
 }
+
+func TestAssertRevokeSponsorship(t *testing.T) {
+	t.Parallel()
+
+	account := mustAccountID(t, testDest)
+	keys := []struct {
+		name string
+		key  xdr.LedgerKey
+		kind xdr.LedgerEntryType
+	}{
+		{
+			"account",
+			xdr.LedgerKey{Type: xdr.LedgerEntryTypeAccount, Account: &xdr.LedgerKeyAccount{AccountId: account}},
+			xdr.LedgerEntryTypeAccount,
+		},
+		{
+			"trustline",
+			xdr.LedgerKey{Type: xdr.LedgerEntryTypeTrustline, TrustLine: &xdr.LedgerKeyTrustLine{AccountId: account}},
+			xdr.LedgerEntryTypeTrustline,
+		},
+		{
+			"offer",
+			xdr.LedgerKey{Type: xdr.LedgerEntryTypeOffer, Offer: &xdr.LedgerKeyOffer{SellerId: account, OfferId: 1}},
+			xdr.LedgerEntryTypeOffer,
+		},
+		{
+			"data",
+			xdr.LedgerKey{Type: xdr.LedgerEntryTypeData, Data: &xdr.LedgerKeyData{AccountId: account, DataName: "name"}},
+			xdr.LedgerEntryTypeData,
+		},
+		{
+			"claimable balance",
+			xdr.LedgerKey{Type: xdr.LedgerEntryTypeClaimableBalance, ClaimableBalance: &xdr.LedgerKeyClaimableBalance{}},
+			xdr.LedgerEntryTypeClaimableBalance,
+		},
+	}
+
+	for _, tc := range keys {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			op := xdr.Operation{Body: xdr.OperationBody{
+				Type: xdr.OperationTypeRevokeSponsorship,
+				RevokeSponsorshipOp: &xdr.RevokeSponsorshipOp{
+					Type:      xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+					LedgerKey: &tc.key,
+				},
+			}}
+			tb := faketb.New()
+			if !focus.AssertRevokeSponsorship(tb, op,
+				xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+				func(actual xdr.RevokeSponsorshipOp) bool {
+					return actual.LedgerKey != nil && actual.LedgerKey.Type == tc.kind
+				}) {
+				t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+			}
+		})
+	}
+
+	t.Run("signer target and require helpers", func(t *testing.T) {
+		t.Parallel()
+		signerKey := xdr.MustSigner(testSource)
+		op := xdr.Operation{Body: xdr.OperationBody{
+			Type: xdr.OperationTypeRevokeSponsorship,
+			RevokeSponsorshipOp: &xdr.RevokeSponsorshipOp{
+				Type: xdr.RevokeSponsorshipTypeRevokeSponsorshipSigner,
+				Signer: &xdr.RevokeSponsorshipOpSigner{
+					AccountId: account,
+					SignerKey: signerKey,
+				},
+			},
+		}}
+		tb := faketb.New()
+		if !focus.AssertRevokeSignerSponsorship(tb, op, testDest, signerKey) {
+			t.Errorf("signer assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.RevokeSignerSponsorship(t, op, testDest, signerKey)
+
+		accountOp := xdr.Operation{Body: xdr.OperationBody{
+			Type: xdr.OperationTypeRevokeSponsorship,
+			RevokeSponsorshipOp: &xdr.RevokeSponsorshipOp{
+				Type:      xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+				LedgerKey: &keys[0].key,
+			},
+		}}
+		require.RevokeAccountSponsorship(t, accountOp, testDest)
+	})
+
+	t.Run("reports type and target mismatches", func(t *testing.T) {
+		t.Parallel()
+		op := xdr.Operation{Body: xdr.OperationBody{
+			Type: xdr.OperationTypeRevokeSponsorship,
+			RevokeSponsorshipOp: &xdr.RevokeSponsorshipOp{
+				Type:      xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+				LedgerKey: &keys[0].key,
+			},
+		}}
+		tb := faketb.New()
+		if focus.AssertRevokeSponsorship(tb, op,
+			xdr.RevokeSponsorshipTypeRevokeSponsorshipSigner, nil) {
+			t.Fatal("assertion passed for a different sponsorship type")
+		}
+		if !strings.Contains(tb.Output(), "REVOKE_SPONSORSHIP_LEDGER_ENTRY") ||
+			!strings.Contains(tb.Output(), "REVOKE_SPONSORSHIP_SIGNER") {
+			t.Errorf("message does not show expected and actual types:\n%s", tb.Output())
+		}
+
+		tb = faketb.New()
+		if focus.AssertRevokeSponsorship(tb, op,
+			xdr.RevokeSponsorshipTypeRevokeSponsorshipLedgerEntry,
+			func(xdr.RevokeSponsorshipOp) bool { return false }) {
+			t.Fatal("assertion passed for a mismatched revocation target")
+		}
+		if !strings.Contains(tb.Output(), "revocation target did not match") {
+			t.Errorf("message does not report the target mismatch:\n%s", tb.Output())
+		}
+	})
+}

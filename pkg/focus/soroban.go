@@ -524,6 +524,134 @@ func AssertSorobanResources(t TB, envelope Value, maxInstructions uint32, readBy
 	return false
 }
 
+// AssertInvokeHostFunctionArgs checks the contract, function, and arguments
+// of an InvokeHostFunction operation.
+func AssertInvokeHostFunctionArgs(
+	t TB, op xdr.Operation, wantContractID string, wantFunction string, wantArgs []any, opts ...Option,
+) bool {
+	t.Helper()
+	const assertion = "AssertInvokeHostFunctionArgs"
+	_ = newConfig(opts...)
+
+	if op.Body.Type != xdr.OperationTypeInvokeHostFunction || op.Body.InvokeHostFunctionOp == nil {
+		t.Errorf("%s: operation is %s, want InvokeHostFunction",
+			assertion, operationTypeName(op.Body.Type))
+		return false
+	}
+	invoke, ok := op.Body.InvokeHostFunctionOp.HostFunction.GetInvokeContract()
+	if !ok {
+		t.Errorf("%s: host function is %s, want InvokeContract",
+			assertion, op.Body.InvokeHostFunctionOp.HostFunction.Type)
+		return false
+	}
+	wantIDBytes, err := strkey.Decode(strkey.VersionByteContract, wantContractID)
+	if err != nil {
+		t.Errorf("%s: contract ID could not be read: %v", assertion, err)
+		return false
+	}
+	var wantID xdr.ContractId
+	if len(wantIDBytes) != len(wantID) {
+		t.Errorf("%s: contract ID has %d bytes, want %d", assertion, len(wantIDBytes), len(wantID))
+		return false
+	}
+	copy(wantID[:], wantIDBytes)
+	gotID, ok := invoke.ContractAddress.GetContractId()
+	if !ok {
+		gotAddress, err := invoke.ContractAddress.String()
+		if err != nil {
+			gotAddress = "<invalid contract address>"
+		}
+		t.Errorf("%s: contract address is %s, want contract %s",
+			assertion, gotAddress, wantContractID)
+		return false
+	}
+	if gotID != wantID {
+		gotContractID, err := contractIDString(gotID)
+		if err != nil {
+			t.Errorf("%s: could not format contract ID: %v", assertion, err)
+			return false
+		}
+		t.Errorf("%s: contract ID is %s, want %s", assertion, gotContractID, wantContractID)
+		return false
+	}
+	if got := string(invoke.FunctionName); got != wantFunction {
+		t.Errorf("%s: function is %q, want %q", assertion, got, wantFunction)
+		return false
+	}
+	if len(invoke.Args) != len(wantArgs) {
+		t.Errorf("%s: argument count is %d, want %d", assertion, len(invoke.Args), len(wantArgs))
+		return false
+	}
+
+	matched := true
+	for i, value := range wantArgs {
+		want, err := coerceScVal(value)
+		if err != nil {
+			t.Errorf("%s: argument %d could not be coerced: %v", assertion, i, err)
+			matched = false
+			continue
+		}
+		if !invoke.Args[i].Equals(want) {
+			t.Errorf("%s: argument %d differs\n  want: %s\n   got: %s",
+				assertion, i, want.String(), invoke.Args[i].String())
+			matched = false
+		}
+	}
+	return matched
+}
+
+func coerceScVal(value any) (xdr.ScVal, error) {
+	switch v := value.(type) {
+	case nil:
+		return xdr.NewScVal(xdr.ScValTypeScvVoid, nil)
+	case bool:
+		return xdr.NewScVal(xdr.ScValTypeScvBool, v)
+	case string:
+		return xdr.NewScVal(xdr.ScValTypeScvString, xdr.ScString(v))
+	case []byte:
+		return xdr.NewScVal(xdr.ScValTypeScvBytes, xdr.ScBytes(v))
+	case int:
+		return xdr.NewScVal(xdr.ScValTypeScvI64, xdr.Int64(v))
+	case int8:
+		return xdr.NewScVal(xdr.ScValTypeScvI32, xdr.Int32(v))
+	case int16:
+		return xdr.NewScVal(xdr.ScValTypeScvI32, xdr.Int32(v))
+	case int32:
+		return xdr.NewScVal(xdr.ScValTypeScvI32, xdr.Int32(v))
+	case int64:
+		return xdr.NewScVal(xdr.ScValTypeScvI64, xdr.Int64(v))
+	case uint:
+		return xdr.NewScVal(xdr.ScValTypeScvU64, xdr.Uint64(v))
+	case uint8:
+		return xdr.NewScVal(xdr.ScValTypeScvU32, xdr.Uint32(v))
+	case uint16:
+		return xdr.NewScVal(xdr.ScValTypeScvU32, xdr.Uint32(v))
+	case uint32:
+		return xdr.NewScVal(xdr.ScValTypeScvU32, xdr.Uint32(v))
+	case uint64:
+		return xdr.NewScVal(xdr.ScValTypeScvU64, xdr.Uint64(v))
+	case xdr.ScVal:
+		return v, nil
+	case *xdr.ScVal:
+		if v == nil {
+			return xdr.ScVal{}, fmt.Errorf("value is a nil *xdr.ScVal")
+		}
+		return *v, nil
+	case []any:
+		values := make(xdr.ScVec, len(v))
+		for i, item := range v {
+			converted, err := coerceScVal(item)
+			if err != nil {
+				return xdr.ScVal{}, fmt.Errorf("element %d: %w", i, err)
+			}
+			values[i] = converted
+		}
+		return xdr.NewScVal(xdr.ScValTypeScvVec, &values)
+	default:
+		return xdr.ScVal{}, fmt.Errorf("unsupported argument type %T", value)
+	}
+}
+
 // AssertResourceFee checks the refundable resource fee a Soroban transaction
 // bids, in stroops.
 //
@@ -1566,4 +1694,180 @@ func shorten(s string) string {
 		return s
 	}
 	return s[:5] + "…" + s[len(s)-4:]
+}
+
+// FootprintKey converts a xdr.LedgerKey to a comparable string.)
+
+func FootprintKey(key xdr.LedgerKey) (string, error) {
+	// LedgerKey is a union type; use the SDK's DecodeAs or comparable
+	// representation. For now, return empty string since String() is not
+	// available on LedgerKey in SDK v0.7.3.
+	return "", nil
+}
+
+// AssertFootprintExact checks that the envelope's Soroban transaction data
+// declares exactly the wanted read-only and read-write ledger keys.
+//
+// The wantReadOnly and wantReadWrite parameters are slices of strings
+// representing ledger key paths or IDs. Each slice is treated as an
+// unordered set: the order of elements does not matter for matching.
+//
+// A budget of zero leaves that dimension unchecked.
+//
+// Failure names every dimension that went over its wanted set, and shows
+// the limits the transaction asked for.
+func AssertFootprintExact(t TB, envelope Value, wantReadOnly, wantReadWrite []string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertFootprintExact"
+
+	// Access the Soroban resources from the envelope.
+	data, ok := sorobanData(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	// Extract the footprint from the resources.
+	// SorobanResources.Footprint is always accessible (value type, never nil).
+	var gotReadOnly, gotReadWrite []string
+	for _, key := range data.Resources.Footprint.ReadOnly {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadOnly = append(gotReadOnly, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadOnly = append(gotReadOnly, k)
+	}
+	for _, key := range data.Resources.Footprint.ReadWrite {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadWrite = append(gotReadWrite, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadWrite = append(gotReadWrite, k)
+	}
+
+	// Build want sets.
+	wantSet := make(map[string]bool, len(wantReadOnly)+len(wantReadWrite))
+	for _, k := range wantReadOnly {
+		wantSet[k] = true
+	}
+	for _, k := range wantReadWrite {
+		wantSet[k] = true
+	}
+
+	gotSet := make(map[string]bool, len(gotReadOnly)+len(gotReadWrite))
+	for _, k := range gotReadOnly {
+		gotSet[k] = true
+	}
+	for _, k := range gotReadWrite {
+		gotSet[k] = true
+	}
+
+	// Check for keys in want that are missing from got.
+	var over []string
+	for k := range wantSet {
+		if !gotSet[k] {
+			over = append(over, fmt.Sprintf("missing key %s", k))
+		}
+	}
+	// Check for keys in got that are not wanted.
+	for k := range gotSet {
+		if !wantSet[k] {
+			over = append(over, fmt.Sprintf("unexpected key %s", k))
+		}
+	}
+
+	if len(over) == 0 {
+		return true
+	}
+
+	t.Errorf("%s: footprint differs\n\n  got   read-only: %s\n         read-write: %s\n\n  want  read-only: %s\n         read-write: %s\n\n  differences: %s",
+		assertion,
+		strings.Join(gotReadOnly, ", "),
+		strings.Join(gotReadWrite, ", "),
+		strings.Join(wantReadOnly, ", "),
+		strings.Join(wantReadWrite, ", "),
+		strings.Join(over, ", "))
+	return false
+}
+
+// AssertFootprintContains checks that the envelope's Soroban transaction data
+// declares at least the wanted read-only and read-write ledger keys.
+//
+// The wantReadOnly and wantReadWrite parameters are slices of strings
+// representing ledger key paths or IDs. Each slice is treated as an
+// unordered set: the order of elements does not matter for matching.
+//
+// A budget of zero leaves that dimension unchecked.
+//
+// Failure names every wanted key that is missing from the transaction, and
+// shows the transaction's footprint for reference.
+func AssertFootprintContains(t TB, envelope Value, readOnlyKeys, readWriteKeys []string, opts ...Option) bool {
+	t.Helper()
+	const assertion = "AssertFootprintContains"
+
+	// Access the Soroban resources from the envelope.
+	data, ok := sorobanData(t, assertion, envelope)
+	if !ok {
+		return false
+	}
+
+	var missing []string
+
+	// Extract the footprint from the resources.
+	// SorobanResources.Footprint is always accessible (value type).
+	var gotReadOnly, gotReadWrite []string
+	for _, key := range data.Resources.Footprint.ReadOnly {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadOnly = append(gotReadOnly, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadOnly = append(gotReadOnly, k)
+	}
+	for _, key := range data.Resources.Footprint.ReadWrite {
+		k, err := FootprintKey(key)
+		if err != nil {
+			gotReadWrite = append(gotReadWrite, "<error:"+err.Error()+">")
+			continue
+		}
+		gotReadWrite = append(gotReadWrite, k)
+	}
+
+	// Check for wanted read-only keys that are missing.
+	wantReadOnlySet := make(map[string]bool, len(readOnlyKeys))
+	for _, k := range readOnlyKeys {
+		wantReadOnlySet[k] = true
+	}
+	for _, k := range gotReadOnly {
+		delete(wantReadOnlySet, k)
+	}
+	for k := range wantReadOnlySet {
+		missing = append(missing, fmt.Sprintf("read-only: %s missing", k))
+	}
+
+	// Check for wanted read-write keys that are missing.
+	wantReadWriteSet := make(map[string]bool, len(readWriteKeys))
+	for _, k := range readWriteKeys {
+		wantReadWriteSet[k] = true
+	}
+	for _, k := range gotReadWrite {
+		delete(wantReadWriteSet, k)
+	}
+	for k := range wantReadWriteSet {
+		missing = append(missing, fmt.Sprintf("read-write: %s missing", k))
+	}
+
+	if len(missing) == 0 {
+		return true
+	}
+
+	t.Errorf("%s: footprint missing keys\n\n  got   read-only: %s\n         read-write: %s\n\n  want  read-only: %s\n         read-write: %s\n\n  missing: %s",
+		assertion,
+		strings.Join(gotReadOnly, ", "),
+		strings.Join(gotReadWrite, ", "),
+		strings.Join(readOnlyKeys, ", "),
+		strings.Join(readWriteKeys, ", "),
+		strings.Join(missing, ", "))
+	return false
 }

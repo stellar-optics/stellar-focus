@@ -12,12 +12,15 @@ import (
 // AssertOperationSequence checks that the transaction's operations are exactly
 // the wanted types, in order.
 //
+// See docs/cookbook/multi_operation_pipelines.md for transaction pipeline
+// examples.
+//
 // Order is the point: a multi-operation transaction executes its operations in
 // XDR order, and a batch that is otherwise identical can behave completely
 // differently when two operations are swapped — a payment before a change of
 // trust can fail where the reverse succeeds. The assertion is therefore
-// sensitive to sequence as well as membership, unlike AssertOperationCount and
-// AssertOperationTypes, which compare sets of names.
+// sensitive to sequence as well as membership, unlike AssertOperationCount,
+// which checks only the length, or AssertOperationType, which checks one index.
 //
 // The wanted types are xdr.OperationType values, so the compiler checks them:
 //

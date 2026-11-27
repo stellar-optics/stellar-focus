@@ -50,6 +50,9 @@ type BundleMember struct {
 }
 
 // Bundle is the manifest of a coordinated multi-transaction capture.
+//
+// See docs/guides/multi_transaction_bundles.md for the manifest and the
+// library capture and verification workflow.
 type Bundle struct {
 	// Format identifies the layout version.
 	Format string `json:"format"`

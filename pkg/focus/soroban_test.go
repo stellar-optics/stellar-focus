@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	rpcproto "github.com/stellar/go-stellar-sdk/protocols/rpc"
+	"github.com/stellar/go-stellar-sdk/strkey"
 	"github.com/stellar/go-stellar-sdk/xdr"
 
 	"github.com/stellar-optics/stellar-focus/internal/faketb"
@@ -367,6 +368,99 @@ func TestAssertSorobanResources(t *testing.T) {
 		msg, _ := tb.Message()
 		if !strings.Contains(msg, "no Soroban data") {
 			t.Errorf("the message does not explain the mistake:\n%s", msg)
+		}
+	})
+}
+
+func TestAssertInvokeHostFunctionArgs(t *testing.T) {
+	t.Parallel()
+
+	var contractID xdr.ContractId
+	for i := range contractID {
+		contractID[i] = byte(i + 1)
+	}
+	contractAddress := strkey.MustEncode(strkey.VersionByteContract, contractID[:])
+	makeOperation := func(t *testing.T, args ...xdr.ScVal) xdr.Operation {
+		t.Helper()
+		return xdr.Operation{Body: xdr.OperationBody{
+			Type: xdr.OperationTypeInvokeHostFunction,
+			InvokeHostFunctionOp: &xdr.InvokeHostFunctionOp{HostFunction: xdr.HostFunction{
+				Type: xdr.HostFunctionTypeHostFunctionTypeInvokeContract,
+				InvokeContract: &xdr.InvokeContractArgs{
+					ContractAddress: xdr.ScAddress{
+						Type:       xdr.ScAddressTypeScAddressTypeContract,
+						ContractId: &contractID,
+					},
+					FunctionName: "run",
+					Args:         args,
+				},
+			}},
+		}}
+	}
+	makeValues := func(t *testing.T) []xdr.ScVal {
+		t.Helper()
+		values := make([]xdr.ScVal, 4)
+		var err error
+		values[0], err = xdr.NewScVal(xdr.ScValTypeScvU64, xdr.Uint64(17))
+		if err != nil {
+			t.Fatal(err)
+		}
+		values[1], err = xdr.NewScVal(xdr.ScValTypeScvString, xdr.ScString("hello"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		values[2], err = xdr.NewScVal(xdr.ScValTypeScvBytes, xdr.ScBytes{1, 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		values[3], err = xdr.NewScVal(xdr.ScValTypeScvBool, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return values
+	}
+
+	t.Run("coerces Go argument types", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		op := makeOperation(t, makeValues(t)...)
+		want := []any{uint64(17), "hello", []byte{1, 2}, true}
+		if !focus.AssertInvokeHostFunctionArgs(tb, op, contractAddress, "run", want) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+		require.InvokeHostFunctionArgs(t, op, contractAddress, "run", want)
+	})
+
+	t.Run("reports contract and function mismatches", func(t *testing.T) {
+		t.Parallel()
+		op := makeOperation(t, makeValues(t)...)
+		for _, tc := range []struct {
+			contract, function, message string
+		}{
+			{strkey.MustEncode(strkey.VersionByteContract, make([]byte, len(contractID))), "run", "contract ID is"},
+			{contractAddress, "other", `function is "run", want "other"`},
+		} {
+			tb := faketb.New()
+			if focus.AssertInvokeHostFunctionArgs(tb, op, tc.contract, tc.function, []any{uint64(17), "hello", []byte{1, 2}, true}) {
+				t.Fatal("assertion passed for a mismatch")
+			}
+			if !strings.Contains(tb.Output(), tc.message) {
+				t.Errorf("message does not contain %q:\n%s", tc.message, tb.Output())
+			}
+		}
+	})
+
+	t.Run("reports the mismatched argument index and values", func(t *testing.T) {
+		t.Parallel()
+		tb := faketb.New()
+		op := makeOperation(t, makeValues(t)...)
+		if focus.AssertInvokeHostFunctionArgs(tb, op, contractAddress, "run", []any{uint64(17), "hello", []byte{9}, true}) {
+			t.Fatal("assertion passed with a mismatched argument")
+		}
+		for _, want := range []string{"argument 2 differs", "want:", "got:"} {
+			if !strings.Contains(tb.Output(), want) {
+				t.Errorf("message does not contain %q:\n%s", want, tb.Output())
+			}
 		}
 	})
 }
