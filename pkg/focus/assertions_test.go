@@ -871,6 +871,7 @@ func TestAssertionsNeverPanic(t *testing.T) {
 		focus.AssertLiquidityPoolWithdrawal(tb, v, v, focus.PoolChange{ReserveA: 1, ReserveB: 1, Shares: 1})
 		focus.AssertOfferCreated(tb, v, focus.Offer{Seller: v, Selling: v, Buying: v, Price: v})
 		focus.AssertTradeExecuted(tb, v, focus.Trade{Seller: v, Pool: v, Sold: v, Bought: v})
+		focus.AssertTradeVolume(tb, v, testSource, "native", "native", 1, 1)
 		focus.AssertSignersEqual(tb, v, v, nil)
 		focus.AssertThresholdsEqual(tb, v, v, focus.Thresholds{})
 		focus.AssertTimeboundsValid(tb, v, 0, 0)

@@ -259,6 +259,150 @@ func AssertTradeExecuted(t TB, value Value, want Trade) bool {
 	return false
 }
 
+// AssertTradeVolume checks the total amount a seller's offers settled for in
+// one transaction.
+//
+// AssertTradeExecuted answers whether *a* match happened, with the assets and
+// both amounts of a single claim atom. This answers how much happened: it
+// sums every claim atom the seller matched, across all successful operations,
+// and compares the totals with the expected volume. It is the assertion for a
+// taker that filled several of one maker's offers, where asserting each atom
+// separately says nothing about the transaction's total.
+//
+// resultInput must be a transaction result. A claim atom is the protocol's own
+// record of a match, carrying both halves, while a transaction meta records
+// only the offers that changed and not what they were paid, so a meta cannot
+// establish a settled volume and is reported as the wrong input rather than
+// totalled misleadingly. Trades against a liquidity pool have no seller, so
+// they are not part of any seller's volume.
+//
+// The amounts are from the matched offers' point of view, the way the protocol
+// records them: soldAsset is what the seller's offers gave up and boughtAsset
+// what they received. A zero expected amount is checked like any other, so a
+// caller that means any volume should use AssertTradeExecuted.
+func AssertTradeVolume(
+	t TestingT,
+	resultInput any,
+	sellerAccount string,
+	soldAsset, boughtAsset string,
+	wantSoldAmount, wantBoughtAmount int64,
+	opts ...Option,
+) bool {
+	t.Helper()
+	cfg := newConfig(opts...)
+	assertion := cfg.assertionName("AssertTradeVolume")
+
+	if sellerAccount == "" {
+		t.Errorf("%s: sellerAccount is empty; pass the account whose offers were matched",
+			assertion)
+		return false
+	}
+	if wantSoldAmount < 0 || wantBoughtAmount < 0 {
+		t.Errorf("%s: expected amounts cannot be negative: want %d sold and %d bought",
+			assertion, wantSoldAmount, wantBoughtAmount)
+		return false
+	}
+
+	seller, ok := resolveAccount(t, assertion, "sellerAccount", sellerAccount)
+	if !ok {
+		return false
+	}
+	sold, ok := resolveAsset(t, assertion, "soldAsset", soldAsset)
+	if !ok {
+		return false
+	}
+	bought, ok := resolveAsset(t, assertion, "boughtAsset", boughtAsset)
+	if !ok {
+		return false
+	}
+
+	trades, source, ok := tradesFrom(t, assertion, resultInput)
+	if !ok {
+		return false
+	}
+	if source != tradeSourceResult {
+		t.Errorf("%s: a transaction meta records the offers that changed, not what they "+
+			"were paid, so a settled volume cannot be totalled from one; "+
+			"pass the transaction result, whose claim atoms carry both amounts",
+			assertion)
+		return false
+	}
+
+	var (
+		matched     []tradeMatch
+		totalSold   int64
+		totalBought int64
+	)
+	for _, tr := range trades {
+		if tr.seller != seller || tr.sold != sold.id || tr.bought != bought.id {
+			continue
+		}
+		matched = append(matched, tr)
+		totalSold += tr.amountSold
+		totalBought += tr.amountBought
+	}
+
+	if len(matched) == 0 {
+		t.Errorf("%s: no claim atom in this transaction result matched account %s "+
+			"selling %s for %s; want a total of %s sold and %s bought\n\n%s",
+			assertion, shorten(seller), sold.id, bought.id,
+			amountStroops(xdr.Int64(wantSoldAmount), ""),
+			amountStroops(xdr.Int64(wantBoughtAmount), ""),
+			indent(describeTrades(trades)))
+		return false
+	}
+
+	if totalSold == wantSoldAmount && totalBought == wantBoughtAmount {
+		return true
+	}
+
+	diffs := make([]string, 0, 2)
+	if totalSold != wantSoldAmount {
+		diffs = append(diffs, fmt.Sprintf("~ sold total is %s %s, want %s %s",
+			amountStroops(xdr.Int64(totalSold), ""), sold.id,
+			amountStroops(xdr.Int64(wantSoldAmount), ""), sold.id))
+	}
+	if totalBought != wantBoughtAmount {
+		diffs = append(diffs, fmt.Sprintf("~ bought total is %s %s, want %s %s",
+			amountStroops(xdr.Int64(totalBought), ""), bought.id,
+			amountStroops(xdr.Int64(wantBoughtAmount), ""), bought.id))
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: the offers of account %s settled the wrong totals — %s\n\n",
+		assertion, shorten(seller), pluralChanges(len(diffs)))
+	for _, d := range diffs {
+		fmt.Fprintf(&b, "  %s\n", d)
+	}
+	b.WriteString("\n")
+	b.WriteString(indent(describeTradeVolume(matched, totalSold, totalBought, sold.id, bought.id)))
+	t.Errorf("%s", b.String())
+	return false
+}
+
+// describeTradeVolume lists the claim atoms a volume total was built from, so
+// a failure shows both the per-match amounts and the total they produced.
+func describeTradeVolume(matched []tradeMatch, totalSold, totalBought int64, sold, bought string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "claim atoms totalled (%d) selling %s for %s:\n", len(matched), sold, bought)
+	for i, tr := range matched {
+		fmt.Fprintf(&b, "  [%d] account %s", i, shorten(tr.seller))
+		if tr.offerID != 0 {
+			fmt.Fprintf(&b, " offer #%d", tr.offerID)
+		}
+		if tr.opIndex >= 0 {
+			fmt.Fprintf(&b, " (operation %d)", tr.opIndex)
+		}
+		fmt.Fprintf(&b, " sold %s for %s\n",
+			amountStroops(xdr.Int64(tr.amountSold), ""),
+			amountStroops(xdr.Int64(tr.amountBought), ""))
+	}
+	fmt.Fprintf(&b, "  total sold %s, bought %s",
+		amountStroops(xdr.Int64(totalSold), ""),
+		amountStroops(xdr.Int64(totalBought), ""))
+	return b.String()
+}
+
 // offerQuery is a resolved Offer: every field reduced to the canonical form a
 // sanitised entry carries, so matching is comparison rather than coercion.
 type offerQuery struct {
