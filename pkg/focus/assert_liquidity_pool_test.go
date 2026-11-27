@@ -11,13 +11,15 @@ import (
 	"github.com/stellar-optics/stellar-focus/pkg/focus/require"
 )
 
-func withdrawOp(id xdr.PoolId, shares, minA, minB int64) xdr.Operation {
+// withdrawOp builds a LiquidityPoolWithdrawOp operation for pool id of 70
+// shares (the only value these tests ever need) and the given minimums.
+func withdrawOp(id xdr.PoolId, minA, minB int64) xdr.Operation {
 	return xdr.Operation{
 		Body: xdr.OperationBody{
 			Type: xdr.OperationTypeLiquidityPoolWithdraw,
 			LiquidityPoolWithdrawOp: &xdr.LiquidityPoolWithdrawOp{
 				LiquidityPoolId: id,
-				Amount:          xdr.Int64(shares),
+				Amount:          70,
 				MinAmountA:      xdr.Int64(minA),
 				MinAmountB:      xdr.Int64(minB),
 			},
@@ -29,7 +31,7 @@ func TestAssertLiquidityPoolWithdraw(t *testing.T) {
 	t.Parallel()
 
 	id := poolIDValue(0x7a)
-	op := withdrawOp(id, 70, 100, 200)
+	op := withdrawOp(id, 100, 200)
 
 	tb := faketb.New()
 	if !focus.AssertLiquidityPoolWithdraw(tb, op, id, 70, 100, 200) {
@@ -55,7 +57,7 @@ func TestAssertLiquidityPoolWithdrawWrongOperationType(t *testing.T) {
 func TestAssertLiquidityPoolWithdrawWrongPool(t *testing.T) {
 	t.Parallel()
 
-	op := withdrawOp(poolIDValue(0x7a), 70, 100, 200)
+	op := withdrawOp(poolIDValue(0x7a), 100, 200)
 
 	tb := faketb.New()
 	if focus.AssertLiquidityPoolWithdraw(tb, op, poolIDValue(0x7b), 70, 100, 200) {
@@ -70,7 +72,7 @@ func TestAssertLiquidityPoolWithdrawMismatchedAmounts(t *testing.T) {
 	t.Parallel()
 
 	id := poolIDValue(0x7a)
-	op := withdrawOp(id, 70, 100, 200)
+	op := withdrawOp(id, 100, 200)
 
 	tests := []struct {
 		name               string
@@ -100,7 +102,7 @@ func TestRequireLiquidityPoolWithdraw(t *testing.T) {
 	t.Parallel()
 
 	id := poolIDValue(0x7a)
-	op := withdrawOp(id, 70, 100, 200)
+	op := withdrawOp(id, 100, 200)
 
 	tb := faketb.New()
 	require.LiquidityPoolWithdraw(tb, op, id, 70, 100, 200)
