@@ -780,6 +780,20 @@ func TradeExecuted(t focus.TB, value focus.Value, want focus.Trade) {
 	focus.AssertTradeExecuted(fatal(t), value, want)
 }
 
+// TradeVolume is focus.AssertTradeVolume, stopping the test on failure.
+func TradeVolume(
+	t focus.TestingT,
+	resultInput any,
+	sellerAccount string,
+	soldAsset, boughtAsset string,
+	wantSoldAmount, wantBoughtAmount int64,
+	opts ...focus.Option,
+) {
+	t.Helper()
+	focus.AssertTradeVolume(fatal(t), resultInput, sellerAccount, soldAsset, boughtAsset,
+		wantSoldAmount, wantBoughtAmount, opts...)
+}
+
 // Snapshot is focus.AssertSnapshot, stopping the test on failure.
 func Snapshot(t focus.TB, name, got string, opts ...focus.SnapshotOption) {
 	t.Helper()

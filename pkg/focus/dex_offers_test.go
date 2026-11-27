@@ -679,6 +679,318 @@ func TestAssertTradeExecutedFailureMessages(t *testing.T) {
 	})
 }
 
+func TestAssertTradeVolume(t *testing.T) {
+	t.Parallel()
+
+	usdc := mustCreditAsset(t, "USDC")
+	eur := mustCreditAsset(t, "EUR")
+	claim := func(seller string, offerID, sold, bought int64) xdr.ClaimAtom {
+		return orderBookClaim(t, seller, offerID, usdc, sold, nativeAsset(), bought)
+	}
+	result := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+		manageSellOfferResult(
+			claim(testDest, 1, 1000, 500),
+			claim(testDest, 2, 400, 200),
+		),
+		manageSellOfferResult(claim(testDest, 3, 100, 50)),
+	)
+
+	t.Run("totals the claims across every operation", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, result, testDest, usdcAsset, "native", 1500, 750) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("leaves out another seller's claims", func(t *testing.T) {
+		t.Parallel()
+
+		mixed := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+			manageSellOfferResult(
+				claim(testDest, 1, 1000, 500),
+				claim(testSource, 2, 900, 450),
+			))
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, mixed, testDest, usdcAsset, "native", 1000, 500) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("leaves out a different asset pair", func(t *testing.T) {
+		t.Parallel()
+
+		mixed := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+			manageSellOfferResult(
+				claim(testDest, 1, 1000, 500),
+				orderBookClaim(t, testDest, 2, eur, 900, nativeAsset(), 450),
+			))
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, mixed, testDest, usdcAsset, "native", 1000, 500) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("a pre-protocol-11 claim atom counts", func(t *testing.T) {
+		t.Parallel()
+
+		aid := mustAccountID(t, testDest)
+		if aid.Ed25519 == nil {
+			t.Fatal("the test account has no ed25519 key")
+		}
+		mixed := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+			manageSellOfferResult(
+				claim(testDest, 1, 1000, 500),
+				xdr.ClaimAtom{
+					Type: xdr.ClaimAtomTypeClaimAtomTypeV0,
+					V0: &xdr.ClaimOfferAtomV0{
+						SellerEd25519: *aid.Ed25519,
+						OfferId:       2,
+						AssetSold:     usdc,
+						AmountSold:    400,
+						AssetBought:   nativeAsset(),
+						AmountBought:  200,
+					},
+				},
+			))
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, mixed, testDest, usdcAsset, "native", 1400, 700) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("a pool claim belongs to no seller", func(t *testing.T) {
+		t.Parallel()
+
+		mixed := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+			manageSellOfferResult(
+				claim(testDest, 1, 1000, 500),
+				poolClaim(poolIDValue(0x7a), usdc, 900, nativeAsset(), 450),
+			))
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, mixed, testDest, usdcAsset, "native", 1000, 500) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("accepts a decoded result value", func(t *testing.T) {
+		t.Parallel()
+
+		decoded := decodedResult(
+			manageSellOfferResult(claim(testDest, 1, 1000, 500), claim(testDest, 2, 400, 200)),
+		)
+
+		tb := faketb.New()
+		if !focus.AssertTradeVolume(tb, decoded, testDest, usdcAsset, "native", 1400, 700) {
+			t.Errorf("assertion failed unexpectedly:\n%s", tb.Output())
+		}
+	})
+
+	t.Run("the require mirror stops the test on a mismatch", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		require.TradeVolume(tb, result, testDest, usdcAsset, "native", 1500, 750)
+		if tb.FatalCount() != 0 {
+			t.Errorf("require mirror failed a matching volume:\n%s", tb.Output())
+		}
+
+		tb = faketb.New()
+		require.TradeVolume(tb, result, testDest, usdcAsset, "native", 1400, 700)
+		if tb.FatalCount() != 1 {
+			t.Errorf("require mirror reported %d fatals, want 1:\n%s", tb.FatalCount(), tb.Output())
+		}
+	})
+}
+
+func TestAssertTradeVolumeFailureMessages(t *testing.T) {
+	t.Parallel()
+
+	usdc := mustCreditAsset(t, "USDC")
+	claim := func(seller string, offerID, sold, bought int64) xdr.ClaimAtom {
+		return orderBookClaim(t, seller, offerID, usdc, sold, nativeAsset(), bought)
+	}
+	result := buildResult(t, xdr.TransactionResultCodeTxSuccess,
+		manageSellOfferResult(
+			claim(testDest, 1, 1000, 500),
+			claim(testDest, 2, 400, 200),
+		),
+		manageSellOfferResult(claim(testDest, 3, 100, 50)),
+	)
+
+	t.Run("a total that deviates names both totals and the claims", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb, result, testDest, usdcAsset, "native", 1400, 700) {
+			t.Fatal("assertion passed with the wrong totals")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		for _, want := range []string{
+			"AssertTradeVolume: the offers of account GAPB7…WYXZ settled the wrong totals — 2 differences",
+			"~ sold total is 1500 (0.0001500) " + usdcAsset + ", want 1400 (0.0001400) " + usdcAsset,
+			"~ bought total is 750 (0.0000750) native, want 700 (0.0000700) native",
+			"claim atoms totalled (3) selling " + usdcAsset + " for native:",
+			"[0] account GAPB7…WYXZ offer #1 (operation 0) sold 1000 (0.0001000) for 500 (0.0000500)",
+			"[2] account GAPB7…WYXZ offer #3 (operation 1) sold 100 (0.0000100) for 50 (0.0000050)",
+			"total sold 1500 (0.0001500), bought 750 (0.0000750)",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("one deviating total names only that total", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb, result, testDest, usdcAsset, "native", 1500, 700) {
+			t.Fatal("assertion passed with the wrong bought total")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if !strings.Contains(msg, "— 1 difference") {
+			t.Errorf("message does not count the single difference:\n%s", msg)
+		}
+		if !strings.Contains(msg, "~ bought total is 750 (0.0000750) native, want 700 (0.0000700) native") {
+			t.Errorf("message does not name the bought total:\n%s", msg)
+		}
+		if strings.Contains(msg, "~ sold total") {
+			t.Errorf("message names a total that matched:\n%s", msg)
+		}
+	})
+
+	t.Run("no matching claim lists the trades recorded", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb, result, testSource, usdcAsset, "native", 1500, 750) {
+			t.Fatal("assertion passed for a seller with no claims")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		for _, want := range []string{
+			"no claim atom in this transaction result matched account GCJNH…ZST6 selling " +
+				usdcAsset + " for native; want a total of 1500 (0.0001500) sold and 750 (0.0000750) bought",
+			"trades recorded (3):",
+			"[0] account GAPB7…WYXZ offer #1 (operation 0) sold 1000 (0.0001000)",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("a result with no claim atoms says so", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb,
+			buildResult(t, xdr.TransactionResultCodeTxSuccess,
+				paymentResult(xdr.PaymentResultCodePaymentSuccess)),
+			testDest, usdcAsset, "native", 1000, 500) {
+			t.Fatal("assertion passed with no claim atoms in the result")
+		}
+		if msg := tb.Output(); !strings.Contains(msg, "no trade was recorded") {
+			t.Errorf("message does not report the absence of a trade:\n%s", msg)
+		}
+	})
+
+	t.Run("a meta cannot establish a settled volume", func(t *testing.T) {
+		t.Parallel()
+
+		before := offerEntryValue(t, testDest, 99, usdc, nativeAsset(), 1000, priceValue(1, 2))
+		after := offerEntryValue(t, testDest, 99, usdc, nativeAsset(), 400, priceValue(1, 2))
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb,
+			metaV2(t, []xdr.LedgerEntryChange{stateChange(before), updatedChange(after)}),
+			testDest, usdcAsset, "native", 600, 300) {
+			t.Fatal("assertion passed on a meta")
+		}
+		msg, err := tb.Message()
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		for _, want := range []string{
+			"a transaction meta records the offers that changed, not what they were paid",
+			"a settled volume cannot be totalled from one",
+			"pass the transaction result, whose claim atoms carry both amounts",
+		} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("message does not contain %q:\n%s", want, msg)
+			}
+		}
+	})
+
+	t.Run("unreadable inputs are reported", func(t *testing.T) {
+		t.Parallel()
+
+		cases := []struct {
+			name       string
+			value      focus.Value
+			seller     string
+			sold       string
+			bought     string
+			wantSold   int64
+			wantBought int64
+			text       string
+		}{
+			{"seller", result, "nope", usdcAsset, "native", 1, 1,
+				"sellerAccount could not be read as an account"},
+			{"sold asset", result, testDest, "nope", "native", 1, 1,
+				"soldAsset could not be read as an asset"},
+			{"bought asset", result, testDest, usdcAsset, "nope", 1, 1,
+				"boughtAsset could not be read as an asset"},
+			{"empty seller", result, "", usdcAsset, "native", 1, 1,
+				"sellerAccount is empty"},
+			{"negative sold amount", result, testDest, usdcAsset, "native", -1, 1,
+				"expected amounts cannot be negative"},
+			{"negative bought amount", result, testDest, usdcAsset, "native", 1, -1,
+				"expected amounts cannot be negative"},
+			{"nil result", (*xdr.TransactionResult)(nil), testDest, usdcAsset, "native", 1, 1,
+				"nil *xdr.TransactionResult"},
+			{"an envelope", buildEnvelope(t, paymentOp(t, 1)), testDest, usdcAsset, "native", 1, 1,
+				"want a TransactionResult or a TransactionMeta"},
+		}
+		for _, tc := range cases {
+			tb := faketb.New()
+			if focus.AssertTradeVolume(tb, tc.value, tc.seller, tc.sold, tc.bought,
+				tc.wantSold, tc.wantBought) {
+				t.Fatalf("%s: assertion passed with an unreadable input", tc.name)
+			}
+			if msg := tb.Output(); !strings.Contains(msg, tc.text) {
+				t.Errorf("%s: message does not contain %q:\n%s", tc.name, tc.text, msg)
+			}
+		}
+	})
+
+	t.Run("the label option names the scenario", func(t *testing.T) {
+		t.Parallel()
+
+		tb := faketb.New()
+		if focus.AssertTradeVolume(tb, result, testDest, usdcAsset, "native", 1, 1,
+			focus.WithLabel("step 1")) {
+			t.Fatal("assertion passed with the wrong totals")
+		}
+		if msg := tb.Output(); !strings.Contains(msg, "AssertTradeVolume [step 1]:") {
+			t.Errorf("message does not carry the label:\n%s", msg)
+		}
+	})
+}
+
 // TestDexEdgeCases covers the claim atom and price forms the main tests do
 // not reach.
 func TestDexEdgeCases(t *testing.T) {
