@@ -114,6 +114,9 @@ type Golden struct {
 	// diffContext is how many unchanged sibling fields a failure diff shows
 	// around each difference. nil means the focus default.
 	diffContext *int
+	// normalizers run over the decoded value tree before it is compared or
+	// written to a golden file. See WithCustomNormalizer.
+	normalizers []NormalizerFunc
 }
 
 // Opt configures a Golden.
@@ -291,6 +294,14 @@ func (g *Golden) assert(
 		typeName = want.Type
 	}
 
+	// A custom normalizer redacts or transforms parts of the decoded tree
+	// (an ephemeral salt, a user id) that should never be XDR-equal across
+	// runs, so the comparison itself has to move onto the normalized
+	// decoded tree instead of the raw XDR for this call.
+	if len(g.normalizers) > 0 {
+		return g.assertNormalized(tb, path, want, actual, typeName)
+	}
+
 	// The comparison is against the stored XDR, never the decoded rendering:
 	// the decoded form exists for humans reading diffs, and treating it as
 	// authoritative would make the assertion depend on lens's formatting.
@@ -304,6 +315,53 @@ func (g *Golden) assert(
 		g.maybeStreamDiff(tb, path, want.XDR, actual, typeName)
 	}
 	return ok
+}
+
+// assertNormalized compares want and actual on their normalized decoded
+// trees rather than on XDR equality, for a Golden configured with one or
+// more WithCustomNormalizer options. See normalize.go.
+func (g *Golden) assertNormalized(tb focus.TB, path string, want *Fixture, actual focus.Value, typeName string) bool {
+	g.t.Helper()
+	tb.Helper()
+
+	var wantTree any
+	if err := json.Unmarshal(want.Decoded, &wantTree); err != nil {
+		tb.Errorf("golden: decoding stored fixture %s for custom normalization: %v", path, err)
+		return false
+	}
+	gotFixture, err := Build(actual, typeName, "", nil)
+	if err != nil {
+		tb.Errorf("golden: encoding actual value for custom normalization: %v", err)
+		return false
+	}
+	var gotTree any
+	if err := json.Unmarshal(gotFixture.Decoded, &gotTree); err != nil {
+		tb.Errorf("golden: decoding actual value for custom normalization: %v", err)
+		return false
+	}
+
+	wantTree = applyNormalizers("", wantTree, g.normalizers)
+	gotTree = applyNormalizers("", gotTree, g.normalizers)
+
+	wantJSON, err := json.MarshalIndent(wantTree, "", "  ")
+	if err != nil {
+		tb.Errorf("golden: rendering normalized fixture %s: %v", path, err)
+		return false
+	}
+	gotJSON, err := json.MarshalIndent(gotTree, "", "  ")
+	if err != nil {
+		tb.Errorf("golden: rendering normalized actual value: %v", err)
+		return false
+	}
+	if bytes.Equal(wantJSON, gotJSON) {
+		return true
+	}
+
+	tb.Errorf("golden: %s is out of date after custom normalization.\n"+
+		"want:\n%s\n\ngot:\n%s\n\n"+
+		"If the change above is intended, re-record it with:\n\n    go test ./... -focus.update\n",
+		path, wantJSON, gotJSON)
+	return false
 }
 
 // maybeStreamDiff emits a streaming diff when the serialized fixture exceeds
@@ -423,6 +481,18 @@ func (g *Golden) write(path string, actual focus.Value, description string) erro
 	fixture, err := Build(actual, g.typeHnt, description, nil)
 	if err != nil {
 		return err
+	}
+	if len(g.normalizers) > 0 {
+		var tree any
+		if err := json.Unmarshal(fixture.Decoded, &tree); err != nil {
+			return fmt.Errorf("normalizing decoded form of %s: %w", path, err)
+		}
+		tree = applyNormalizers("", tree, g.normalizers)
+		normalized, err := json.Marshal(tree)
+		if err != nil {
+			return fmt.Errorf("normalizing decoded form of %s: %w", path, err)
+		}
+		fixture.Decoded = normalized
 	}
 	return SaveAs(path, fixture, g.format)
 }
