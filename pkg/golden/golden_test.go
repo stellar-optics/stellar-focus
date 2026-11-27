@@ -158,6 +158,70 @@ func TestAssertFailureShowsDiffAndRemedy(t *testing.T) {
 	}
 }
 
+// TestWithCustomNormalizerRedactsAMatchingPath checks that a normalizer
+// which blanks out every node whose path mentions "amount" makes two
+// envelopes that genuinely differ only in that amount compare equal.
+func TestWithCustomNormalizerRedactsAMatchingPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stored := buildEnvelope(t, 100)
+	actual := buildEnvelope(t, 200)
+
+	fixture, err := golden.Build(stored, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	redactAmounts := golden.WithCustomNormalizer(func(path string, value any) any {
+		if strings.Contains(strings.ToLower(path), "amount") {
+			return "REDACTED"
+		}
+		return value
+	})
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), redactAmounts)
+	if !g.Assert("env", actual) {
+		t.Errorf("custom normalizer did not redact the differing amount:\n%s", tb.Output())
+	}
+}
+
+// TestWithCustomNormalizerStillCatchesOtherDifferences checks that a
+// normalizer narrowly targeting one path leaves every other difference to
+// fail the comparison as usual.
+func TestWithCustomNormalizerStillCatchesOtherDifferences(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stored := buildEnvelopeSeq(t, 111, 100)
+	actual := buildEnvelopeSeq(t, 222, 200)
+
+	fixture, err := golden.Build(stored, "TransactionEnvelope", "", nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if err := golden.Save(filepath.Join(dir, "env.golden.json"), fixture); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	redactSequence := golden.WithCustomNormalizer(func(path string, value any) any {
+		if strings.Contains(strings.ToLower(path), "seqnum") {
+			return "REDACTED"
+		}
+		return value
+	})
+
+	tb := faketb.New()
+	g := golden.New(tb, golden.WithDir(dir), redactSequence)
+	if g.Assert("env", actual) {
+		t.Fatal("Assert() passed even though the amount, which the normalizer does not touch, differs")
+	}
+}
+
 // TestRequireStopsTheTestOnFailure is the fatal counterpart of Assert: the
 // same diagnostic, delivered as one fatal message so a test that stops
 // still shows the reader everything.
