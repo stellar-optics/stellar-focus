@@ -103,7 +103,10 @@ func writeTOMLTableContent(buf *bytes.Buffer, prefix string, m map[string]any) {
 
 	// Pass 2: Nested sub-tables.
 	for _, k := range subTables {
-		subMap := m[k].(map[string]any)
+		subMap, ok := m[k].(map[string]any)
+		if !ok {
+			continue
+		}
 		subPrefix := formatTOMLTablePath(prefix, k)
 		buf.WriteString("\n[" + subPrefix + "]\n")
 		writeTOMLTableContent(buf, subPrefix, subMap)
@@ -111,10 +114,16 @@ func writeTOMLTableContent(buf *bytes.Buffer, prefix string, m map[string]any) {
 
 	// Pass 3: Arrays of tables.
 	for _, k := range arrayTables {
-		arr := m[k].([]any)
+		arr, ok := m[k].([]any)
+		if !ok {
+			continue
+		}
 		tablePath := formatTOMLTablePath(prefix, k)
 		for _, item := range arr {
-			subMap := item.(map[string]any)
+			subMap, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
 			buf.WriteString("\n[[" + tablePath + "]]\n")
 			writeTOMLTableContent(buf, tablePath, subMap)
 		}
@@ -158,7 +167,7 @@ func isBareTOMLKey(key string) bool {
 		return false
 	}
 	for _, r := range key {
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '_' && r != '-' {
 			return false
 		}
 	}

@@ -180,20 +180,10 @@ func captureBatchCmd(ctx context.Context, cfg *config, stdout, stderr io.Writer)
 	}
 
 	// Upon successful completion of all items in the batch, automatically delete the checkpoint file.
-	_ = capture.DeleteCheckpoint(checkpointPath)
+	if err := capture.DeleteCheckpoint(checkpointPath); err != nil {
+		fmt.Fprintf(stderr, "warning: %v\n", err)
+	}
 	return nil
-}
-
-// captureBatch captures every entry of a batch, a few at a time.
-func captureBatch(
-	ctx context.Context,
-	src capture.Source,
-	entries []batchEntry,
-	cfg *config,
-	limiter *capture.Limiter,
-	reporter *batchReporter,
-) {
-	captureBatchWithCheckpoint(ctx, src, entries, cfg, limiter, reporter, nil, "")
 }
 
 // captureBatchWithCheckpoint captures every entry of a batch with resume & checkpointing support.
@@ -231,7 +221,11 @@ func captureBatchWithCheckpoint(
 
 				if outcome.err == nil && !outcome.skipped && checkpointPath != "" {
 					cpMu.Lock()
-					_ = capture.AppendCheckpoint(checkpointPath, entry.hash)
+					if err := capture.AppendCheckpoint(checkpointPath, entry.hash); err != nil {
+						reporter.mu.Lock()
+						fmt.Fprintf(reporter.stderr, "warning: %v\n", err)
+						reporter.mu.Unlock()
+					}
 					cpMu.Unlock()
 				}
 			}

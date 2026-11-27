@@ -330,6 +330,43 @@ func (g *Golden) assert(
 	return ok
 }
 
+func (g *Golden) trackIgnoreRule(pattern, location string) {
+	g.trackedRules = append(g.trackedRules, &TrackedIgnoreRule{
+		Pattern:  pattern,
+		Location: location,
+		Hits:     0,
+	})
+}
+
+// TrackedRules returns the ignore rules tracked by this Golden instance.
+func (g *Golden) TrackedRules() []*TrackedIgnoreRule {
+	return g.trackedRules
+}
+
+// checkTrackedRules evaluates differences between stored and fresh payloads and counts rule hits.
+func (g *Golden) checkTrackedRules(typeName, wantXDR string, actual focus.Value) {
+	stored, err1 := lens.DecodeAs(wantXDR, typeName)
+	encodedActual, _, encErr := focus.Encode(actual, typeName)
+	if encErr != nil {
+		return
+	}
+	fresh, err2 := lens.DecodeAs(encodedActual, typeName)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	diff, err := lens.Diff(stored, fresh)
+	if err != nil || len(diff.Changes) == 0 {
+		return
+	}
+	for _, ch := range diff.Changes {
+		for _, r := range g.trackedRules {
+			if focus.MatchPath(r.Pattern, ch.Path) {
+				r.Hits++
+			}
+		}
+	}
+}
+
 // maybeStreamDiff emits a streaming diff when the serialized fixture exceeds
 // streamThreshold bytes. It is a best-effort hint: errors are logged but do
 // not cause the test to fail twice.

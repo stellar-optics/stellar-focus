@@ -218,9 +218,11 @@ func FetchRemoteWithCache(ctx context.Context, provider RemoteStorageProvider, u
 		return nil, err
 	}
 
-	// Persist to local cache.
+	// Persist to local cache. Caching is best-effort: a failed write only
+	// means the next read fetches the object from the remote again.
 	if err := os.MkdirAll(filepath.Dir(cacheFile), 0o755); err == nil {
-		_ = os.WriteFile(cacheFile, data, 0o600)
+		//nolint:errcheck // a cache write failure must not fail the read.
+		os.WriteFile(cacheFile, data, 0o600)
 	}
 
 	return data, nil

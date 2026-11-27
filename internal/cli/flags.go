@@ -56,6 +56,7 @@ const (
 	keyForce        = "force"
 	keyMask         = "mask-addresses"
 	keyBatch        = "batch"
+	keyResume       = "resume"
 	keyConcurrency  = "concurrency"
 	keyRate         = "rate"
 	keyOutFile      = "out-file"
