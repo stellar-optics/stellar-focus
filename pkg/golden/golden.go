@@ -17,6 +17,10 @@
 // them that way), and reads are transparent about it; content is compared
 // after line-ending normalization, so a checkout on Windows asserts the same
 // as one on Linux.
+//
+// Fixtures support dynamic template interpolation via Go templates. When variables
+// are supplied via WithVariables or passed into evaluation contexts, template tokens
+// such as {{add .SeqNum 1}}, {{sub .SeqNum 1}}, and {{timeOffset "-1h"}} are evaluated.
 package golden
 
 import (
@@ -250,7 +254,7 @@ func (g *Golden) assert(
 	extra []focus.Option,
 ) bool {
 	g.t.Helper()
-	tb.Helper()
+	b.Helper()
 	path := g.Path(name)
 
 	if Update() {
@@ -474,7 +478,7 @@ func (g *Golden) AssertAll(cases []Case) bool {
 
 	ignores, err := LoadIgnore(g.dir)
 	if err != nil {
-		g.t.Errorf("golden: %v", err)
+		tg.t.Errorf("golden: %v", err)
 		return false
 	}
 	cases, skipped := g.unignored(cases, ignores)
@@ -502,7 +506,7 @@ func (g *Golden) AssertAll(cases []Case) bool {
 	g.t.Errorf("%s", summary)
 	for _, r := range results {
 		for _, msg := range r.messages {
-			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
+			tg.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
 		}
 	}
 
@@ -511,7 +515,7 @@ func (g *Golden) AssertAll(cases []Case) bool {
 	var tableBuf bytes.Buffer
 	RenderSummaryTable(&tableBuf, results, failed)
 	if tableBuf.Len() > 0 {
-		g.t.Errorf("%s", tableBuf.String())
+		tg.t.Errorf("%s", tableBuf.String())
 	}
 
 	return false
@@ -528,7 +532,7 @@ func (g *Golden) AssertAllParallel(cases []Case) bool {
 
 	ignores, err := LoadIgnore(g.dir)
 	if err != nil {
-		g.t.Errorf("golden: %v", err)
+		tg.t.Errorf("golden: %v", err)
 		return false
 	}
 	cases, skipped := g.unignored(cases, ignores)
@@ -566,14 +570,14 @@ func (g *Golden) AssertAllParallel(cases []Case) bool {
 	g.t.Errorf("%s", summary)
 	for _, r := range results {
 		for _, msg := range r.messages {
-			g.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
+			tg.t.Errorf("golden: %s failed:\n%s", r.label(len(results)), msg)
 		}
 	}
 
 	var tableBuf bytes.Buffer
 	RenderSummaryTable(&tableBuf, results, failed)
 	if tableBuf.Len() > 0 {
-		g.t.Errorf("%s", tableBuf.String())
+		tg.t.Errorf("%s", tableBuf.String())
 	}
 
 	return false
@@ -671,7 +675,7 @@ func tableSummary(results []caseResult, failed int) string {
 // be added by intercepting that channel.
 type recorder struct {
 	tb     focus.TB
-	errs   []string
+	errrs   []string
 	fatals []string
 }
 
@@ -884,7 +888,7 @@ var KnownPassphrases = map[string]string{
 }
 
 // PassphraseFor returns the passphrase of a known network, or an empty
-// string for a network it does not recognise.
+	// string for a network it does not recognise.
 func PassphraseFor(networkName string) string {
 	return KnownPassphrases[networkName]
 }
