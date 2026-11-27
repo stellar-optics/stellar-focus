@@ -712,6 +712,20 @@ func ClaimableBalanceCreated(t focus.TB, meta, claimant focus.Value, amount int6
 	focus.AssertClaimableBalanceCreated(fatal(t), meta, claimant, amount)
 }
 
+// ClaimableBalanceID is focus.AssertClaimableBalanceID, stopping the test on
+// failure.
+func ClaimableBalanceID(t focus.TB, result xdr.OperationResult, wantID focus.Value, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertClaimableBalanceID(fatal(t), result, wantID, opts...)
+}
+
+// ContractWasmHash is focus.AssertContractWasmHash, stopping the test on
+// failure.
+func ContractWasmHash(t focus.TB, op xdr.Operation, wantHash [32]byte, opts ...focus.Option) {
+	t.Helper()
+	focus.AssertContractWasmHash(fatal(t), op, wantHash, opts...)
+}
+
 // AccountDataEqual is focus.AssertAccountDataEqual, stopping the test on
 // failure.
 func AccountDataEqual(t focus.TB, meta focus.Value, key string, value focus.Value) {
