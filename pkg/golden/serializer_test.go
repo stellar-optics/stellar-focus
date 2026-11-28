@@ -18,7 +18,7 @@ import (
 // goldenFormats is every format a fixture can be stored in. Tests that state a
 // property of "the serializers" table over it, so a fourth format cannot be
 // added without being held to the same promises.
-var goldenFormats = []golden.Format{golden.JSON, golden.YAML, golden.Text}
+var goldenFormats = []golden.Format{golden.JSON, golden.YAML, golden.Text, golden.TOML}
 
 // capturedFixture is a fixture with everything a real one carries: provenance,
 // a description, and the decoded tree lens renders for a reviewer.
@@ -82,7 +82,9 @@ func TestParseFormat(t *testing.T) {
 		{name: "yml", want: golden.YAML},
 		{name: "text", want: golden.Text},
 		{name: "txt", want: golden.Text},
-		{name: "toml", wantErr: true},
+		{name: "toml", want: golden.TOML},
+		{name: "TOML", want: golden.TOML},
+		{name: "invalid", wantErr: true},
 		{name: "", wantErr: true},
 	}
 
@@ -123,6 +125,7 @@ func TestFormatSuffixAndName(t *testing.T) {
 		{format: golden.JSON, name: "json", suffix: ".golden.json"},
 		{format: golden.YAML, name: "yaml", suffix: ".golden.yaml"},
 		{format: golden.Text, name: "text", suffix: ".golden.txt"},
+		{format: golden.TOML, name: "toml", suffix: ".golden.toml"},
 	}
 
 	for _, tc := range tests {
@@ -148,6 +151,9 @@ func TestFormatForPath(t *testing.T) {
 		{path: "testdata/env.yml", want: golden.YAML},
 		{path: "testdata/ENV.YAML", want: golden.YAML},
 		{path: "testdata/env.golden.txt", want: golden.Text},
+		{path: "testdata/env.golden.toml", want: golden.TOML},
+		{path: "testdata/env.toml", want: golden.TOML},
+		{path: "testdata/ENV.TOML", want: golden.TOML},
 		// A path written before the other formats existed, or with no
 		// extension at all, is still JSON.
 		{path: "testdata/env", want: golden.JSON},
@@ -549,12 +555,12 @@ func TestLoadAsAndSaveAsRejectAnUnknownFormat(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "env.golden.json")
 
-	if err := golden.SaveAs(path, capturedFixture(t), "toml"); err == nil {
+	if err := golden.SaveAs(path, capturedFixture(t), "unsupported_fmt"); err == nil {
 		t.Error("SaveAs accepted an unknown format")
 	}
-	if _, err := golden.LoadAs(path, "toml"); err == nil {
+	if _, err := golden.LoadAs(path, "unsupported_fmt"); err == nil {
 		t.Error("LoadAs accepted an unknown format")
-	} else if !strings.Contains(err.Error(), "toml") {
+	} else if !strings.Contains(err.Error(), "unsupported_fmt") {
 		t.Errorf("error does not name the format: %v", err)
 	}
 }

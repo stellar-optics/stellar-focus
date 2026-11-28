@@ -61,10 +61,12 @@ const (
 	// repository size matters more than git-diff readability.
 	// Files ending in .min.json or .compact.json are auto-detected as Compact.
 	Compact Format = "compact"
+	// TOML is readable, zero-heavy-dependency TOML serialization.
+	TOML Format = "toml"
 )
 
 // ParseFormat converts a format name into a Format, accepting "json", "yaml"
-// (or "yml"), "text" (or "txt") and "compact", case-insensitively.
+// (or "yml"), "text" (or "txt"), "compact" and "toml", case-insensitively.
 func ParseFormat(name string) (Format, error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "json":
@@ -75,9 +77,11 @@ func ParseFormat(name string) (Format, error) {
 		return Text, nil
 	case "compact":
 		return Compact, nil
+	case "toml":
+		return TOML, nil
 	default:
-		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
-			name, JSON, YAML, Text, Compact)
+		return "", fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q, %q and %q",
+			name, JSON, YAML, Text, Compact, TOML)
 	}
 }
 
@@ -96,6 +100,8 @@ func (f Format) DefaultSuffix() string {
 		return ".golden.txt"
 	case Compact:
 		return ".min.json"
+	case TOML:
+		return ".golden.toml"
 	default:
 		return ".golden.json"
 	}
@@ -117,6 +123,8 @@ func FormatForPath(path string) Format {
 		return YAML
 	case ".txt":
 		return Text
+	case ".toml":
+		return TOML
 	default:
 		return JSON
 	}
@@ -147,9 +155,11 @@ func SerializerFor(format Format) (Serializer, error) {
 		return textSerializer{}, nil
 	case Compact:
 		return compactJSONSerializer{}, nil
+	case TOML:
+		return tomlSerializer{}, nil
 	default:
-		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q and %q",
-			format, JSON, YAML, Text, Compact)
+		return nil, fmt.Errorf("unknown fixture format %q; supported formats are %q, %q, %q, %q and %q",
+			format, JSON, YAML, Text, Compact, TOML)
 	}
 }
 
@@ -162,6 +172,8 @@ func SerializerForPath(path string) Serializer {
 		return textSerializer{}
 	case Compact:
 		return compactJSONSerializer{}
+	case TOML:
+		return tomlSerializer{}
 	default:
 		return jsonSerializer{}
 	}

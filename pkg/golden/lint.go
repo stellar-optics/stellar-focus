@@ -288,3 +288,34 @@ func lineOfField(raw []byte, field string) int {
 	}
 	return 0
 }
+
+// DetectStaleRules evaluates tracked ignore rules and returns any that recorded 0 hits.
+func DetectStaleRules(rules []*TrackedIgnoreRule) []*TrackedIgnoreRule {
+	var stale []*TrackedIgnoreRule
+	for _, r := range rules {
+		if r.Hits == 0 {
+			stale = append(stale, r)
+		}
+	}
+	return stale
+}
+
+// FormatStaleRuleWarning formats a warning log for an un-triggered ignore rule.
+// E.g.: "WARNING: ignore rule 'tx.time_bounds.max_time' was never matched in payment_test.go:42"
+func FormatStaleRuleWarning(pattern, location string) string {
+	return fmt.Sprintf("WARNING: ignore rule '%s' was never matched in %s", pattern, location)
+}
+
+// PruneReport formats a clean fixture report recommending removal of obsolete ignore rules.
+func PruneReport(staleRules []*TrackedIgnoreRule) string {
+	if len(staleRules) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Fixture Ignore Rules Pruning Report:\n")
+	b.WriteString("The following ignore rules recorded 0 matches and are recommended for removal:\n")
+	for _, r := range staleRules {
+		fmt.Fprintf(&b, "  - %s (registered at %s)\n", r.Pattern, r.Location)
+	}
+	return b.String()
+}

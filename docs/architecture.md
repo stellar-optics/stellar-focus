@@ -75,7 +75,9 @@ pkg/focus/
   require/audit.go    AST parity audit between focus and require
 pkg/golden/           golden files, -focus.update
   golden.go         the Golden type: Assert, AssertAll, Build, Load, Save
-  lint.go           static checks on a stored fixture
+  lint.go           static checks on a stored fixture, stale ignore rule detection
+  options.go        options for Golden fixtures and tracked ignore rules
+  toml_serializer.go zero-dependency TOML serializer and parser
 pkg/fuzz/             seed corpora for downstream fuzzers
   fuzz.go            embedded corpus: Corpus, CorpusFor, Types
   testdata/          the captured mainnet XDR the corpus is built from
@@ -83,7 +85,8 @@ pkg/capture/
   capture.go        Source interface, RPC impl, Verify  ← seam: new sources
   rpc.go            the Soroban RPC Source
   horizon.go        the Horizon Source
-  file_source.go    a Source over a directory of XDR dumps, for offline use
+  file_source.go    a Source over local dumps or remote S3/GCS buckets
+  remote_source.go  remote object storage abstraction for S3 and GCS, caching to .focus/cache
   archive_source.go the history archive Source, and RPC-then-archive fallback
   sanitize.go       masking of memos, data values and secret keys at capture
   cache.go          Scraper: rate-limited fetches, .focus/cache
@@ -848,9 +851,9 @@ A case's options are merged over the suite's rather than replacing them:
 focus options accumulate, so a case can add to what the suite already asks
 for without dropping it.
 
-### Fixtures in JSON, YAML or text
+### Fixtures in JSON, YAML, text or TOML
 
-That data has three spellings, and `pkg/golden/serializer.go` is the seam
+That data has four spellings, and `pkg/golden/serializer.go` is the seam
 between them. Everything above the serializer — `Assert`, a failing diff,
 `focus verify` — works with a `*golden.Fixture` and never learns which file it
 came from:
@@ -868,11 +871,14 @@ type Serializer interface {
 | `json` | indented JSON, the default | `encoding/json` |
 | `yaml` | block-style YAML | the subset below |
 | `text` | one `dotted.path: value` leaf per line | dotted paths unflattened |
+| `toml` | standard TOML (tables, arrays of tables, strings) | zero-dependency TOML parser |
 
 The text form uses the vocabulary lens already names a changed field with, so a
 fixture reads like the failure message that produced it and
 grep `Operations\[0\]` finds an operation without a parser in the loop. YAML is
-the same tree in the shape a human hand-edits.
+the same tree in the shape a human hand-edits. TOML organizes the fixture into
+tables and arrays of tables, preserving numeric fidelity and multiline strings
+cleanly.
 
 **The format is a property of the file name, not of the package.** `Save` and
 `Load` take the extension (`FormatForPath`), `WithFormat` sets it for a `Golden`
@@ -880,7 +886,7 @@ and moves the default suffix with it, and `LoadAs`/`SaveAs` take it explicitly.
 An unrecognised extension is read as JSON, so every fixture written before
 these formats existed still loads.
 
-Two properties hold for all three, and are tested as such:
+Two properties hold for all four formats, and are tested as such:
 
 - **Deterministic.** No clock, no network, and no map iteration order reaches
 the output — decoded keys are sorted, and the fixture's own fields are written
@@ -890,6 +896,16 @@ in a fixed order — so the same fixture always produces the same bytes.
   runs collapse, and the file ends with exactly one newline. A CRLF checkout or
   a stray trailing space cannot become diff noise, and the readers normalize
   what they read for the same reason.
+
+### Auto-repairing and pruning obsolete ignore rules
+
+Over time, ignore rules added to fixtures during active development or schema migrations
+may become obsolete when upstream fields stabilize or disappear. The `-focus.prune-ignores`
+test flag enables auto-repair analysis:
+- Tracks ignore rule invocations (`golden.WithIgnorePaths`) along with the calling file and line.
+- Evaluates which ignore rules matched discrepancies during golden assertions.
+- Emits actionable warnings (`WARNING: ignore rule '<pattern>' was never matched in <file>:<line>`)
+  and generates a summary prune report highlighting stale rules for removal.
 
 ### Why the YAML is a documented subset
 
@@ -990,9 +1006,13 @@ rule holds:
   default endpoint per network, because an RPC endpoint and a Horizon
   endpoint are different services.
 - `capture.FileSource` (`pkg/capture/file_source.go`) replays dumps from a
-  directory — `{hash}.{envelope,result,meta}.xdr` and `{key}.entry.xdr` —
-  so a fixture can be captured or verified with no network at all. The CLI
-  selects it with `--file-source <dir>`.
+  local directory or remote object storage (`s3://bucket/prefix`, `gs://bucket/prefix`)
+  — `{hash}.{envelope,result,meta}.xdr` and `{key}.entry.xdr` —
+  so a fixture can be captured or verified offline or from shared cloud buckets.
+  Remote fetches use standard credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`
+  or `GOOGLE_APPLICATION_CREDENTIALS`), cache objects locally under `.focus/cache/remote/`,
+  and gracefully fall back offline if credentials are unavailable. The CLI
+  selects it with `--file-source <dir-or-uri>`.
 - `capture.ArchivalSource` (`pkg/capture/archive_source.go`) reads a
   history archive's checkpoint files. An archive is not indexed by hash, so
   it implements the optional `LedgerTransactionSource` and needs the ledger
@@ -1066,6 +1086,12 @@ with a small pool of workers. Two things follow from that shape:
 `--concurrency` caps how many captures are in flight at once and `--rate`
 spaces them out, using the same `capture.Limiter` the rest of the capture
 path uses.
+
+When `--resume` is supplied, batch captures support checkpointing across runs:
+- Completed transaction captures are recorded incrementally to `.focus/batch_<hash>.checkpoint`.
+- On interruption (e.g. `SIGINT`/`SIGTERM`) or process termination, progress is preserved.
+- Re-running with `--resume` inspects the checkpoint and skips already captured transactions.
+- Once all transactions in the batch are processed, the checkpoint file is cleanly deleted.
 
 ### Encoding a fixture offline
 

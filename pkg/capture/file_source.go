@@ -33,16 +33,48 @@ import (
 // bytes. Files that are missing are skipped, so a dump with only an envelope
 // serves only an envelope.
 type FileSource struct {
-	dir     string
-	network string
+	dir            string
+	network        string
+	isRemote       bool
+	remoteProvider RemoteStorageProvider
+	cacheDir       string
 }
 
 // NewFileSource returns a Source that reads XDR dumps from dir.
+// If dir starts with s3:// or gs://, FileSource operates as a remote reader,
+// downloading objects to .focus/cache/ on demand.
 //
 // The source reports NetworkCustom until ForNetwork names the network the
 // dumps were taken from.
 func NewFileSource(dir string) *FileSource {
-	return &FileSource{dir: filepath.Clean(dir), network: NetworkCustom}
+	if IsRemoteURI(dir) {
+		return &FileSource{
+			dir:      strings.TrimSuffix(dir, "/"),
+			network:  NetworkCustom,
+			isRemote: true,
+			cacheDir: DefaultCacheDir,
+		}
+	}
+	return &FileSource{dir: filepath.Clean(dir), network: NetworkCustom, cacheDir: DefaultCacheDir}
+}
+
+// IsRemoteURI reports whether uri specifies an s3:// or gs:// cloud bucket.
+func IsRemoteURI(uri string) bool {
+	return strings.HasPrefix(uri, "s3://") || strings.HasPrefix(uri, "gs://")
+}
+
+// WithRemoteProvider overrides the remote storage provider (e.g. for testing with mock servers).
+func (s *FileSource) WithRemoteProvider(provider RemoteStorageProvider) *FileSource {
+	out := *s
+	out.remoteProvider = provider
+	return &out
+}
+
+// WithCacheDir overrides the local cache directory for remote downloads.
+func (s *FileSource) WithCacheDir(dir string) *FileSource {
+	out := *s
+	out.cacheDir = dir
+	return &out
 }
 
 // ForNetwork returns a copy of the source that reports the given network,
@@ -86,9 +118,16 @@ func (s *FileSource) Transaction(ctx context.Context, hash string) ([]Record, er
 
 	var out []Record
 	for _, part := range fileSourceParts {
-		path := filepath.Join(s.dir, hash+"."+part.name+".xdr")
-		payload, err := readXDRFile(path)
-		if errors.Is(err, fs.ErrNotExist) {
+		var payload string
+		var err error
+		fileName := hash + "." + part.name + ".xdr"
+		if s.isRemote {
+			payload, err = s.readRemoteXDR(ctx, s.dir+"/"+fileName)
+		} else {
+			path := filepath.Join(s.dir, fileName)
+			payload, err = readXDRFile(path)
+		}
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotFound) {
 			continue
 		}
 		if err != nil {
@@ -118,9 +157,14 @@ func (s *FileSource) LedgerEntry(ctx context.Context, key string) ([]Record, err
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(s.dir, name)
-	payload, err := readXDRFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
+	var payload string
+	if s.isRemote {
+		payload, err = s.readRemoteXDR(ctx, s.dir+"/"+name)
+	} else {
+		path := filepath.Join(s.dir, name)
+		payload, err = readXDRFile(path)
+	}
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, ErrNotFound) {
 		return nil, fmt.Errorf("ledger key %s: %w (no %s in %s)", key, ErrNotFound, name, s.dir)
 	}
 	if err != nil {
@@ -132,6 +176,33 @@ func (s *FileSource) LedgerEntry(ctx context.Context, key string) ([]Record, err
 		XDR:         payload,
 		Description: "ledger entry " + key,
 	}}, nil
+}
+
+func (s *FileSource) readRemoteXDR(ctx context.Context, uri string) (string, error) {
+	provider := s.remoteProvider
+	if provider == nil {
+		var err error
+		provider, err = DispatchRemoteProvider(uri)
+		if err != nil {
+			return "", err
+		}
+	}
+	data, err := FetchRemoteWithCache(ctx, provider, uri, s.cacheDir)
+	if err != nil {
+		return "", err
+	}
+	return parseXDRBytes(data, uri)
+}
+
+func parseXDRBytes(data []byte, path string) (string, error) {
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	if _, err := base64.StdEncoding.DecodeString(text); err == nil {
+		return text, nil
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
 }
 
 // LedgerEntryFileName returns the name FileSource reads a ledger entry from:
@@ -156,12 +227,5 @@ func readXDRFile(path string) (string, error) {
 		}
 		return "", fmt.Errorf("reading %s: %w", path, err)
 	}
-	text := strings.TrimSpace(string(data))
-	if text == "" {
-		return "", fmt.Errorf("%s is empty", path)
-	}
-	if _, err := base64.StdEncoding.DecodeString(text); err == nil {
-		return text, nil
-	}
-	return base64.StdEncoding.EncodeToString(data), nil
+	return parseXDRBytes(data, path)
 }

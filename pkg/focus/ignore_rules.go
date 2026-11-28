@@ -27,6 +27,11 @@ import "strings"
 // because remembering to write the index for the only entry a field has is
 // exactly the kind of detail that should not be load-bearing in a test.
 
+// MatchPath reports whether a path matches an ignore pattern.
+func MatchPath(pattern, path string) bool {
+	return matchPath(pattern, path)
+}
+
 // matchPath reports whether a path matches a pattern.
 func matchPath(pattern, path string) bool {
 	pat := strings.Split(pattern, ".")
